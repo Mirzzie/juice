@@ -69,14 +69,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy_juice_shop
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Run Semgrep container scan
         run: |
           docker run --rm -v ${{ github.workspace }}:/src returntocorp/semgrep --config=p/ci --json --output=/src/semgrep-results.json
 
       - name: Upload Semgrep report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep-results.json
@@ -90,7 +90,7 @@ jobs:
         with:
           target: http://${{ env.SSH_HOST }}:${{ env.JUICE_SHOP_PORT }}
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: zap-report
           path: zap_report.html
@@ -112,11 +112,11 @@ jobs:
       - dast_owasp_zap
       - monitor_iast
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: semgrep-results
 
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: zap-report
 
