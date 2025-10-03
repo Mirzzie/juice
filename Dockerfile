@@ -1,0 +1,1 @@
+FROM  bkimminich/juice-shop:latest
