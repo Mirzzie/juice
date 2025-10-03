@@ -94,9 +94,8 @@ jobs:
               -e DD_ENV=staging \
               -e DD_SERVICE=juice-shop \
               -e DD_VERSION=${{ env.TAG }} \
-              -v /var/run/docker.sock:/var/run/docker.sock \
-              datadog/dd-apm-node:${{ env.TAG }} \
-              --app $IMAGE_NAME:latest
+              -e DD_IAST_ENABLED=true \
+              ${{ env.IMAGE_NAME }}:latest
 
             echo "[*] Deployment complete."
             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
@@ -107,7 +106,7 @@ jobs:
         uses: zaproxy/action-full-scan@v0.8.0
         with:
           target: "http://${{ secrets.SSH_HOST }}:3000"
-          rules_file_name: ".zap/rules.tsv"   # optional custom rules
+          rules_file_name: ".zap/rules.tsv" # optional custom rules
           cmd_options: "-a"
 
       # === IAST (Datadog) ===
