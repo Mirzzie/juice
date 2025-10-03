@@ -1,4 +1,4 @@
-name: Juice Shop DevSecOps Pipeline with Datadog IAST
+name: Juice Shop DevSecOps Pipeline with Datadog Agent & IAST
 
 on:
   push:
@@ -9,107 +9,117 @@ on:
       - main
 
 env:
-  SSH_HOST: ${{ secrets.SSH_HOST }} # EC2 instance public IP/DNS
-  SSH_USER: ${{ secrets.SSH_USER }} # SSH user for EC2
-  SSH_KEY: ${{ secrets.SSH_KEY }} # SSH private key
+  SSH_HOST: ${{ secrets.SSH_HOST }}
+  SSH_USER: ${{ secrets.SSH_USER }}
+  SSH_KEY: ${{ secrets.SSH_KEY }}
   JUICE_SHOP_PORT: 3000
+  DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+  DD_SITE: us5.datadoghq.com
 
 jobs:
-  build_and_deploy:
-    name: Build and Deploy Juice Shop on EC2 with IAST enabled
+  setup_datadog_agent:
+    name: Install and Start Datadog Agent on EC2
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build Docker image
-        run: docker build -t juice-shop:latest .
-
-      - name: Prepare SSH
+      - name: Prepare SSH for EC2
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Juice Shop container with Datadog IAST enabled
+      - name: Install and start Datadog Agent on EC2 using official script
+        run: ssh -i ~/.ssh/id_rsa ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
+          DD_API_KEY=${{ secrets.DD_API_KEY }} DD_SITE=${{ env.DD_SITE }} bash -c "\$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+          systemctl enable datadog-agent
+          systemctl start datadog-agent
+          systemctl status datadog-agent
+          EOF
+
+  deploy_juice_shop:
+    name: Run Official Juice Shop Container with Datadog IAST
+    runs-on: ubuntu-latest
+    needs: setup_datadog_agent
+    steps:
+      - name: Prepare SSH for EC2
         run: |
-          ssh -i ~/.ssh/id_rsa ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << 'EOF'
-            docker stop juice-shop || true
-            docker rm juice-shop || true
-            # Use official juice-shop image or your built image
-            # Run container with Datadog IAST enabled environment variable DD_IAST_ENABLED=true
-            docker run -d -p ${{ env.JUICE_SHOP_PORT }}:3000 --name juice-shop -e DD_IAST_ENABLED=true bkimminich/juice-shop
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Juice Shop with Datadog IAST environment variables
+        run: ssh -i ~/.ssh/id_rsa ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+          docker run -d -p ${{ env.JUICE_SHOP_PORT }}:3000 --name juice-shop \\
+          -e DD_IAST_ENABLED=true \\
+          -e DD_AGENT_HOST=localhost \\
+          -e DD_TRACE_AGENT_PORT=8126 \\
+          -e DD_ENV=ci \\
+          -e DD_SERVICE=juice-shop \\
+          -e DD_VERSION=1.0 \\
+          -e DD_LOGS_ENABLED=true \\
+          -e DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true \\
+          bkimminich/juice-shop
           EOF
 
   sast_semgrep:
-    name: Run Semgrep SAST
+    name: Run Semgrep Static Analysis
     runs-on: ubuntu-latest
-    needs: build_and_deploy
+    needs: deploy_juice_shop
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: Install Semgrep
-        run: pip install semgrep
+      - name: Run Semgrep container scan
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/src returntocorp/semgrep --config=p/ci --json --output=/src/semgrep-results.json
 
-      - name: Run Semgrep scan
-        run: semgrep --config=p/ci --json --output=semgrep-results.json
-
-      - name: Upload Semgrep results
+      - name: Upload Semgrep report
         uses: actions/upload-artifact@v3
         with:
           name: semgrep-results
           path: semgrep-results.json
 
   dast_owasp_zap:
-    name: Run OWASP ZAP DAST
+    name: Run OWASP ZAP Dynamic Scan
     runs-on: ubuntu-latest
-    needs: build_and_deploy
+    needs: deploy_juice_shop
     steps:
-      - name: Run OWASP ZAP full scan
-        uses: zaproxy/action-full-scan@v0.5.0
+      - uses: zaproxy/action-full-scan@v0.5.0
         with:
           target: http://${{ env.SSH_HOST }}:${{ env.JUICE_SHOP_PORT }}
 
-      - name: Upload ZAP report
-        uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v3
         with:
           name: zap-report
           path: zap_report.html
 
-  iast_datadog_monitoring:
-    name: Monitor Datadog Runtime Security Findings
+  monitor_iast:
+    name: Datadog IAST Monitoring Reminder
     runs-on: ubuntu-latest
-    needs: build_and_deploy
+    needs: deploy_juice_shop
     steps:
-      - name: Reminder to monitor Datadog IAST findings
+      - name: Reminder to monitor Datadog IAST dashboard
         run: |
-          echo "Datadog Runtime Code Analysis is enabled in the Juice Shop container."
-          echo "Review vulnerability detections and runtime findings in the Datadog Security Platform dashboard."
+          echo "Datadog Runtime Code Analysis (IAST) enabled. View vulnerabilities on the Datadog Security platform dashboard."
 
-  summarize_results:
-    name: Summary and Reporting
+  summary:
+    name: Summarize Reports
     runs-on: ubuntu-latest
     needs:
       - sast_semgrep
       - dast_owasp_zap
-      - iast_datadog_monitoring
+      - monitor_iast
     steps:
-      - name: Download Semgrep results
-        uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v3
         with:
           name: semgrep-results
 
-      - name: Download ZAP report
-        uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v3
         with:
           name: zap-report
 
-      - name: Output summary
-        run: |
-          echo "SAST and DAST reports downloaded."
-          echo "Check Datadog Console for Runtime Code Analysis IAST results."
+      - run: |
+          echo "Static and dynamic analysis reports downloaded."
+          echo "Review runtime vulnerability findings on Datadog dashboard."
