@@ -93,7 +93,7 @@ jobs:
               -e DD_IAST_ENABLED=true \
               -e DD_LOGS_INJECTION=true \
               -e NODE_OPTIONS="--require dd-trace/init" \
-              ${{ env.IMAGE_NAME }}:${{ env.TAG }
+              ${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
             until curl -s http://localhost:3000 > /dev/null; do
               echo "Waiting for Juice Shop to start..."
