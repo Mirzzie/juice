@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: "mirzzie/my-juice-shop-ddtrace" # Your custom image name with dd-trace installed
+  IMAGE_NAME: "mirzzie/juice-shop" # Your custom image name with dd-trace installed
   TAG: "latest"
   PORT: 3000
 
