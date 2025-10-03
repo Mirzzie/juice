@@ -17,11 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
     container:
       image: semgrep/semgrep
-    if: (github.actor != 'dependabot[bot]')
     steps:
       - uses: actions/checkout@v4
       - run: semgrep ci
@@ -39,50 +36,38 @@ jobs:
           echo "$PWD/bin" >> $GITHUB_PATH
       - name: Trivy filesystem scan
         run: trivy fs --format json --output trivy-fs-report.json .
-      - name: Trivy image scan
-        run: trivy image --format json --output trivy-image-report.json bkimminich/juice-shop:latest || true
       - name: Upload Trivy reports
         uses: actions/upload-artifact@v4
         with:
           name: trivy-reports
-          path: |
-            trivy-fs-report.json
-            trivy-image-report.json
+          path: trivy-fs-report.json
 
-  # ---------- Build & Push Docker Image ----------
-  build_and_push:
-    name: Build & Push Docker Image
+  # ---------- Build & Push custom Docker image ----------
+  build_and_push_image:
+    name: Build & Push Juice Shop Docker Image
     runs-on: ubuntu-latest
     needs: sbom_and_build
     steps:
       - uses: actions/checkout@v4
-
-      # --- DockerHub login ---
       - name: Login to DockerHub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # --- Build Docker image ---
       - name: Build Docker image
-        run: |
-          docker build -t $IMAGE_NAME:$TAG .
-
-      # --- Push Docker image to Docker Hub ---
+        run: docker build -t $IMAGE_NAME:$TAG .
       - name: Push Docker image
-        run: |
-          docker push $IMAGE_NAME:$TAG
+        run: docker push $IMAGE_NAME:$TAG
 
-  # ---------- Deploy + IAST + DAST ----------
+  # ---------- Deploy + DAST ----------
   deploy_and_security_tests:
-    name: Deploy Juice Shop + IAST + DAST
+    name: Deploy Juice Shop + DAST
     runs-on: ubuntu-latest
-    needs: build_and_push
+    needs: build_and_push_image
     steps:
       - uses: actions/checkout@v4
 
-      # --- SSH Setup ---
+      # SSH Setup
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -90,22 +75,17 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
-      # --- Deploy Juice Shop with Datadog IAST ---
-      - name: Deploy Juice Shop on staging EC2
+      # Deploy container on EC2
+      - name: Deploy Juice Shop on EC2
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             set -e
-
             echo "[*] Cleaning up old containers..."
             docker rm -f juice-shop || true
-
-            echo "[*] Cleaning up dangling images..."
             docker image prune -f
-
-            echo "[*] Pulling latest custom image..."
+            echo "[*] Pulling latest image..."
             docker pull mirzzie/juice-shop:latest
-
-            echo "[*] Running Juice Shop with Datadog IAST enabled..."
+            echo "[*] Running container..."
             docker run -d --name juice-shop \
               -p 3000:3000 \
               -e DD_API_KEY=${DD_API_KEY} \
@@ -127,23 +107,8 @@ jobs:
             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
           EOF
 
-      # --- Run OWASP ZAP DAST Scan ---
+      # Run OWASP ZAP DAST scan
       - name: Run OWASP ZAP DAST Scan
         uses: zaproxy/action-full-scan@v0.8.0
         with:
           target: "http://${{ secrets.SSH_HOST }}:3000"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a"
-
-      # --- Report IAST findings to Datadog ---
-      - name: Report IAST Findings to Datadog
-        run: |
-          curl -X POST "https://api.datadoghq.com/api/v2/appsec/scans" \
-            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "service": "juice-shop",
-              "env": "staging",
-              "version": "latest",
-              "status": "completed"
-            }'
