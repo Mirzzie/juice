@@ -1,128 +1,3 @@
-# name: DevSecOps-Pipeline
-
-# on:
-#   push:
-#     branches: [main]
-#   pull_request:
-#     branches: [main]
-
-# env:
-#   IMAGE_NAME: "mirzzie/juice-shop"
-#   TAG: ${{ github.sha }}
-
-# jobs:
-#   # === SAST ===
-#   semgrep:
-#     name: Run SAST (Semgrep)
-#     runs-on: ubuntu-latest
-#     permissions:
-#       contents: read
-#     env:
-#       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-#     container:
-#       image: semgrep/semgrep
-#     if: (github.actor != 'dependabot[bot]')
-#     steps:
-#       - uses: actions/checkout@v4
-#       - run: semgrep ci
-
-#   # === SCA & SBOM + Build ===
-#   sbom_and_build:
-#     name: SBOM, SCA and Build
-#     runs-on: ubuntu-latest
-#     needs: semgrep
-#     steps:
-#       - uses: actions/checkout@v4
-#       - name: Install Trivy
-#         run: |
-#           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
-#           echo "$PWD/bin" >> $GITHUB_PATH
-#       - name: Build Docker image
-#         run: docker build -t $IMAGE_NAME:${{ env.TAG }} .
-#       - name: Run Trivy filesystem scan (SBOM + SCA)
-#         run: trivy fs --format json --output trivy-fs-report.json .
-#       - name: Scan Docker image with Trivy
-#         run: trivy image --format json --output trivy-image-report.json $IMAGE_NAME:${{ env.TAG }} || true
-#       - name: Login to DockerHub
-#         uses: docker/login-action@v2
-#         with:
-#           username: ${{ secrets.DOCKERHUB_USERNAME }}
-#           password: ${{ secrets.DOCKERHUB_TOKEN }}
-#       - name: Tag & Push Docker image
-#         run: |
-#           docker tag $IMAGE_NAME:${{ env.TAG }} $IMAGE_NAME:latest
-#           docker push $IMAGE_NAME:${{ env.TAG }}
-#           docker push $IMAGE_NAME:latest
-#       - name: Upload Trivy reports
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: trivy-reports
-#           path: |
-#             trivy-fs-report.json
-#             trivy-image-report.json
-
-#   # === Deploy + DAST + IAST ===
-#   deploy_and_security_tests:
-#     name: Deploy to staging & Run DAST + IAST
-#     runs-on: ubuntu-latest
-#     needs: sbom_and_build
-#     steps:
-#       - uses: actions/checkout@v4
-
-#       # SSH + Deployment
-#       - name: Setup SSH key
-#         run: |
-#           mkdir -p ~/.ssh
-#           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
-#           chmod 600 ~/.ssh/id_rsa
-
-#       - name: Deploy Juice Shop on staging EC2
-#         run: |
-#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
-#             set -e
-
-#             echo "[*] Cleaning up old containers..."
-#             docker rm -f juice-shop || true
-
-#             echo "[*] Cleaning up dangling images..."
-#             docker image prune -f
-
-#             echo "[*] Running Juice Shop with Datadog IAST..."
-#             docker run -d --name juice-shop \
-#               -p 3000:3000 \
-#               -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
-#               -e DD_ENV=staging \
-#               -e DD_SERVICE=juice-shop \
-#               -e DD_VERSION=${{ env.TAG }} \
-#               -e DD_IAST_ENABLED=true \
-#               ${{ env.IMAGE_NAME }}:latest
-
-#             echo "[*] Deployment complete."
-#             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
-#           EOF
-
-#       # === DAST (OWASP ZAP) ===
-#       - name: OWASP ZAP DAST Scan
-#         uses: zaproxy/action-full-scan@v0.8.0
-#         with:
-#           target: "http://${{ secrets.SSH_HOST }}:3000"
-#           rules_file_name: ".zap/rules.tsv" # optional custom rules
-#           cmd_options: "-a"
-
-#       # === IAST (Datadog) ===
-#       - name: Report IAST Findings to Datadog
-#         run: |
-#           echo "[*] Sending IAST scan data to Datadog..."
-#           curl -X POST "https://api.datadoghq.com/api/v2/appsec/scans" \
-#             -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
-#             -H "Content-Type: application/json" \
-#             -d '{
-#               "service": "juice-shop",
-#               "env": "staging",
-#               "version": "'${{ env.TAG }}'",
-#               "status": "completed"
-#             }'
-
 name: DevSecOps-Pipeline
 
 on:
@@ -132,13 +7,13 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: "mirzzie/juice-shop"
-  TAG: ${{ github.sha }}
+  IMAGE_NAME: "bkimminich/juice-shop"
+  TAG: "latest" # Using official image
 
 jobs:
-  # === SAST ===
+  # ---------- SAST ----------
   semgrep:
-    name: Run SAST (Semgrep)
+    name: SAST (Semgrep)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -151,9 +26,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: semgrep ci
 
-  # === SCA & SBOM + Build ===
+  # ---------- SBOM + SCA ----------
   sbom_and_build:
-    name: SBOM, SCA and Build
+    name: SBOM + SCA (Trivy)
     runs-on: ubuntu-latest
     needs: semgrep
     steps:
@@ -162,22 +37,12 @@ jobs:
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
           echo "$PWD/bin" >> $GITHUB_PATH
-      - name: Build Docker image
-        run: docker build -t $IMAGE_NAME:${{ env.TAG }} .
-      - name: Run Trivy filesystem scan (SBOM + SCA)
+      - name: Pull Juice Shop image
+        run: docker pull $IMAGE_NAME:$TAG
+      - name: Trivy filesystem scan
         run: trivy fs --format json --output trivy-fs-report.json .
-      - name: Scan Docker image with Trivy
-        run: trivy image --format json --output trivy-image-report.json $IMAGE_NAME:${{ env.TAG }} || true
-      - name: Login to DockerHub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Tag & Push Docker image
-        run: |
-          docker tag $IMAGE_NAME:${{ env.TAG }} $IMAGE_NAME:latest
-          docker push $IMAGE_NAME:${{ env.TAG }}
-          docker push $IMAGE_NAME:latest
+      - name: Trivy image scan
+        run: trivy image --format json --output trivy-image-report.json $IMAGE_NAME:$TAG || true
       - name: Upload Trivy reports
         uses: actions/upload-artifact@v4
         with:
@@ -186,97 +51,52 @@ jobs:
             trivy-fs-report.json
             trivy-image-report.json
 
-  # === Deploy + DAST + IAST ===
+  # ---------- Deploy + IAST + DAST ----------
   deploy_and_security_tests:
-    name: Deploy to staging & Run DAST + IAST
+    name: Deploy Juice Shop + IAST + DAST
     runs-on: ubuntu-latest
     needs: sbom_and_build
     steps:
       - uses: actions/checkout@v4
 
-      # === Setup SSH key (strip CRs, proper perms, add known_host) ===
-      - name: Setup SSH key and known_hosts
+      # SSH Setup
+      - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          # Remove Windows CRs if present and write key
           echo "${{ secrets.SSH_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          # Add remote host fingerprint to known_hosts (avoid StrictHostKeyChecking=no)
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-          ls -la ~/.ssh
 
-      # === Deploy Juice Shop with Datadog IAST enabled ===
-      - name: Deploy Juice Shop on staging EC2 (with Datadog IAST)
+      # Deploy Juice Shop with Datadog IAST
+      - name: Deploy Juice Shop on staging EC2
         run: |
-          ssh -o BatchMode=yes -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
-            set -euo pipefail
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
+            set -e
 
             echo "[*] Cleaning up old containers..."
             docker rm -f juice-shop || true
 
             echo "[*] Cleaning up dangling images..."
-            docker image prune -f || true
-
-            echo "[*] Pulling latest image..."
-            docker pull $IMAGE_NAME:latest || true
+            docker image prune -f
 
             echo "[*] Running Juice Shop with Datadog IAST enabled..."
             docker run -d --name juice-shop \
               -p 3000:3000 \
-              -e DD_API_KEY=${DATADOG_API_KEY} \
+              -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
               -e DD_ENV=staging \
               -e DD_SERVICE=juice-shop \
-              -e DD_VERSION=${TAG} \
+              -e DD_VERSION=latest \
               -e DD_IAST_ENABLED=true \
-              $IMAGE_NAME:latest
+              -e DD_LOGS_INJECTION=true \
+              -e NODE_OPTIONS="--require dd-trace/init" \
+              $IMAGE_NAME:$TAG
 
             echo "[*] Deployment complete. Container status:"
             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
           EOF
-        env:
-          # Expose these env vars into the remote heredoc (used inside remote container run)
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          TAG: ${{ env.TAG }}
-          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
 
-      # === Wait for app to be healthy on port 3000 ===
-      - name: Wait for Juice Shop to be up (port 3000)
-        run: |
-          set -e
-          ATTEMPTS=30
-          until curl -sSf "http://${{ secrets.SSH_HOST }}:3000/" >/dev/null 2>&1 || [ $ATTEMPTS -le 0 ]; do
-            echo "Waiting for Juice Shop to respond... attempts left: $ATTEMPTS"
-            sleep 5
-            ATTEMPTS=$((ATTEMPTS-1))
-          done
-          if [ $ATTEMPTS -le 0 ]; then
-            echo "Juice Shop did not start in time. Dumping remote container logs..."
-            ssh -o BatchMode=yes -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'docker logs juice-shop || true'
-            exit 1
-          fi
-          echo "Juice Shop is responding."
-
-      # === DAST (OWASP ZAP) ===
-      - name: OWASP ZAP DAST Scan
+      # Run OWASP ZAP DAST Scan
+      - name: Run OWASP ZAP DAST Scan
         uses: zaproxy/action-full-scan@v0.8.0
         with:
           target: "http://${{ secrets.SSH_HOST }}:3000"
-          rules_file_name: ".zap/rules.tsv" # optional custom rules
-          cmd_options: "-a"
-
-      # === Report IAST Findings to Datadog (safe JSON payload via file) ===
-      - name: Report IAST Findings to Datadog
-        run: |
-          cat > payload.json <<'PAYLOAD'
-          {
-            "service": "juice-shop",
-            "env": "staging",
-            "version": "'"${{ env.TAG }}"'",
-            "status": "completed"
-          }
-          PAYLOAD
-
-          curl -sS -X POST "https://api.datadoghq.com/api/v2/appsec/scans" \
-            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            --data @payload.json
