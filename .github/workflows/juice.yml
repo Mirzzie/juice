@@ -1,0 +1,125 @@
+name: DevSecOps-Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: "mirzzie/juice-shop"
+  TAG: ${{ github.sha }}
+
+jobs:
+  # === SAST ===
+  semgrep:
+    name: Run SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    container:
+      image: semgrep/semgrep
+    if: (github.actor != 'dependabot[bot]')
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep ci
+
+  # === SCA & SBOM + Build ===
+  sbom_and_build:
+    name: SBOM, SCA and Build
+    runs-on: ubuntu-latest
+    needs: semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+          echo "$PWD/bin" >> $GITHUB_PATH
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME:${{ env.TAG }} .
+      - name: Run Trivy filesystem scan (SBOM + SCA)
+        run: trivy fs --format json --output trivy-fs-report.json .
+      - name: Scan Docker image with Trivy
+        run: trivy image --format json --output trivy-image-report.json $IMAGE_NAME:${{ env.TAG }} || true
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Tag & Push Docker image
+        run: |
+          docker tag $IMAGE_NAME:${{ env.TAG }} $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:${{ env.TAG }}
+          docker push $IMAGE_NAME:latest
+      - name: Upload Trivy reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-reports
+          path: |
+            trivy-fs-report.json
+            trivy-image-report.json
+
+  # === Deploy + DAST + IAST ===
+  deploy_and_security_tests:
+    name: Deploy to staging & Run DAST + IAST
+    runs-on: ubuntu-latest
+    needs: sbom_and_build
+    steps:
+      - uses: actions/checkout@v4
+
+      # SSH + Deployment
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Deploy Juice Shop on staging EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
+            set -e
+
+            echo "[*] Cleaning up old containers..."
+            docker rm -f juice-shop || true
+
+            echo "[*] Cleaning up dangling images..."
+            docker image prune -f
+
+            echo "[*] Running Juice Shop with Datadog IAST..."
+            docker run -d --name juice-shop \
+              -p 3000:3000 \
+              -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
+              -e DD_ENV=staging \
+              -e DD_SERVICE=juice-shop \
+              -e DD_VERSION=${{ env.TAG }} \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              datadog/dd-apm-node:${{ env.TAG }} \
+              --app $IMAGE_NAME:latest
+
+            echo "[*] Deployment complete."
+            docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+          EOF
+
+      # === DAST (OWASP ZAP) ===
+      - name: OWASP ZAP DAST Scan
+        uses: zaproxy/action-full-scan@v0.8.0
+        with:
+          target: "http://${{ secrets.SSH_HOST }}:3000"
+          rules_file_name: ".zap/rules.tsv"   # optional custom rules
+          cmd_options: "-a"
+
+      # === IAST (Datadog) ===
+      - name: Report IAST Findings to Datadog
+        run: |
+          echo "[*] Sending IAST scan data to Datadog..."
+          curl -X POST "https://api.datadoghq.com/api/v2/appsec/scans" \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "service": "juice-shop",
+              "env": "staging",
+              "version": "'${{ env.TAG }}'",
+              "status": "completed"
+            }'
