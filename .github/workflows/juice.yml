@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: "bkimminich/juice-shop"
-  TAG: "latest" # Using official image
+  IMAGE_NAME: "mirzzie/juice-shop"
+  TAG: "latest"
 
 jobs:
   # ---------- SAST ----------
@@ -37,12 +37,10 @@ jobs:
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
           echo "$PWD/bin" >> $GITHUB_PATH
-      - name: Pull Juice Shop image
-        run: docker pull $IMAGE_NAME:$TAG
       - name: Trivy filesystem scan
         run: trivy fs --format json --output trivy-fs-report.json .
       - name: Trivy image scan
-        run: trivy image --format json --output trivy-image-report.json $IMAGE_NAME:$TAG || true
+        run: trivy image --format json --output trivy-image-report.json bkimminich/juice-shop:latest || true
       - name: Upload Trivy reports
         uses: actions/upload-artifact@v4
         with:
@@ -51,15 +49,40 @@ jobs:
             trivy-fs-report.json
             trivy-image-report.json
 
-  # ---------- Deploy + IAST + DAST ----------
-  deploy_and_security_tests:
-    name: Deploy Juice Shop + IAST + DAST
+  # ---------- Build & Push Docker Image ----------
+  build_and_push:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: sbom_and_build
     steps:
       - uses: actions/checkout@v4
 
-      # SSH Setup
+      # --- DockerHub login ---
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --- Build Docker image ---
+      - name: Build Docker image
+        run: |
+          docker build -t $IMAGE_NAME:$TAG .
+
+      # --- Push Docker image to Docker Hub ---
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:$TAG
+
+  # ---------- Deploy + IAST + DAST ----------
+  deploy_and_security_tests:
+    name: Deploy Juice Shop + IAST + DAST
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- SSH Setup ---
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -67,10 +90,10 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
-      # Deploy Juice Shop with Datadog IAST
+      # --- Deploy Juice Shop with Datadog IAST ---
       - name: Deploy Juice Shop on staging EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             set -e
 
             echo "[*] Cleaning up old containers..."
@@ -79,24 +102,48 @@ jobs:
             echo "[*] Cleaning up dangling images..."
             docker image prune -f
 
+            echo "[*] Pulling latest custom image..."
+            docker pull mirzzie/juice-shop:latest
+
             echo "[*] Running Juice Shop with Datadog IAST enabled..."
             docker run -d --name juice-shop \
               -p 3000:3000 \
-              -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
+              -e DD_API_KEY=${DD_API_KEY} \
               -e DD_ENV=staging \
               -e DD_SERVICE=juice-shop \
               -e DD_VERSION=latest \
               -e DD_IAST_ENABLED=true \
               -e DD_LOGS_INJECTION=true \
               -e NODE_OPTIONS="--require dd-trace/init" \
-              $IMAGE_NAME:$TAG
+              mirzzie/juice-shop:latest
+
+            echo "[*] Waiting for Juice Shop to be ready..."
+            until curl -s http://localhost:3000 > /dev/null; do
+              echo "Waiting for Juice Shop..."
+              sleep 5
+            done
 
             echo "[*] Deployment complete. Container status:"
             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
           EOF
 
-      # Run OWASP ZAP DAST Scan
+      # --- Run OWASP ZAP DAST Scan ---
       - name: Run OWASP ZAP DAST Scan
         uses: zaproxy/action-full-scan@v0.8.0
         with:
           target: "http://${{ secrets.SSH_HOST }}:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"
+
+      # --- Report IAST findings to Datadog ---
+      - name: Report IAST Findings to Datadog
+        run: |
+          curl -X POST "https://api.datadoghq.com/api/v2/appsec/scans" \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "service": "juice-shop",
+              "env": "staging",
+              "version": "latest",
+              "status": "completed"
+            }'
