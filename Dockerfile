@@ -1,21 +1,19 @@
-# Use full Node.js image to allow npm install
-FROM node:18
+# Minimal wrapper over official Juice Shop
+FROM bkimminich/juice-shop:latest
 
-# Set working directory
-WORKDIR /opt/juice-shop
+# Switch to root to install dd-trace
+USER root
 
-# Copy Juice Shop source
-COPY . .
+# Install Datadog tracer globally
+RUN npm install -g dd-trace@latest
 
-# Install Juice Shop deps + Datadog tracer
-RUN npm install --omit=dev
-RUN npm install dd-trace@latest
-
-# Set Datadog environment variables
+# Set environment variables defaults (can override at runtime)
 ENV DD_IAST_ENABLED=true \
     DD_LOGS_INJECTION=true \
     NODE_OPTIONS="--require dd-trace/init"
 
+# Expose port
 EXPOSE 3000
 
+# Start Juice Shop
 CMD ["node", "server.js"]
