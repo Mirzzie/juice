@@ -9,9 +9,9 @@ on:
       - main
 
 env:
-  EC2_HOST: ${{ secrets.SSH_HOST }} # EC2 instance public IP/DNS
-  EC2_USER: ${{ secrets.SSH_USER }} # SSH user for EC2
-  SSH_PRIVATE_KEY: ${{ secrets.SSH_KEY }} # SSH private key
+  SSH_HOST: ${{ secrets.SSH_HOST }} # EC2 instance public IP/DNS
+  SSH_USER: ${{ secrets.SSH_USER }} # SSH user for EC2
+  SSH_KEY: ${{ secrets.SSH_KEY }} # SSH private key
   JUICE_SHOP_PORT: 3000
 
 jobs:
