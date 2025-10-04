@@ -100,14 +100,15 @@ jobs:
 
           USER root
           WORKDIR /juice-shop
-          RUN npm install --no-save dd-trace@latest
 
-          RUN echo '#!/bin/sh' > /start.sh && \
-              echo 'node -r dd-trace/init app.js' >> /start.sh && \
-              chmod +x /start.sh
+          RUN npm install --no-save dd-trace@5
+
+          RUN printf '#!/usr/bin/env node\nrequire("dd-trace/init");\nrequire("./build/app");\n' > /juice-shop/server-dd.js && \
+              chmod +x /juice-shop/server-dd.js
 
           USER node
-          CMD ["/start.sh"]
+          ENTRYPOINT ["node"]
+          CMD ["/juice-shop/server-dd.js"]
           DOCKERFILE
 
       - name: Copy Dockerfile to EC2
