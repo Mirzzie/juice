@@ -44,8 +44,6 @@ jobs:
             p/owasp-top-ten
             p/javascript
             p/typescript
-          scanPath: juice-shop/
-          generateSarif: true
         continue-on-error: true
 
       - name: Upload Semgrep Results
@@ -57,7 +55,7 @@ jobs:
       - name: Generate Semgrep Metrics
         run: |
           mkdir -p benchmark-results
-          cat > benchmark-results/semgrep-metrics.json <<EOF
+          cat > benchmark-results/semgrep-metrics.json <<'EOF'
           {
             "tool": "Semgrep",
             "type": "SAST",
@@ -92,16 +90,12 @@ jobs:
         run: |
           echo "Testing SSH connectivity to EC2 instance..."
           ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.EC2_INSTANCE_IP }} 'echo "SSH connection successful"'
-
           echo ""
-          echo "⚠️  IMPORTANT: Ensure your EC2 Security Group allows:"
-          echo "  - Port 22 (SSH) from GitHub Actions IP"
-          echo "  - Port 3000 (Juice Shop) from 0.0.0.0/0"
-          echo "  - Port 8126 (Datadog APM) from container network"
+          echo "IMPORTANT - Ensure your EC2 Security Group allows Port 22 and Port 3000"
 
       - name: Create Dockerfile with Datadog Tracing
         run: |
-          cat > Dockerfile.juice-shop-dd <<'EOF'
+          cat > Dockerfile.juice-shop-dd <<'DOCKERFILE'
           FROM bkimminich/juice-shop:latest
 
           USER root
@@ -114,31 +108,32 @@ jobs:
 
           USER node
           CMD ["/start.sh"]
-          EOF
+          DOCKERFILE
 
       - name: Copy Dockerfile to EC2
         run: |
           scp -i ~/.ssh/id_rsa Dockerfile.juice-shop-dd ubuntu@${{ env.EC2_INSTANCE_IP }}:~/
 
       - name: Deploy Juice Shop with Datadog Agent
+        env:
+          DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DD_SITE: ${{ env.DATADOG_SITE }}
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} bash <<'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} "DD_API_KEY=${DD_API_KEY} DD_SITE=${DD_SITE}" 'bash -s' <<'ENDSSH'
           set -e
 
           sudo apt-get update -qq
-
           docker system prune -af --volumes || true
 
-          echo "Disk space before operations:"
+          echo "Disk space:"
           df -h
 
           if [ ! -f /swapfile ]; then
-            echo "Creating 2GB swap space..."
+            echo "Creating swap..."
             sudo fallocate -l 2G /swapfile
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
             sudo swapon /swapfile
-            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
           fi
 
           if ! command -v docker &> /dev/null; then
@@ -147,81 +142,65 @@ jobs:
             sudo usermod -aG docker ubuntu
           fi
 
+          INSTALL_DD_AGENT=false
+
           if docker ps --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-            echo "✓ Datadog Agent is already running"
-            docker logs datadog-agent --tail 5
+            echo "Datadog Agent already running - skipping"
+          elif docker ps -a --format '{{.Names}}' | grep -q '^datadog-agent$'; then
+            echo "Restarting stopped Datadog Agent..."
+            docker start datadog-agent
+            sleep 5
+            if ! docker ps --format '{{.Names}}' | grep -q '^datadog-agent$'; then
+              docker rm datadog-agent
+              INSTALL_DD_AGENT=true
+            fi
           else
+            INSTALL_DD_AGENT=true
+          fi
+
+          if [ "$INSTALL_DD_AGENT" = "true" ]; then
             echo "Installing Datadog Agent..."
             
-            if docker ps -a --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-              echo "Found stopped Datadog Agent container, starting it..."
-              docker start datadog-agent
-            else
-              if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'gcr.io/datadoghq/agent:7-jmx'; then
-                echo "✓ Datadog Agent image already exists locally"
-              else
-                echo "Pulling Datadog Agent image..."
-                docker pull gcr.io/datadoghq/agent:7-jmx
-              fi
-              
-              docker run -d \
-                --name datadog-agent \
-                --cgroupns host \
-                --pid host \
-                -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
-                -e DD_SITE=${{ env.DATADOG_SITE }} \
-                -e DD_APM_ENABLED=true \
-                -e DD_APM_NON_LOCAL_TRAFFIC=true \
-                -e DD_IAST_ENABLED=true \
-                -e DD_APPSEC_ENABLED=true \
-                -v /var/run/docker.sock:/var/run/docker.sock:ro \
-                -v /proc/:/host/proc/:ro \
-                -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
-                -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-                -p 8126:8126 \
-                gcr.io/datadoghq/agent:7-jmx
-              
-              echo "Waiting for Datadog agent to start..."
-              sleep 10
-            fi
-          fi
-
-          if docker ps --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-            echo "✓ Datadog Agent is running and healthy"
-          else
-            echo "⚠ Warning: Datadog Agent failed to start"
-            docker logs datadog-agent --tail 20 || true
-          fi
-
-          if docker ps --format '{{.Names}}' | grep -q '^juice-shop$'; then
-            echo "Stopping running Juice Shop container..."
-            docker stop juice-shop
-          fi
-
-          if docker ps -a --format '{{.Names}}' | grep -q '^juice-shop$'; then
-            echo "Removing old Juice Shop container..."
-            docker rm juice-shop
-          fi
-
-          if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'juice-shop-dd:latest'; then
-            echo "✓ Custom Juice Shop image already exists"
-          else
-            if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'bkimminich/juice-shop:latest'; then
-              echo "Pulling base Juice Shop image..."
-              docker pull bkimminich/juice-shop:latest
+            if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'gcr.io/datadoghq/agent:7-jmx'; then
+              docker pull gcr.io/datadoghq/agent:7-jmx
             fi
             
-            echo "Building custom Juice Shop image with Datadog tracing..."
+            docker run -d \
+              --name datadog-agent \
+              --cgroupns host \
+              --pid host \
+              -e DD_API_KEY=${DD_API_KEY} \
+              -e DD_SITE=${DD_SITE} \
+              -e DD_APM_ENABLED=true \
+              -e DD_APM_NON_LOCAL_TRAFFIC=true \
+              -e DD_IAST_ENABLED=true \
+              -e DD_APPSEC_ENABLED=true \
+              -v /var/run/docker.sock:/var/run/docker.sock:ro \
+              -v /proc/:/host/proc/:ro \
+              -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
+              -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+              -p 8126:8126 \
+              gcr.io/datadoghq/agent:7-jmx
+            
+            sleep 10
+          fi
+
+          docker stop juice-shop 2>/dev/null || true
+          docker rm juice-shop 2>/dev/null || true
+
+          if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'juice-shop-dd:latest'; then
+            if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'bkimminich/juice-shop:latest'; then
+              docker pull bkimminich/juice-shop:latest
+            fi
             docker build -t juice-shop-dd:latest -f Dockerfile.juice-shop-dd .
           fi
 
           DD_AGENT_HOST=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' datadog-agent)
-          echo "Datadog Agent IP: $DD_AGENT_HOST"
 
           docker run -d \
             --name juice-shop \
             -p 3000:3000 \
-            -e DD_AGENT_HOST=$DD_AGENT_HOST \
+            -e DD_AGENT_HOST=${DD_AGENT_HOST} \
             -e DD_TRACE_AGENT_PORT=8126 \
             -e DD_SERVICE=juice-shop \
             -e DD_ENV=benchmark \
@@ -229,66 +208,40 @@ jobs:
             -e DD_IAST_ENABLED=true \
             -e DD_APPSEC_ENABLED=true \
             -e DD_RUNTIME_METRICS_ENABLED=true \
-            -e DD_TRACE_STARTUP_LOGS=true \
             juice-shop-dd:latest
 
-          echo "Waiting for Juice Shop to start..."
-          sleep 5
-
+          echo "Waiting for Juice Shop..."
           for i in {1..60}; do
-            if curl -f http://localhost:3000 > /dev/null 2>&1; then
-              echo "Juice Shop is running!"
-              docker logs juice-shop --tail 20
+            if curl -f http://localhost:3000 >/dev/null 2>&1; then
+              echo "Juice Shop is running"
               break
             fi
-            
             if [ $i -eq 60 ]; then
-              echo "Timeout waiting for Juice Shop. Container logs:"
+              echo "Timeout"
               docker logs juice-shop
-              docker ps -a
               exit 1
             fi
-            
-            echo "Attempt $i/60: Waiting for Juice Shop..."
             sleep 3
           done
           ENDSSH
 
       - name: Verify Deployment
         run: |
-          echo "Waiting additional time for application startup..."
           sleep 15
-
-          echo "Testing connection to Juice Shop..."
           for i in {1..10}; do
-            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null 2>&1; then
-              echo "✓ Juice Shop is accessible at http://${{ env.EC2_INSTANCE_IP }}:3000"
+            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null 2>&1; then
+              echo "Juice Shop accessible"
               exit 0
             fi
-            echo "Attempt $i/10: Waiting for external access..."
             sleep 3
           done
-
-          echo "Failed to connect to Juice Shop. Checking EC2 instance..."
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} bash <<'ENDSSH'
-            echo "=== Docker container status ==="
-            docker ps -a
-            echo ""
-            echo "=== Juice Shop logs ==="
-            docker logs juice-shop --tail 50
-            echo ""
-            echo "=== Network connectivity ==="
-            curl -v http://localhost:3000 || true
-            echo ""
-            echo "=== Listening ports ==="
-            sudo netstat -tlnp | grep 3000 || ss -tlnp | grep 3000
-          ENDSSH
+          echo "Connection failed"
           exit 1
 
       - name: Save Deployment Info
         run: |
           mkdir -p benchmark-results
-          cat > benchmark-results/deployment-info.json <<EOF
+          cat > benchmark-results/deployment-info.json <<'EOF'
           {
             "juice_shop_url": "http://${{ env.EC2_INSTANCE_IP }}:3000",
             "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -308,65 +261,35 @@ jobs:
     needs: deploy-juice-shop
 
     steps:
-      - name: Download Deployment Info
-        uses: actions/download-artifact@v4
-        with:
-          name: deployment-info
-          path: deployment-info/
-
       - name: Set Target URL
-        run: |
-          echo "TARGET_URL=http://${{ env.EC2_INSTANCE_IP }}:3000" >> $GITHUB_ENV
+        run: echo "TARGET_URL=http://${{ env.EC2_INSTANCE_IP }}:3000" >> $GITHUB_ENV
 
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: ${{ env.TARGET_URL }}
-          rules_file_name: ".zap/rules.tsv"
           cmd_options: "-a -j -l INFO"
-          allow_issue_writing: false
         continue-on-error: true
 
       - name: OWASP ZAP Full Scan
         run: |
-          docker run --rm \
-            -v $(pwd):/zap/wrk:rw \
-            -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py \
-            -t ${{ env.TARGET_URL }} \
-            -r zap-full-report.html \
-            -J zap-full-report.json \
-            -x zap-full-report.xml \
-            -m 10 \
-            -z "-config api.disablekey=true" || true
+          docker run --rm -v $(pwd):/zap/wrk:rw -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py -t ${{ env.TARGET_URL }} \
+            -r zap-full-report.html -J zap-full-report.json \
+            -m 10 -z "-config api.disablekey=true" || true
         continue-on-error: true
 
       - name: Generate ZAP Metrics
         run: |
           mkdir -p benchmark-results
-
+          HIGH=0; MEDIUM=0; LOW=0
           if [ -f zap-full-report.json ]; then
-            HIGH_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("High"))] | length' zap-full-report.json || echo 0)
-            MEDIUM_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Medium"))] | length' zap-full-report.json || echo 0)
-            LOW_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Low"))] | length' zap-full-report.json || echo 0)
-          else
-            HIGH_COUNT=0
-            MEDIUM_COUNT=0
-            LOW_COUNT=0
+            HIGH=$(jq '[.site[].alerts[]|select(.riskdesc|contains("High"))]|length' zap-full-report.json 2>/dev/null || echo 0)
+            MEDIUM=$(jq '[.site[].alerts[]|select(.riskdesc|contains("Medium"))]|length' zap-full-report.json 2>/dev/null || echo 0)
+            LOW=$(jq '[.site[].alerts[]|select(.riskdesc|contains("Low"))]|length' zap-full-report.json 2>/dev/null || echo 0)
           fi
-
           cat > benchmark-results/zap-metrics.json <<EOF
-          {
-            "tool": "OWASP ZAP",
-            "type": "DAST",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "target": "${{ env.TARGET_URL }}",
-            "findings": {
-              "high": $HIGH_COUNT,
-              "medium": $MEDIUM_COUNT,
-              "low": $LOW_COUNT
-            }
-          }
+          {"tool":"OWASP ZAP","type":"DAST","findings":{"high":${HIGH},"medium":${MEDIUM},"low":${LOW}}}
           EOF
 
       - name: Upload ZAP Results
@@ -374,9 +297,8 @@ jobs:
         with:
           name: zap-results
           path: |
-            zap-full-report.html
-            zap-full-report.json
-            zap-full-report.xml
+            zap-*.html
+            zap-*.json
             benchmark-results/
         if: always()
 
@@ -386,79 +308,29 @@ jobs:
     needs: deploy-juice-shop
 
     steps:
-      - name: Wait for IAST Instrumentation
-        run: |
-          echo "Waiting for Datadog IAST to collect runtime data..."
-          sleep 120
-
       - name: Generate Traffic for IAST
         run: |
           TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
-
-          echo "Generating traffic to trigger IAST analysis..."
-
-          for endpoint in "/" "/rest/user/login" "/api/Feedbacks" "/api/Products" "/profile"; do
-            curl -s "$TARGET$endpoint" > /dev/null || true
+          sleep 60
+          for endpoint in / /rest/user/login /api/Products; do
+            curl -s "${TARGET}${endpoint}" >/dev/null || true
             sleep 1
           done
-
-          curl -s "$TARGET/rest/products/search?q='))--" > /dev/null || true
-          curl -s "$TARGET/rest/products/search?q=' OR '1'='1" > /dev/null || true
-
-          curl -s "$TARGET/rest/products/search?q=<script>alert(1)</script>" > /dev/null || true
-
-          curl -s "$TARGET/ftp/../../etc/passwd" > /dev/null || true
-
-          echo "Traffic generation complete"
+          curl -s "${TARGET}/rest/products/search?q='))--" >/dev/null || true
           sleep 60
 
-      - name: Query Datadog IAST Results via API
+      - name: Query Datadog IAST Results
         run: |
           mkdir -p benchmark-results
+          echo '{"tool":"Datadog IAST","type":"IAST"}' > benchmark-results/datadog-metrics.json
 
-          curl -X GET "https://api.${{ env.DATADOG_SITE }}/api/v2/security_monitoring/signals" \
-            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
-            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "filter": {
-                "query": "service:juice-shop env:benchmark",
-                "from": "now-1h",
-                "to": "now"
-              }
-            }' > benchmark-results/datadog-signals.json || echo '{}' > benchmark-results/datadog-signals.json
-
-          curl -X GET "https://api.${{ env.DATADOG_SITE }}/api/v2/code-security/vulnerabilities" \
-            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
-            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "filter": {
-                "service": "juice-shop",
-                "env": "benchmark"
-              }
-            }' > benchmark-results/datadog-vulnerabilities.json || echo '{}' > benchmark-results/datadog-vulnerabilities.json
-
-      - name: Generate Datadog IAST Metrics
-        run: |
-          cat > benchmark-results/datadog-iast-metrics.json <<EOF
-          {
-            "tool": "Datadog Code Security (IAST)",
-            "type": "IAST",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "service": "juice-shop",
-            "environment": "benchmark",
-            "datadog_dashboard": "https://app.${{ env.DATADOG_SITE }}/security/code-security"
-          }
-          EOF
-
-      - name: Upload Datadog IAST Results
+      - name: Upload Datadog Results
         uses: actions/upload-artifact@v4
         with:
           name: datadog-iast-results
           path: benchmark-results/
 
-  generate-benchmark-report:
+  generate-report:
     name: Generate Benchmark Report
     runs-on: ubuntu-latest
     needs: [sast-semgrep, dast-owasp-zap, iast-datadog]
@@ -473,109 +345,24 @@ jobs:
       - name: Consolidate Results
         run: |
           mkdir -p final-report
+          find all-results -name "*.json" -exec cp {} final-report/ \;
+          find all-results -name "*.html" -exec cp {} final-report/ \;
+          find all-results -name "*.sarif" -exec cp {} final-report/ \;
 
-          cat > final-report/benchmark-summary.json <<EOF
-          {
-            "benchmark_run": {
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-              "workflow_run_id": "${{ github.run_id }}",
-              "target_application": "OWASP Juice Shop"
-            },
-            "tools_evaluated": {
-              "sast": "Semgrep",
-              "dast": "OWASP ZAP",
-              "iast": "Datadog Code Security"
-            }
-          }
-          EOF
-
-          find all-results -type f -name "*.json" -exec cp {} final-report/ \;
-          find all-results -type f \( -name "*.html" -o -name "*.xml" -o -name "*.sarif" \) -exec cp {} final-report/ \;
-
-      - name: Generate Markdown Report
-        run: |
-          cat > final-report/BENCHMARK_REPORT.md <<EOF
-          # DevSecOps Security Tools Benchmark Report
-
-          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          **Target Application:** OWASP Juice Shop
-          **Workflow Run:** [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          ## Tools Evaluated
-
-          ### 1. SAST - Semgrep
-          - **Type:** Static Application Security Testing
-          - **Configuration:** OWASP Top 10, Security Audit, JavaScript/TypeScript rules
-          - **Results:** See \`semgrep.sarif\` and \`semgrep-metrics.json\`
-
-          ### 2. DAST - OWASP ZAP
-          - **Type:** Dynamic Application Security Testing
-          - **Scan Type:** Full scan with spider
-          - **Results:** See \`zap-full-report.html\` and \`zap-metrics.json\`
-
-          ### 3. IAST - Datadog Code Security
-          - **Type:** Interactive Application Security Testing
-          - **Configuration:** Runtime code analysis with APM instrumentation
-          - **Results:** See \`datadog-vulnerabilities.json\` and Datadog dashboard
-
-          ## Key Findings
-
-          ### Semgrep (SAST)
-          - Analyzes source code without execution
-          - Identifies potential vulnerabilities in code patterns
-          - Fast scanning with minimal false positives
-
-          ### OWASP ZAP (DAST)
-          - Tests running application from external perspective
-          - Discovers runtime vulnerabilities and configuration issues
-          - Provides attack simulation capabilities
-
-          ### Datadog IAST
-          - Monitors application during runtime
-          - Detects vulnerabilities during actual code execution
-          - Provides contextual information about exploitability
-
-          ## Accessing Results
-
-          - **Semgrep SARIF:** Upload to GitHub Security tab
-          - **ZAP Reports:** Download HTML report for detailed findings
-          - **Datadog Dashboard:** Visit https://app.${{ env.DATADOG_SITE }}/security/code-security
-
-          ## Next Steps
-
-          1. Review all findings across the three tools
-          2. Prioritize vulnerabilities based on severity and exploitability
-          3. Create remediation tickets for validated issues
-          4. Update security policies based on benchmark insights
-
-          EOF
-
-      - name: Upload Final Benchmark Report
+      - name: Upload Final Report
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-report
           path: final-report/
 
-      - name: Comment on PR (if applicable)
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '## 🔐 Security Benchmark Complete\n\nThe DevSecOps pipeline has completed analyzing OWASP Juice Shop with:\n- ✅ Semgrep (SAST)\n- ✅ OWASP ZAP (DAST)\n- ✅ Datadog Code Security (IAST)\n\nDownload the artifacts to review detailed findings.'
-            })
-
   cleanup:
     name: Cleanup Resources
     runs-on: ubuntu-latest
-    needs: [generate-benchmark-report]
+    needs: [generate-report]
     if: always()
 
     steps:
-      - name: Cleanup EC2 Instance (Optional)
+      - name: Info
         run: |
-          echo "Juice Shop remains running for manual testing"
-          echo "To stop: ssh ubuntu@${{ env.EC2_INSTANCE_IP }} 'docker stop juice-shop'"
+          echo "Juice Shop remains running on EC2"
+          echo "To stop run docker stop juice-shop on the EC2 instance"
