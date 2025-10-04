@@ -1,4 +1,4 @@
-name: DevSecOps Security Tools Benchmark
+docker run -d \name: DevSecOps Security Tools Benchmark
 
 on:
   push:
@@ -142,47 +142,45 @@ jobs:
             sudo usermod -aG docker ubuntu
           fi
 
-          INSTALL_DD_AGENT=false
-
-          if docker ps --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-            echo "Datadog Agent already running - skipping"
-          elif docker ps -a --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-            echo "Restarting stopped Datadog Agent..."
-            docker start datadog-agent
+          if sudo systemctl is-active --quiet datadog-agent; then
+            echo "Datadog Agent is already running - skipping installation"
+            sudo systemctl status datadog-agent --no-pager
+          elif command -v datadog-agent &> /dev/null; then
+            echo "Datadog Agent is installed but not running - starting it"
+            sudo systemctl start datadog-agent
             sleep 5
-            if ! docker ps --format '{{.Names}}' | grep -q '^datadog-agent$'; then
-              docker rm datadog-agent
-              INSTALL_DD_AGENT=true
-            fi
+            sudo systemctl status datadog-agent --no-pager
           else
-            INSTALL_DD_AGENT=true
+            echo "Installing Datadog Agent via installation script..."
+            
+            DD_API_KEY=${DD_API_KEY} \
+            DD_SITE=${DD_SITE} \
+            DD_APM_ENABLED=true \
+            DD_APM_NON_LOCAL_TRAFFIC=true \
+            DD_IAST_ENABLED=true \
+            DD_APPSEC_ENABLED=true \
+            bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+            
+            sudo tee /etc/datadog-agent/conf.d/apm.yaml > /dev/null <<APMCONF
+          apm_config:
+            enabled: true
+            apm_non_local_traffic: true
+          iast:
+            enabled: true
+          appsec:
+            enabled: true
+          APMCONF
+            
+            sudo systemctl restart datadog-agent
+            sleep 10
+            echo "Datadog Agent installed and started"
           fi
 
-          if [ "$INSTALL_DD_AGENT" = "true" ]; then
-            echo "Installing Datadog Agent..."
-            
-            if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q 'gcr.io/datadoghq/agent:7-jmx'; then
-              docker pull gcr.io/datadoghq/agent:7-jmx
-            fi
-            
-            docker run -d \
-              --name datadog-agent \
-              --cgroupns host \
-              --pid host \
-              -e DD_API_KEY=${DD_API_KEY} \
-              -e DD_SITE=${DD_SITE} \
-              -e DD_APM_ENABLED=true \
-              -e DD_APM_NON_LOCAL_TRAFFIC=true \
-              -e DD_IAST_ENABLED=true \
-              -e DD_APPSEC_ENABLED=true \
-              -v /var/run/docker.sock:/var/run/docker.sock:ro \
-              -v /proc/:/host/proc/:ro \
-              -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
-              -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-              -p 8126:8126 \
-              gcr.io/datadoghq/agent:7-jmx
-            
-            sleep 10
+          if sudo systemctl is-active --quiet datadog-agent; then
+            echo "Datadog Agent is running successfully"
+          else
+            echo "Warning: Datadog Agent failed to start"
+            sudo journalctl -u datadog-agent -n 50 --no-pager
           fi
 
           docker stop juice-shop 2>/dev/null || true
@@ -195,9 +193,8 @@ jobs:
             docker build -t juice-shop-dd:latest -f Dockerfile.juice-shop-dd .
           fi
 
-          DD_AGENT_HOST=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' datadog-agent)
-
-          docker run -d \
+          DD_AGENT_HOST=$(hostname -I | awk '{print $1}')
+          echo "Using host IP for Datadog Agent: ${DD_AGENT_HOST}"
             --name juice-shop \
             -p 3000:3000 \
             -e DD_AGENT_HOST=${DD_AGENT_HOST} \
