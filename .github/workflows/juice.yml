@@ -14,7 +14,7 @@ env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
   DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
-  DATADOG_SITE: "us5.datadoghq.com"
+  DATADOG_SITE: "datadoghq.com"
 
 jobs:
   # Stage 1: SAST with Semgrep
@@ -84,12 +84,53 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Check EC2 Connectivity
+        run: |
+          echo "Testing SSH connectivity to EC2 instance..."
+          ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.EC2_INSTANCE_IP }} 'echo "SSH connection successful"'
+
+          echo ""
+          echo "⚠️  IMPORTANT: Ensure your EC2 Security Group allows:"
+          echo "  - Port 22 (SSH) from GitHub Actions IP"
+          echo "  - Port 3000 (Juice Shop) from 0.0.0.0/0"
+          echo "  - Port 8126 (Datadog APM) from container network"
+
+      - name: Create Dockerfile with Datadog Tracing
+        run: |
+          cat > Dockerfile.juice-shop-dd << 'EOF'
+          FROM bkimminich/juice-shop:latest
+
+          # Install dd-trace for Node.js APM and IAST
+          USER root
+          WORKDIR /juice-shop
+          RUN npm install --no-save dd-trace@latest
+
+          # Create a startup script that initializes dd-trace
+          RUN echo '#!/bin/sh' > /start.sh && \
+              echo 'node -r dd-trace/init app.js' >> /start.sh && \
+              chmod +x /start.sh
+
+          USER node
+          CMD ["/start.sh"]
+          EOF
+
+      - name: Copy Dockerfile to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa Dockerfile.juice-shop-dd ubuntu@${{ env.EC2_INSTANCE_IP }}:~/
 
       - name: Deploy Juice Shop with Datadog Agent
         run: |
@@ -99,6 +140,16 @@ jobs:
           # Update system
           sudo apt-get update
 
+          # Create swap space to prevent OOM during Datadog installation
+          if [ ! -f /swapfile ]; then
+            echo "Creating 2GB swap space..."
+            sudo fallocate -l 2G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+          fi
+
           # Install Docker if not present
           if ! command -v docker &> /dev/null; then
             curl -fsSL https://get.docker.com -o get-docker.sh
@@ -106,69 +157,115 @@ jobs:
             sudo usermod -aG docker ubuntu
           fi
 
-          # Install Datadog Agent
-          DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
-          DD_SITE="${{ env.DATADOG_SITE }}" \
-          DD_APM_ENABLED=true \
-          DD_APM_NON_LOCAL_TRAFFIC=true \
-          DD_RUNTIME_SECURITY_CONFIG_ENABLED=true \
-          DD_IAST_ENABLED=true \
-          bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+          # Install Datadog Agent as Docker container
+          docker pull gcr.io/datadoghq/agent:latest
 
-          # Configure Datadog for IAST
-          sudo tee /etc/datadog-agent/datadog.yaml > /dev/null <<EOF
-          api_key: ${{ secrets.DATADOG_API_KEY }}
-          site: ${{ env.DATADOG_SITE }}
-          apm_config:
-            enabled: true
-            apm_non_local_traffic: true
-          runtime_security_config:
-            enabled: true
-          iast:
-            enabled: true
-          EOF
+          # Stop existing Datadog agent container if running
+          docker stop datadog-agent || true
+          docker rm datadog-agent || true
 
-          # Restart Datadog agent
-          sudo systemctl restart datadog-agent
+          # Run Datadog Agent container
+          docker run -d \
+            --name datadog-agent \
+            --cgroupns host \
+            --pid host \
+            -e DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
+            -e DD_SITE=${{ env.DATADOG_SITE }} \
+            -e DD_APM_ENABLED=true \
+            -e DD_APM_NON_LOCAL_TRAFFIC=true \
+            -e DD_IAST_ENABLED=true \
+            -e DD_APPSEC_ENABLED=true \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v /proc/:/host/proc/:ro \
+            -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
+            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+            -p 8126:8126 \
+            gcr.io/datadoghq/agent:latest
+
+          # Wait for Datadog agent to be ready
+          echo "Waiting for Datadog agent to start..."
+          sleep 10
 
           # Stop existing Juice Shop container
           docker stop juice-shop || true
           docker rm juice-shop || true
 
-          # Pull and run Juice Shop with Datadog instrumentation
-          docker pull bkimminich/juice-shop:${{ env.JUICE_SHOP_VERSION }}
+          # Build custom Juice Shop image with dd-trace
+          echo "Building Juice Shop with Datadog tracing support..."
+          docker build -t juice-shop-dd:latest -f Dockerfile.juice-shop-dd .
+
+          # Get Datadog Agent container IP
+          DD_AGENT_HOST=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' datadog-agent)
+          echo "Datadog Agent IP: $DD_AGENT_HOST"
 
           # Run Juice Shop with Datadog tracing
           docker run -d \
             --name juice-shop \
             -p 3000:3000 \
-            -e DD_AGENT_HOST=172.17.0.1 \
+            -e DD_AGENT_HOST=$DD_AGENT_HOST \
             -e DD_TRACE_AGENT_PORT=8126 \
             -e DD_SERVICE=juice-shop \
             -e DD_ENV=benchmark \
-            -e DD_VERSION=${{ env.JUICE_SHOP_VERSION }} \
+            -e DD_VERSION=latest \
             -e DD_IAST_ENABLED=true \
             -e DD_APPSEC_ENABLED=true \
             -e DD_RUNTIME_METRICS_ENABLED=true \
-            -e NODE_OPTIONS="--require dd-trace/init" \
-            bkimminich/juice-shop:${{ env.JUICE_SHOP_VERSION }}
+            -e DD_TRACE_STARTUP_LOGS=true \
+            juice-shop-dd:latest
 
           # Wait for Juice Shop to be healthy
           echo "Waiting for Juice Shop to start..."
-          for i in {1..30}; do
+          sleep 5
+
+          for i in {1..60}; do
             if curl -f http://localhost:3000 > /dev/null 2>&1; then
               echo "Juice Shop is running!"
+              docker logs juice-shop --tail 20
               break
             fi
-            sleep 2
+            
+            if [ $i -eq 60 ]; then
+              echo "Timeout waiting for Juice Shop. Container logs:"
+              docker logs juice-shop
+              docker ps -a
+              exit 1
+            fi
+            
+            echo "Attempt $i/60: Waiting for Juice Shop..."
+            sleep 3
           done
           ENDSSH
 
       - name: Verify Deployment
         run: |
-          sleep 10
-          curl -f http://${{ env.EC2_INSTANCE_IP }}:3000 || exit 1
-          echo "Juice Shop successfully deployed at http://${{ env.EC2_INSTANCE_IP }}:3000"
+          echo "Waiting additional time for application startup..."
+          sleep 15
+
+          echo "Testing connection to Juice Shop..."
+          for i in {1..10}; do
+            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null 2>&1; then
+              echo "✓ Juice Shop is accessible at http://${{ env.EC2_INSTANCE_IP }}:3000"
+              exit 0
+            fi
+            echo "Attempt $i/10: Waiting for external access..."
+            sleep 3
+          done
+
+          echo "Failed to connect to Juice Shop. Checking EC2 instance..."
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "=== Docker container status ==="
+            docker ps -a
+            echo ""
+            echo "=== Juice Shop logs ==="
+            docker logs juice-shop --tail 50
+            echo ""
+            echo "=== Network connectivity ==="
+            curl -v http://localhost:3000 || true
+            echo ""
+            echo "=== Listening ports ==="
+            sudo netstat -tlnp | grep 3000 || ss -tlnp | grep 3000
+          ENDSSH
+          exit 1
 
       - name: Save Deployment Info
         run: |
