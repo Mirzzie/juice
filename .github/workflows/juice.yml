@@ -1,4 +1,4 @@
-docker run -d \name: DevSecOps Security Tools Benchmark
+name: DevSecOps Security Tools Benchmark
 
 on:
   push:
