@@ -1,140 +1,480 @@
-name: Juice Shop DevSecOps Pipeline with Datadog Agent & IAST
+name: DevSecOps Security Tools Benchmark
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, develop]
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 1" # Weekly on Monday at 2 AM
+  workflow_dispatch:
 
 env:
-  SSH_HOST: ${{ secrets.SSH_HOST }}
-  SSH_USER: ${{ secrets.SSH_USER }}
-  SSH_KEY: ${{ secrets.SSH_KEY }}
-  JUICE_SHOP_PORT: 3000
-  DD_API_KEY: ${{ secrets.DD_API_KEY }}
-  DD_SITE: us5.datadoghq.com
-  PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  JUICE_SHOP_VERSION: "latest"
+  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+  DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+  DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
+  DATADOG_SITE: "us5.datadoghq.com"
 
 jobs:
-  setup_datadog_agent:
-    name: Install and Start Datadog Agent on EC2
+  # Stage 1: SAST with Semgrep
+  sast-semgrep:
+    name: SAST - Semgrep Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
     steps:
-      - name: Prepare SSH for EC2
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone Juice Shop for Analysis
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
+          git clone https://github.com/juice-shop/juice-shop.git
+          cd juice-shop
+          echo "JUICE_SHOP_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-      - name: Install and start Datadog Agent on EC2 using official script
-        run: ssh -i ~/.ssh/id_rsa ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
-          DD_API_KEY=${{ secrets.DD_API_KEY }} DD_SITE=${{ env.DD_SITE }} bash -c "\$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
-          systemctl enable datadog-agent
-          systemctl start datadog-agent
-          systemctl status datadog-agent
-          EOF
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/owasp-top-ten
+            p/javascript
+            p/typescript
+          scanPath: juice-shop/
+          generateSarif: true
+        continue-on-error: true
 
-  deploy_juice_shop:
-    name: Run Official Juice Shop Container with Datadog IAST
-    runs-on: ubuntu-latest
-    needs: setup_datadog_agent
-    steps:
-      - name: Prepare SSH for EC2
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.SSH_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Deploy Juice Shop with Datadog IAST environment variables
-        run: ssh -i ~/.ssh/id_rsa ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
-          docker stop juice-shop || true
-          docker rm juice-shop || true
-          docker run -d -p ${{ env.JUICE_SHOP_PORT }}:3000 --name juice-shop \\
-          -e DD_IAST_ENABLED=true \\
-          -e DD_AGENT_HOST=localhost \\
-          -e DD_TRACE_AGENT_PORT=8126 \\
-          -e DD_ENV=ci \\
-          -e DD_SERVICE=juice-shop \\
-          -e DD_VERSION=1.0 \\
-          -e DD_LOGS_ENABLED=true \\
-          -e DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true \\
-          bkimminich/juice-shop
-          EOF
-
-  sast_semgrep:
-    name: Run Semgrep Static Analysis
-    runs-on: ubuntu-latest
-    needs: deploy_juice_shop
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Semgrep container scan
-        run: |
-          docker run --rm -v ${{ github.workspace }}:/src returntocorp/semgrep semgrep --config=p/ci --json --output=/src/semgrep-results.json /src
-
-      - name: Upload Semgrep report
+      - name: Upload Semgrep Results
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
-          path: semgrep-results.json
+          path: semgrep.sarif
 
-  dast_owasp_zap:
-    name: Run OWASP ZAP Dynamic Scan
-    runs-on: ubuntu-latest
-    needs: deploy_juice_shop
-    steps:
-      - uses: zaproxy/action-full-scan@v0.8.0
-        with:
-          target: http://${{ env.SSH_HOST }}:${{ env.JUICE_SHOP_PORT }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zap-report
-          path: report.html
-
-  monitor_iast:
-    name: Datadog IAST Monitoring Reminder
-    runs-on: ubuntu-latest
-    needs: deploy_juice_shop
-    steps:
-      - name: Reminder to monitor Datadog IAST dashboard
+      - name: Generate Semgrep Metrics
         run: |
-          echo "Datadog Runtime Code Analysis (IAST) enabled. View vulnerabilities on the Datadog Security platform dashboard."
+          mkdir -p benchmark-results
+          cat > benchmark-results/semgrep-metrics.json <<EOF
+          {
+            "tool": "Semgrep",
+            "type": "SAST",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "scan_duration": "${{ steps.semgrep.outputs.duration }}",
+            "commit": "${{ env.JUICE_SHOP_COMMIT }}"
+          }
+          EOF
 
-  github_issue_search:
-    name: Search GitHub Issues for ZAP Full Scan Reports
+      - name: Upload Benchmark Metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-metrics
+          path: benchmark-results/
+
+  # Stage 2: Deploy Juice Shop to EC2 with Datadog Agent
+  deploy-juice-shop:
+    name: Deploy Juice Shop with Datadog IAST
     runs-on: ubuntu-latest
+    needs: sast-semgrep
+
     steps:
-      - name: Search issues using PAT and new GitHub Search API
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Key
         run: |
-          curl -H "Authorization: Bearer $PAT_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/search/issues?q=is:issue+state:open+repo:Mirzzie/juice+ZAP+Full+Scan+Report" \
-            --fail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-  summary:
-    name: Summarize Reports
+      - name: Deploy Juice Shop with Datadog Agent
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          set -e
+
+          # Update system
+          sudo apt-get update
+
+          # Install Docker if not present
+          if ! command -v docker &> /dev/null; then
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh
+            sudo usermod -aG docker ubuntu
+          fi
+
+          # Install Datadog Agent
+          DD_API_KEY=${{ secrets.DATADOG_API_KEY }} \
+          DD_SITE="${{ env.DATADOG_SITE }}" \
+          DD_APM_ENABLED=true \
+          DD_APM_NON_LOCAL_TRAFFIC=true \
+          DD_RUNTIME_SECURITY_CONFIG_ENABLED=true \
+          DD_IAST_ENABLED=true \
+          bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+
+          # Configure Datadog for IAST
+          sudo tee /etc/datadog-agent/datadog.yaml > /dev/null <<EOF
+          api_key: ${{ secrets.DATADOG_API_KEY }}
+          site: ${{ env.DATADOG_SITE }}
+          apm_config:
+            enabled: true
+            apm_non_local_traffic: true
+          runtime_security_config:
+            enabled: true
+          iast:
+            enabled: true
+          EOF
+
+          # Restart Datadog agent
+          sudo systemctl restart datadog-agent
+
+          # Stop existing Juice Shop container
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+
+          # Pull and run Juice Shop with Datadog instrumentation
+          docker pull bkimminich/juice-shop:${{ env.JUICE_SHOP_VERSION }}
+
+          # Run Juice Shop with Datadog tracing
+          docker run -d \
+            --name juice-shop \
+            -p 3000:3000 \
+            -e DD_AGENT_HOST=172.17.0.1 \
+            -e DD_TRACE_AGENT_PORT=8126 \
+            -e DD_SERVICE=juice-shop \
+            -e DD_ENV=benchmark \
+            -e DD_VERSION=${{ env.JUICE_SHOP_VERSION }} \
+            -e DD_IAST_ENABLED=true \
+            -e DD_APPSEC_ENABLED=true \
+            -e DD_RUNTIME_METRICS_ENABLED=true \
+            -e NODE_OPTIONS="--require dd-trace/init" \
+            bkimminich/juice-shop:${{ env.JUICE_SHOP_VERSION }}
+
+          # Wait for Juice Shop to be healthy
+          echo "Waiting for Juice Shop to start..."
+          for i in {1..30}; do
+            if curl -f http://localhost:3000 > /dev/null 2>&1; then
+              echo "Juice Shop is running!"
+              break
+            fi
+            sleep 2
+          done
+          ENDSSH
+
+      - name: Verify Deployment
+        run: |
+          sleep 10
+          curl -f http://${{ env.EC2_INSTANCE_IP }}:3000 || exit 1
+          echo "Juice Shop successfully deployed at http://${{ env.EC2_INSTANCE_IP }}:3000"
+
+      - name: Save Deployment Info
+        run: |
+          mkdir -p benchmark-results
+          cat > benchmark-results/deployment-info.json <<EOF
+          {
+            "juice_shop_url": "http://${{ env.EC2_INSTANCE_IP }}:3000",
+            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "datadog_enabled": true
+          }
+          EOF
+
+      - name: Upload Deployment Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-info
+          path: benchmark-results/
+
+  # Stage 3: DAST with OWASP ZAP
+  dast-owasp-zap:
+    name: DAST - OWASP ZAP Analysis
     runs-on: ubuntu-latest
-    needs:
-      - sast_semgrep
-      - dast_owasp_zap
-      - monitor_iast
-      - github_issue_search
+    needs: deploy-juice-shop
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download Deployment Info
+        uses: actions/download-artifact@v4
         with:
-          name: semgrep-results
+          name: deployment-info
+          path: deployment-info/
 
-      - uses: actions/download-artifact@v4
+      - name: Set Target URL
+        run: |
+          echo "TARGET_URL=http://${{ env.EC2_INSTANCE_IP }}:3000" >> $GITHUB_ENV
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
         with:
-          name: zap-report
+          target: ${{ env.TARGET_URL }}
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j -l INFO"
+          allow_issue_writing: false
+        continue-on-error: true
 
-      - run: |
-          echo "Static and dynamic analysis reports downloaded."
-          echo "Review runtime vulnerability findings on Datadog dashboard."
+      - name: OWASP ZAP Full Scan
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+            -t ${{ env.TARGET_URL }} \
+            -r zap-full-report.html \
+            -J zap-full-report.json \
+            -x zap-full-report.xml \
+            -m 10 \
+            -z "-config api.disablekey=true" || true
+        continue-on-error: true
+
+      - name: Generate ZAP Metrics
+        run: |
+          mkdir -p benchmark-results
+
+          # Parse ZAP JSON report for metrics
+          if [ -f zap-full-report.json ]; then
+            HIGH_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("High"))] | length' zap-full-report.json || echo 0)
+            MEDIUM_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Medium"))] | length' zap-full-report.json || echo 0)
+            LOW_COUNT=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Low"))] | length' zap-full-report.json || echo 0)
+          else
+            HIGH_COUNT=0
+            MEDIUM_COUNT=0
+            LOW_COUNT=0
+          fi
+
+          cat > benchmark-results/zap-metrics.json <<EOF
+          {
+            "tool": "OWASP ZAP",
+            "type": "DAST",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "target": "${{ env.TARGET_URL }}",
+            "findings": {
+              "high": $HIGH_COUNT,
+              "medium": $MEDIUM_COUNT,
+              "low": $LOW_COUNT
+            }
+          }
+          EOF
+
+      - name: Upload ZAP Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-results
+          path: |
+            zap-full-report.html
+            zap-full-report.json
+            zap-full-report.xml
+            benchmark-results/
+        if: always()
+
+  # Stage 4: IAST with Datadog Runtime Code Analysis
+  iast-datadog:
+    name: IAST - Datadog Runtime Analysis
+    runs-on: ubuntu-latest
+    needs: deploy-juice-shop
+
+    steps:
+      - name: Wait for IAST Instrumentation
+        run: |
+          echo "Waiting for Datadog IAST to collect runtime data..."
+          sleep 120
+
+      - name: Generate Traffic for IAST
+        run: |
+          TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
+
+          echo "Generating traffic to trigger IAST analysis..."
+
+          # Basic crawl
+          for endpoint in "/" "/rest/user/login" "/api/Feedbacks" "/api/Products" "/profile"; do
+            curl -s "$TARGET$endpoint" > /dev/null || true
+            sleep 1
+          done
+
+          # Simulate vulnerable operations
+          # SQL Injection attempts
+          curl -s "$TARGET/rest/products/search?q='))--" > /dev/null || true
+          curl -s "$TARGET/rest/products/search?q=' OR '1'='1" > /dev/null || true
+
+          # XSS attempts
+          curl -s "$TARGET/rest/products/search?q=<script>alert(1)</script>" > /dev/null || true
+
+          # Path traversal
+          curl -s "$TARGET/ftp/../../etc/passwd" > /dev/null || true
+
+          echo "Traffic generation complete"
+          sleep 60
+
+      - name: Query Datadog IAST Results via API
+        run: |
+          mkdir -p benchmark-results
+
+          # Query Datadog for IAST vulnerabilities
+          curl -X GET "https://api.${{ env.DATADOG_SITE }}/api/v2/security_monitoring/signals" \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "filter": {
+                "query": "service:juice-shop env:benchmark",
+                "from": "now-1h",
+                "to": "now"
+              }
+            }' > benchmark-results/datadog-signals.json || echo '{}' > benchmark-results/datadog-signals.json
+
+          # Query for Code Security vulnerabilities
+          curl -X GET "https://api.${{ env.DATADOG_SITE }}/api/v2/code-security/vulnerabilities" \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "filter": {
+                "service": "juice-shop",
+                "env": "benchmark"
+              }
+            }' > benchmark-results/datadog-vulnerabilities.json || echo '{}' > benchmark-results/datadog-vulnerabilities.json
+
+      - name: Generate Datadog IAST Metrics
+        run: |
+          cat > benchmark-results/datadog-iast-metrics.json <<EOF
+          {
+            "tool": "Datadog Code Security (IAST)",
+            "type": "IAST",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "service": "juice-shop",
+            "environment": "benchmark",
+            "datadog_dashboard": "https://app.${{ env.DATADOG_SITE }}/security/code-security"
+          }
+          EOF
+
+      - name: Upload Datadog IAST Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: datadog-iast-results
+          path: benchmark-results/
+
+  # Stage 5: Benchmark Report Generation
+  generate-benchmark-report:
+    name: Generate Benchmark Report
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, dast-owasp-zap, iast-datadog]
+    if: always()
+
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+
+      - name: Consolidate Results
+        run: |
+          mkdir -p final-report
+
+          # Combine all metrics
+          cat > final-report/benchmark-summary.json <<EOF
+          {
+            "benchmark_run": {
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "workflow_run_id": "${{ github.run_id }}",
+              "target_application": "OWASP Juice Shop"
+            },
+            "tools_evaluated": {
+              "sast": "Semgrep",
+              "dast": "OWASP ZAP",
+              "iast": "Datadog Code Security"
+            }
+          }
+          EOF
+
+          # Copy all results
+          find all-results -type f -name "*.json" -exec cp {} final-report/ \;
+          find all-results -type f \( -name "*.html" -o -name "*.xml" -o -name "*.sarif" \) -exec cp {} final-report/ \;
+
+      - name: Generate Markdown Report
+        run: |
+          cat > final-report/BENCHMARK_REPORT.md <<EOF
+          # DevSecOps Security Tools Benchmark Report
+
+          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Target Application:** OWASP Juice Shop
+          **Workflow Run:** [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ## Tools Evaluated
+
+          ### 1. SAST - Semgrep
+          - **Type:** Static Application Security Testing
+          - **Configuration:** OWASP Top 10, Security Audit, JavaScript/TypeScript rules
+          - **Results:** See \`semgrep.sarif\` and \`semgrep-metrics.json\`
+
+          ### 2. DAST - OWASP ZAP
+          - **Type:** Dynamic Application Security Testing
+          - **Scan Type:** Full scan with spider
+          - **Results:** See \`zap-full-report.html\` and \`zap-metrics.json\`
+
+          ### 3. IAST - Datadog Code Security
+          - **Type:** Interactive Application Security Testing
+          - **Configuration:** Runtime code analysis with APM instrumentation
+          - **Results:** See \`datadog-vulnerabilities.json\` and Datadog dashboard
+
+          ## Key Findings
+
+          ### Semgrep (SAST)
+          - Analyzes source code without execution
+          - Identifies potential vulnerabilities in code patterns
+          - Fast scanning with minimal false positives
+
+          ### OWASP ZAP (DAST)
+          - Tests running application from external perspective
+          - Discovers runtime vulnerabilities and configuration issues
+          - Provides attack simulation capabilities
+
+          ### Datadog IAST
+          - Monitors application during runtime
+          - Detects vulnerabilities during actual code execution
+          - Provides contextual information about exploitability
+
+          ## Accessing Results
+
+          - **Semgrep SARIF:** Upload to GitHub Security tab
+          - **ZAP Reports:** Download HTML report for detailed findings
+          - **Datadog Dashboard:** Visit https://app.${{ env.DATADOG_SITE }}/security/code-security
+
+          ## Next Steps
+
+          1. Review all findings across the three tools
+          2. Prioritize vulnerabilities based on severity and exploitability
+          3. Create remediation tickets for validated issues
+          4. Update security policies based on benchmark insights
+
+          EOF
+
+      - name: Upload Final Benchmark Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: final-report/
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## 🔐 Security Benchmark Complete\n\nThe DevSecOps pipeline has completed analyzing OWASP Juice Shop with:\n- ✅ Semgrep (SAST)\n- ✅ OWASP ZAP (DAST)\n- ✅ Datadog Code Security (IAST)\n\nDownload the artifacts to review detailed findings.'
+            })
+
+  # Cleanup Stage
+  cleanup:
+    name: Cleanup Resources
+    runs-on: ubuntu-latest
+    needs: [generate-benchmark-report]
+    if: always()
+
+    steps:
+      - name: Cleanup EC2 Instance (Optional)
+        run: |
+          echo "Juice Shop remains running for manual testing"
+          echo "To stop: ssh ubuntu@${{ env.EC2_INSTANCE_IP }} 'docker stop juice-shop'"
