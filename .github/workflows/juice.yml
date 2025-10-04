@@ -93,27 +93,23 @@ jobs:
           echo ""
           echo "IMPORTANT - Ensure your EC2 Security Group allows Port 22 and Port 3000"
 
-      - name: Create Dockerfile with Datadog Tracing
+      - name: Create Datadog Initialization Script
         run: |
-          cat > Dockerfile.juice-shop-dd <<'DOCKERFILE'
-          FROM bkimminich/juice-shop:latest
+          cat > init-dd.js <<'INITJS'
+          require('dd-trace').init({
+            service: 'juice-shop',
+            env: 'benchmark',
+            version: 'latest',
+            iast: { enabled: true },
+            appsec: { enabled: true },
+            runtimeMetrics: true
+          });
+          require('./build/app');
+          INITJS
 
-          USER root
-          WORKDIR /juice-shop
-
-          RUN npm install --no-save dd-trace@5
-
-          RUN printf '#!/usr/bin/env node\nrequire("dd-trace/init");\nrequire("./build/app");\n' > /juice-shop/server-dd.js && \
-              chmod +x /juice-shop/server-dd.js
-
-          USER node
-          ENTRYPOINT ["node"]
-          CMD ["/juice-shop/server-dd.js"]
-          DOCKERFILE
-
-      - name: Copy Dockerfile to EC2
+      - name: Copy Files to EC2
         run: |
-          scp -i ~/.ssh/id_rsa Dockerfile.juice-shop-dd ubuntu@${{ env.EC2_INSTANCE_IP }}:~/
+          scp -i ~/.ssh/id_rsa init-dd.js ubuntu@${{ env.EC2_INSTANCE_IP }}:~/
 
       - name: Deploy Juice Shop with Datadog Agent
         env:
