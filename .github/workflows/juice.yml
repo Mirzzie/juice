@@ -13,8 +13,9 @@ env:
   SSH_USER: ${{ secrets.SSH_USER }}
   SSH_KEY: ${{ secrets.SSH_KEY }}
   JUICE_SHOP_PORT: 3000
-  DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+  DD_API_KEY: ${{ secrets.DD_API_KEY }}
   DD_SITE: us5.datadoghq.com
+  PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
 jobs:
   setup_datadog_agent:
@@ -93,7 +94,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: zap_report.html
+          path: report.html
 
   monitor_iast:
     name: Datadog IAST Monitoring Reminder
@@ -104,6 +105,19 @@ jobs:
         run: |
           echo "Datadog Runtime Code Analysis (IAST) enabled. View vulnerabilities on the Datadog Security platform dashboard."
 
+  github_issue_search:
+    name: Search GitHub Issues for ZAP Full Scan Reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Search issues using PAT and new GitHub Search API
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          curl -H "Authorization: Bearer $PAT_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/search/issues?q=is:issue state:open repo:Mirzzie/juice ZAP Full Scan Report" \
+            --fail
+
   summary:
     name: Summarize Reports
     runs-on: ubuntu-latest
@@ -111,6 +125,7 @@ jobs:
       - sast_semgrep
       - dast_owasp_zap
       - monitor_iast
+      - github_issue_search
     steps:
       - uses: actions/download-artifact@v4
         with:
