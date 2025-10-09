@@ -1,0 +1,55 @@
+name: Deploy Juice Shop with Zen RASP (Aikido Firewall)
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - main
+            - master
+
+env:
+    EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+    EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+    ZEN_FIREWALL_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+
+jobs:
+    deploy-zen-rasp:
+        name: Deploy Juice Shop with Zen Firewall (RASP)
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Set up SSH key
+              run: |
+                  echo "${{ env.EC2_SSH_KEY }}" > private_key.pem
+                  chmod 600 private_key.pem
+
+            - name: Connect to EC2 and deploy Zen RASP container
+              run: |
+                  ssh -o StrictHostKeyChecking=no -i private_key.pem ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
+                    echo "🔹 Checking for existing Juice Shop containers..."
+                    docker stop juice-shop-zen || true
+                    docker rm juice-shop-zen || true
+
+                    echo "🔹 Pulling latest Juice Shop image..."
+                    docker pull bkimminich/juice-shop:latest
+
+                    echo "🔹 Running Juice Shop with Zen Firewall (RASP) on port 4000..."
+                    docker run -d \
+                      --name juice-shop-zen \
+                      -p 4000:3000 \
+                      -e AIKIDO_TOKEN=${{ secrets.ZEN_FIREWALL_TOKEN }} \
+                      -e AIKIDO_BLOCK=false \
+                      bkimminich/juice-shop:latest \
+                      node -r @aikidosec/firewall server.js
+
+                    echo "✅ Juice Shop (Zen RASP) is running on http://$(curl -s ifconfig.me):4000"
+                  ENDSSH
+
+            - name: Verify Deployment
+              run: |
+                  echo "Checking if Juice Shop with Zen Firewall is reachable..."
+                  curl -I http://${{ env.EC2_INSTANCE_IP }}:4000 || exit 1
+                  echo "✅ Zen RASP Deployment Verified Successfully!"
