@@ -9,7 +9,7 @@ on:
 
 env:
     EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-    EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+    EC2_SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
     ZEN_FIREWALL_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
@@ -28,7 +28,7 @@ jobs:
 
             - name: Connect to EC2 and deploy Zen RASP container
               run: |
-                  ssh -o StrictHostKeyChecking=no -i private_key.pem ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
+                  ssh -o StrictHostKeyChecking=no -i ${{ env.EC2_SSH_KEY }} ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
                     echo "🔹 Checking for existing Juice Shop containers..."
                     docker stop juice-shop-zen || true
                     docker rm juice-shop-zen || true
