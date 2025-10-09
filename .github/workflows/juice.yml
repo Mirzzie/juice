@@ -15,7 +15,7 @@ env:
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
   DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
   DATADOG_SITE: "us5.datadoghq.com"
-  ZEN_TOKEN: ${{ secrets.ZEN_FIIREWALL_TOKEN }}
+  ZEN_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
   sast-semgrep:
