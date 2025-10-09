@@ -1,4 +1,4 @@
-name: DevSecOps Security Tools Benchmark
+name: DevSecOps Security Benchmark
 
 on:
   push:
@@ -14,7 +14,8 @@ env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
   DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
-  DATADOG_SITE: "datadoghq.com"
+  DATADOG_SITE: "us5.datadoghq.com"
+  ZEN_TOKEN: ${{ secrets.ZEN_FIIREWALL_TOKEN }}
 
 jobs:
   sast-semgrep:
@@ -55,7 +56,7 @@ jobs:
       - name: Generate Semgrep Metrics
         run: |
           mkdir -p benchmark-results
-          cat > benchmark-results/semgrep-metrics.json <<'EOF'
+          cat > benchmark-results/semgrep-metrics.json <<EOF
           {
             "tool": "Semgrep",
             "type": "SAST",
@@ -71,14 +72,11 @@ jobs:
           path: benchmark-results/
 
   deploy-juice-shop:
-    name: Deploy Juice Shop with Datadog IAST
+    name: Deploy Juice Shop & Zen RASP
     runs-on: ubuntu-latest
     needs: sast-semgrep
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
@@ -88,97 +86,25 @@ jobs:
 
       - name: Check EC2 Connectivity
         run: |
-          echo "Testing SSH connectivity to EC2 instance..."
+          echo "Testing SSH connectivity to EC2..."
           ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.EC2_INSTANCE_IP }} 'echo "SSH connection successful"'
-          echo ""
-          echo "IMPORTANT - Ensure your EC2 Security Group allows Port 22 and Port 3000"
 
-      - name: Deploy Juice Shop with Datadog Agent
-        env:
-          DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-          DD_SITE: ${{ env.DATADOG_SITE }}
+      - name: Deploy Containers on EC2
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} "DD_API_KEY=${DD_API_KEY} DD_SITE=${DD_SITE}" 'bash -s' <<'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
           set -e
 
-          echo "=== System Update ==="
-          sudo apt-get update -qq
-
-          echo "=== Cleanup Docker ==="
-          docker system prune -af --volumes || true
-
-          echo "=== Disk Space ==="
-          df -h | grep -E "Filesystem|/dev/root"
-
-          echo "=== Swap Setup ==="
-          if [ ! -f /swapfile ]; then
-            echo "Creating 2GB swap..."
-            sudo fallocate -l 2G /swapfile
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-          else
-            echo "Swap already exists"
-          fi
-
-          echo "=== Docker Installation ==="
-          if ! command -v docker &> /dev/null; then
-            echo "Installing Docker..."
-            curl -fsSL https://get.docker.com -o get-docker.sh
-            sudo sh get-docker.sh
-            sudo usermod -aG docker ubuntu
-          else
-            echo "Docker already installed"
-          fi
-
-          echo "=== Datadog Agent Setup ==="
-          if sudo systemctl is-active --quiet datadog-agent; then
-            echo "Datadog Agent already running"
-          elif command -v datadog-agent &> /dev/null; then
-            echo "Starting Datadog Agent..."
-            sudo systemctl start datadog-agent
-            sleep 5
-          else
-            echo "Installing Datadog Agent..."
-            DD_API_KEY=${DD_API_KEY} \
-            DD_SITE=${DD_SITE} \
-            DD_APM_ENABLED=true \
-            DD_APM_NON_LOCAL_TRAFFIC=true \
-            DD_IAST_ENABLED=true \
-            DD_APPSEC_ENABLED=true \
-            bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
-            
-            sudo mkdir -p /etc/datadog-agent/conf.d
-            sudo tee /etc/datadog-agent/conf.d/apm.yaml > /dev/null <<APMCONF
-          apm_config:
-            enabled: true
-            apm_non_local_traffic: true
-          iast:
-            enabled: true
-          appsec:
-            enabled: true
-          APMCONF
-            
-            sudo systemctl restart datadog-agent
-            sleep 10
-          fi
-
-          echo "=== Juice Shop Deployment ==="
+          echo "=== Cleanup old containers ==="
           docker stop juice-shop 2>/dev/null || true
           docker rm juice-shop 2>/dev/null || true
+          docker stop juice-shop-zen 2>/dev/null || true
+          docker rm juice-shop-zen 2>/dev/null || true
 
-          if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^bkimminich/juice-shop:latest$'; then
-            echo "Juice Shop image already available"
-          else
-            echo "Pulling Juice Shop image..."
-            docker pull bkimminich/juice-shop:latest
-          fi
+          echo "=== Pull Juice Shop Image ==="
+          docker pull bkimminich/juice-shop:latest
 
+          echo "=== Deploy Juice Shop (Datadog IAST) on port 3000 ==="
           DD_AGENT_HOST=$(hostname -I | awk '{print $1}')
-          echo "Datadog Agent host: ${DD_AGENT_HOST}"
-
-          echo "Starting Juice Shop..."
           docker run -d \
             --name juice-shop \
             -p 3000:3000 \
@@ -189,48 +115,49 @@ jobs:
             -e DD_VERSION=latest \
             bkimminich/juice-shop:latest
 
-          echo "=== Waiting for Juice Shop ==="
+          echo "=== Deploy Juice Shop + Zen Firewall (Zen RASP) on port 4000 ==="
+          docker run -d \
+            --name juice-shop-zen \
+            -p 4000:3000 \
+            -e AIKIDO_TOKEN=${ZEN_TOKEN} \
+            -e AIKIDO_BLOCK=false \
+            bkimminich/juice-shop:latest
+
+          echo "=== Waiting for Juice Shop containers to start ==="
           for i in {1..60}; do
-            if curl -f http://localhost:3000 >/dev/null 2>&1; then
-              echo "Juice Shop is running on port 3000"
+            if curl -f http://localhost:3000 >/dev/null 2>&1 && curl -f http://localhost:4000 >/dev/null 2>&1; then
+              echo "Both containers are running"
               docker ps | grep juice-shop
               break
-            fi
-            if [ $i -eq 60 ]; then
-              echo "ERROR: Timeout waiting for Juice Shop"
-              docker logs juice-shop --tail 50
-              exit 1
             fi
             echo "Attempt $i/60..."
             sleep 3
           done
-
-          echo "=== Deployment Complete ==="
           ENDSSH
 
-      - name: Verify Deployment
+      - name: Verify External Access
         run: |
           sleep 15
-          echo "Testing external access to Juice Shop..."
           for i in {1..10}; do
-            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null 2>&1; then
-              echo "SUCCESS: Juice Shop accessible at http://${{ env.EC2_INSTANCE_IP }}:3000"
+            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null 2>&1 && \
+               curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:4000 >/dev/null 2>&1; then
+              echo "SUCCESS: Both Juice Shop containers are accessible externally"
               exit 0
             fi
             echo "Attempt $i/10..."
             sleep 3
           done
-          echo "ERROR: Cannot reach Juice Shop externally"
+          echo "ERROR: Cannot reach one or both Juice Shop containers"
           exit 1
 
       - name: Save Deployment Info
         run: |
           mkdir -p benchmark-results
-          cat > benchmark-results/deployment-info.json <<'EOF'
+          cat > benchmark-results/deployment-info.json <<EOF
           {
             "juice_shop_url": "http://${{ env.EC2_INSTANCE_IP }}:3000",
-            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "datadog_enabled": true
+            "juice_shop_zen_url": "http://${{ env.EC2_INSTANCE_IP }}:4000",
+            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
 
@@ -296,21 +223,14 @@ jobs:
       - name: Generate Traffic for IAST
         run: |
           TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
-          echo "Waiting for IAST instrumentation..."
           sleep 60
-
-          echo "Generating normal traffic..."
           for endpoint in / /rest/user/login /api/Products /api/Feedbacks; do
             curl -s "${TARGET}${endpoint}" >/dev/null || true
             sleep 2
           done
-
-          echo "Generating attack traffic..."
           curl -s "${TARGET}/rest/products/search?q='))--" >/dev/null || true
           curl -s "${TARGET}/rest/products/search?q=' OR '1'='1" >/dev/null || true
           curl -s "${TARGET}/rest/products/search?q=<script>alert(1)</script>" >/dev/null || true
-
-          echo "Waiting for IAST processing..."
           sleep 60
 
       - name: Query Datadog IAST Results
@@ -343,18 +263,20 @@ jobs:
           find all-results -name "*.html" -exec cp {} final-report/ \; 2>/dev/null || true
           find all-results -name "*.sarif" -exec cp {} final-report/ \; 2>/dev/null || true
 
-          cat > final-report/README.md <<'EOF'
+          cat > final-report/README.md <<EOF
           # DevSecOps Benchmark Results
 
           ## Tools Tested
           - **SAST**: Semgrep
           - **DAST**: OWASP ZAP
           - **IAST**: Datadog Code Security
+          - **RASP**: Zen Firewall by Aikido
 
           ## Results
           - Check semgrep.sarif for SAST findings
           - Check zap-full-report.html for DAST findings
           - Check Datadog dashboard for IAST findings
+          - Check Zen dashboard for RASP events
           EOF
 
       - name: Upload Final Report
@@ -374,4 +296,4 @@ jobs:
         run: |
           echo "Benchmark complete"
           echo "Juice Shop remains running on EC2 for manual testing"
-          echo "To stop: docker stop juice-shop"
+          echo "To stop: docker stop juice-shop juice-shop-zen"
