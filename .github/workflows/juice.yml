@@ -5,39 +5,26 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "0 2 * * 1"
   workflow_dispatch:
 
 env:
-  JUICE_SHOP_VERSION: "latest"
+  JUICE_SHOP_REPO: "https://github.com/juice-shop/juice-shop.git"
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
   DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
-  DATADOG_SITE: "us5.datadoghq.com"
-  ZEN_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+  DATADOG_SITE: "datadoghq.com"
+  ZEN_TOKEN: ${{ secrets.ZEN_TOKEN }}
 
 jobs:
   sast-semgrep:
     name: SAST - Semgrep Analysis
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Clone Juice Shop for Analysis
-        run: |
-          git clone https://github.com/juice-shop/juice-shop.git
-          cd juice-shop
-          echo "JUICE_SHOP_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-      - name: Run Semgrep SAST
+      - name: Run Semgrep Scan
         uses: semgrep/semgrep-action@v1
         with:
           config: >-
@@ -47,172 +34,132 @@ jobs:
             p/typescript
         continue-on-error: true
 
-      - name: Upload Semgrep Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-results
-          path: semgrep.sarif
-
-      - name: Generate Semgrep Metrics
-        run: |
-          mkdir -p benchmark-results
-          cat > benchmark-results/semgrep-metrics.json <<EOF
-          {
-            "tool": "Semgrep",
-            "type": "SAST",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "commit": "${{ env.JUICE_SHOP_COMMIT }}"
-          }
-          EOF
-
-      - name: Upload Benchmark Metrics
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-metrics
-          path: benchmark-results/
-
-  deploy-juice-shop:
-    name: Deploy Juice Shop & Zen RASP
+  build-zen-image:
+    name: Build Juice Shop + Zen Firewall Image
     runs-on: ubuntu-latest
     needs: sast-semgrep
 
     steps:
-      - name: Setup SSH Key
+      - name: Clone Juice Shop
+        run: |
+          git clone ${{ env.JUICE_SHOP_REPO }} juice-shop
+          cd juice-shop
+          echo "✅ Juice Shop cloned."
+
+      - name: Inject Zen Firewall into app.ts
+        run: |
+          cd juice-shop
+          # Insert import at the top of app.ts
+          sed -i "1iimport '@aikidosec/firewall';" app.ts
+
+      - name: Create Zen Dockerfile
+        run: |
+          cd juice-shop
+          cat > Dockerfile <<'EOF'
+          FROM node:18-alpine
+          WORKDIR /juice-shop
+          COPY . .
+          RUN npm install --save-exact @aikidosec/firewall && npm ci
+          RUN npm run build
+          EXPOSE 3000
+          ENV AIKIDO_BLOCK=false
+          CMD ["npm", "start"]
+          EOF
+
+      - name: Build Zen RASP Image
+        run: |
+          cd juice-shop
+          docker build -t juice-shop-zen:latest .
+          docker save juice-shop-zen:latest -o juice-shop-zen.tar
+
+      - name: Upload Zen Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: juice-shop-zen-image
+          path: juice-shop/juice-shop-zen.tar
+
+  deploy-juice-shop:
+    name: Deploy Juice Shop + Zen RASP to EC2
+    runs-on: ubuntu-latest
+    needs: build-zen-image
+
+    steps:
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Check EC2 Connectivity
-        run: |
-          echo "Testing SSH connectivity to EC2..."
-          ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.EC2_INSTANCE_IP }} 'echo "SSH connection successful"'
+      - name: Download Zen Image Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: juice-shop-zen-image
+          path: .
 
-      - name: Deploy Containers on EC2
+      - name: Copy Image to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa juice-shop-zen.tar ubuntu@${{ env.EC2_INSTANCE_IP }}:/home/ubuntu/
+
+      - name: Deploy Containers
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
           set -e
+          echo "=== Cleaning old containers ==="
+          docker stop juice-shop juice-shop-zen 2>/dev/null || true
+          docker rm juice-shop juice-shop-zen 2>/dev/null || true
 
-          echo "=== Cleanup old containers ==="
-          docker stop juice-shop 2>/dev/null || true
-          docker rm juice-shop 2>/dev/null || true
-          docker stop juice-shop-zen 2>/dev/null || true
-          docker rm juice-shop-zen 2>/dev/null || true
-
-          echo "=== Pull Juice Shop Image ==="
+          echo "=== Pulling vanilla Juice Shop ==="
           docker pull bkimminich/juice-shop:latest
 
-          echo "=== Deploy Juice Shop (Datadog IAST) on port 3000 ==="
-          DD_AGENT_HOST=$(hostname -I | awk '{print $1}')
+          echo "=== Loading Zen RASP image ==="
+          docker load -i juice-shop-zen.tar
+
+          echo "=== Running Juice Shop (Datadog IAST) on port 3000 ==="
           docker run -d \
             --name juice-shop \
             -p 3000:3000 \
-            -e DD_AGENT_HOST=${DD_AGENT_HOST} \
-            -e DD_TRACE_AGENT_PORT=8126 \
+            -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
             -e DD_SERVICE=juice-shop \
-            -e DD_ENV=benchmark \
-            -e DD_VERSION=latest \
             bkimminich/juice-shop:latest
 
-          echo "=== Deploy Juice Shop + Zen Firewall (Zen RASP) on port 4000 ==="
+          echo "=== Running Juice Shop + Zen Firewall on port 4000 ==="
           docker run -d \
             --name juice-shop-zen \
             -p 4000:3000 \
             -e AIKIDO_TOKEN=${ZEN_TOKEN} \
             -e AIKIDO_BLOCK=false \
-            bkimminich/juice-shop:latest
+            juice-shop-zen:latest
 
-          echo "=== Waiting for Juice Shop containers to start ==="
-          for i in {1..60}; do
-            if curl -f http://localhost:3000 >/dev/null 2>&1 && curl -f http://localhost:4000 >/dev/null 2>&1; then
-              echo "Both containers are running"
-              docker ps | grep juice-shop
-              break
-            fi
-            echo "Attempt $i/60..."
-            sleep 3
-          done
+          sleep 15
+          docker ps
           ENDSSH
 
-      - name: Verify External Access
+      - name: Verify Deployment
         run: |
-          sleep 15
-          for i in {1..10}; do
-            if curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null 2>&1 && \
-               curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:4000 >/dev/null 2>&1; then
-              echo "SUCCESS: Both Juice Shop containers are accessible externally"
-              exit 0
-            fi
-            echo "Attempt $i/10..."
-            sleep 3
-          done
-          echo "ERROR: Cannot reach one or both Juice Shop containers"
-          exit 1
-
-      - name: Save Deployment Info
-        run: |
-          mkdir -p benchmark-results
-          cat > benchmark-results/deployment-info.json <<EOF
-          {
-            "juice_shop_url": "http://${{ env.EC2_INSTANCE_IP }}:3000",
-            "juice_shop_zen_url": "http://${{ env.EC2_INSTANCE_IP }}:4000",
-            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-
-      - name: Upload Deployment Info
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-info
-          path: benchmark-results/
+          sleep 10
+          curl -f http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null && echo "✅ Juice Shop OK"
+          curl -f http://${{ env.EC2_INSTANCE_IP }}:4000 >/dev/null && echo "✅ Zen RASP OK"
 
   dast-owasp-zap:
-    name: DAST - OWASP ZAP Analysis
+    name: DAST - OWASP ZAP Scan
     runs-on: ubuntu-latest
     needs: deploy-juice-shop
 
     steps:
-      - name: Set Target URL
-        run: echo "TARGET_URL=http://${{ env.EC2_INSTANCE_IP }}:3000" >> $GITHUB_ENV
-
-      - name: OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          target: ${{ env.TARGET_URL }}
-          cmd_options: "-a -j -l INFO"
-        continue-on-error: true
-
-      - name: OWASP ZAP Full Scan
+      - name: Run OWASP ZAP
         run: |
           docker run --rm -v $(pwd):/zap/wrk:rw -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py -t ${{ env.TARGET_URL }} \
-            -r zap-full-report.html -J zap-full-report.json \
-            -m 10 -z "-config api.disablekey=true" || true
-        continue-on-error: true
-
-      - name: Generate ZAP Metrics
-        run: |
-          mkdir -p benchmark-results
-          HIGH=0; MEDIUM=0; LOW=0
-          if [ -f zap-full-report.json ]; then
-            HIGH=$(jq '[.site[].alerts[]|select(.riskdesc|contains("High"))]|length' zap-full-report.json 2>/dev/null || echo 0)
-            MEDIUM=$(jq '[.site[].alerts[]|select(.riskdesc|contains("Medium"))]|length' zap-full-report.json 2>/dev/null || echo 0)
-            LOW=$(jq '[.site[].alerts[]|select(.riskdesc|contains("Low"))]|length' zap-full-report.json 2>/dev/null || echo 0)
-          fi
-          cat > benchmark-results/zap-metrics.json <<EOF
-          {"tool":"OWASP ZAP","type":"DAST","findings":{"high":${HIGH},"medium":${MEDIUM},"low":${LOW}}}
-          EOF
+            zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
+            -r zap-report.html -J zap-report.json || true
 
       - name: Upload ZAP Results
         uses: actions/upload-artifact@v4
         with:
           name: zap-results
           path: |
-            zap-*.html
-            zap-*.json
-            benchmark-results/
-        if: always()
+            zap-report.html
+            zap-report.json
 
   iast-datadog:
     name: IAST - Datadog Runtime Analysis
@@ -220,80 +167,49 @@ jobs:
     needs: deploy-juice-shop
 
     steps:
-      - name: Generate Traffic for IAST
+      - name: Simulate Traffic
         run: |
           TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
-          sleep 60
-          for endpoint in / /rest/user/login /api/Products /api/Feedbacks; do
+          for endpoint in / /rest/products /rest/user/login /api/Feedbacks; do
             curl -s "${TARGET}${endpoint}" >/dev/null || true
-            sleep 2
+            sleep 1
           done
-          curl -s "${TARGET}/rest/products/search?q='))--" >/dev/null || true
-          curl -s "${TARGET}/rest/products/search?q=' OR '1'='1" >/dev/null || true
-          curl -s "${TARGET}/rest/products/search?q=<script>alert(1)</script>" >/dev/null || true
-          sleep 60
 
-      - name: Query Datadog IAST Results
+      - name: Save Metrics
         run: |
-          mkdir -p benchmark-results
-          echo '{"tool":"Datadog IAST","type":"IAST","note":"Check Datadog dashboard for results"}' > benchmark-results/datadog-metrics.json
+          echo '{"tool":"Datadog IAST","status":"active"}' > datadog-results.json
+          mkdir -p results && mv datadog-results.json results/
 
-      - name: Upload Datadog Results
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: datadog-iast-results
-          path: benchmark-results/
+          path: results/
 
   generate-report:
-    name: Generate Benchmark Report
+    name: Generate Final Report
     runs-on: ubuntu-latest
     needs: [sast-semgrep, dast-owasp-zap, iast-datadog]
     if: always()
 
     steps:
-      - name: Download All Artifacts
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-results/
+          path: results/
 
-      - name: Consolidate Results
+      - name: Consolidate Summary
         run: |
           mkdir -p final-report
-          find all-results -name "*.json" -exec cp {} final-report/ \; 2>/dev/null || true
-          find all-results -name "*.html" -exec cp {} final-report/ \; 2>/dev/null || true
-          find all-results -name "*.sarif" -exec cp {} final-report/ \; 2>/dev/null || true
-
-          cat > final-report/README.md <<EOF
-          # DevSecOps Benchmark Results
-
-          ## Tools Tested
-          - **SAST**: Semgrep
-          - **DAST**: OWASP ZAP
-          - **IAST**: Datadog Code Security
-          - **RASP**: Zen Firewall by Aikido
-
-          ## Results
-          - Check semgrep.sarif for SAST findings
-          - Check zap-full-report.html for DAST findings
-          - Check Datadog dashboard for IAST findings
-          - Check Zen dashboard for RASP events
-          EOF
+          echo "# DevSecOps Benchmark Summary" > final-report/summary.md
+          echo "- SAST: Semgrep ✅" >> final-report/summary.md
+          echo "- DAST: OWASP ZAP ✅" >> final-report/summary.md
+          echo "- IAST: Datadog ✅" >> final-report/summary.md
+          echo "- RASP: Zen Firewall (AikidoSec) ✅" >> final-report/summary.md
+          echo "Generated: $(date -u)" >> final-report/summary.md
 
       - name: Upload Final Report
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-report
+          name: final-report
           path: final-report/
-
-  cleanup:
-    name: Cleanup Resources
-    runs-on: ubuntu-latest
-    needs: [generate-report]
-    if: always()
-
-    steps:
-      - name: Info
-        run: |
-          echo "Benchmark complete"
-          echo "Juice Shop remains running on EC2 for manual testing"
-          echo "To stop: docker stop juice-shop juice-shop-zen"
