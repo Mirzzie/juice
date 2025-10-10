@@ -15,7 +15,7 @@ env:
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
   DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
   DATADOG_SITE: "us5.datadoghq.com"
-  AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN}}
+  AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
   sast-semgrep:
@@ -94,6 +94,7 @@ jobs:
       - name: Deploy Juice Shop with Datadog & Zen
         env:
           DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DD_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
           DD_SITE: ${{ env.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.AIKIDO_TOKEN }}
         run: |
@@ -106,9 +107,11 @@ jobs:
           sudo systemctl enable docker
           sudo systemctl start docker
 
-          echo "=== Datadog Agent ==="
+          echo "=== Install Datadog Agent ==="
           if ! command -v datadog-agent &>/dev/null; then
-            DD_API_KEY=${DD_API_KEY} DD_SITE=${DD_SITE} bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+            DD_AGENT_MAJOR_VERSION=7 \
+            DD_SITE="${DD_SITE}" \
+            bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
           fi
           sudo systemctl restart datadog-agent
 
