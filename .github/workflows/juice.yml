@@ -97,67 +97,72 @@ jobs:
           DD_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
           DD_SITE: ${{ env.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.AIKIDO_TOKEN }}
+          EC2_INSTANCE_IP: ${{ env.EC2_INSTANCE_IP }}
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
-          set -e
+          ssh -i ~/.ssh/id_rsa ubuntu@${EC2_INSTANCE_IP} "bash -s" <<ENDSSH
+            set -e
 
-          echo "=== System Prep ==="
-          sudo apt-get update -qq
-          sudo apt-get install -y curl jq git docker.io || true
-          sudo systemctl enable docker
-          sudo systemctl start docker
+            echo "=== System Prep ==="
+            sudo apt-get update -qq
+            sudo apt-get install -y curl jq git docker.io || true
+            sudo systemctl enable docker
+            sudo systemctl start docker
 
-          echo "=== Install Datadog Agent ==="
-          if ! command -v datadog-agent &>/dev/null; then
-            DD_AGENT_MAJOR_VERSION=7 \
-            DD_API_KEY="${DD_API_KEY}" \
-            DD_SITE="${DD_SITE}" \
-            bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
-          fi
-          sudo systemctl restart datadog-agent
+            echo "=== Exporting environment variables ==="
+            export DD_API_KEY="${DD_API_KEY}"
+            export DD_SITE="${DD_SITE}"
+            export AIKIDO_TOKEN="${AIKIDO_TOKEN}"
 
-          echo "=== Juice Shop Setup ==="
-          rm -rf juice-shop || true
-          git clone https://github.com/juice-shop/juice-shop.git
-          cd juice-shop
-
-          echo "=== Inject Zen Firewall (Aikido) ==="
-          cat > Dockerfile <<'DOCKER'
-          FROM node:18-alpine
-          WORKDIR /juice-shop
-          COPY . .
-          RUN npm install --save-exact @aikidosec/firewall
-          RUN npm install
-          RUN npm run build
-          EXPOSE 3000
-          ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
-          ENV AIKIDO_BLOCK=false
-          CMD ["npm", "start"]
-          DOCKER
-
-          echo "=== Build & Run Juice Shop ==="
-          docker stop juice-shop || true
-          docker rm juice-shop || true
-          docker build -t juice-shop-zen .
-          docker run -d \
-            --name juice-shop \
-            -p 3000:3000 \
-            -e AIKIDO_TOKEN=${AIKIDO_TOKEN} \
-            -e AIKIDO_BLOCK=false \
-            -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
-            -e DD_SERVICE=juice-shop \
-            -e DD_ENV=benchmark \
-            -e DD_VERSION=latest \
-            juice-shop-zen
-
-          echo "=== Wait for Startup ==="
-          for i in {1..60}; do
-            if curl -f http://localhost:3000 >/dev/null 2>&1; then
-              echo "Juice Shop is running"
-              break
+            echo "=== Install Datadog Agent ==="
+            if ! command -v datadog-agent &>/dev/null; then
+              DD_API_KEY="\${DD_API_KEY}" \
+              DD_SITE="\${DD_SITE}" \
+              bash -c "\$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
             fi
-            sleep 3
-          done
+            sudo systemctl restart datadog-agent
+
+            echo "=== Juice Shop Setup ==="
+            rm -rf juice-shop || true
+            git clone https://github.com/juice-shop/juice-shop.git
+            cd juice-shop
+
+            echo "=== Inject Zen Firewall (Aikido) ==="
+            cat > Dockerfile <<'DOCKER'
+            FROM node:18-alpine
+            WORKDIR /juice-shop
+            COPY . .
+            RUN npm install --save-exact @aikidosec/firewall
+            RUN npm install
+            RUN npm run build
+            EXPOSE 3000
+            ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
+            ENV AIKIDO_BLOCK=false
+            CMD ["npm", "start"]
+            DOCKER
+
+            echo "=== Build & Run Juice Shop ==="
+            docker stop juice-shop || true
+            docker rm juice-shop || true
+            docker build -t juice-shop-zen .
+            docker run -d \
+              --name juice-shop \
+              -p 3000:3000 \
+              -e AIKIDO_TOKEN="\${AIKIDO_TOKEN}" \
+              -e AIKIDO_BLOCK=false \
+              -e DD_AGENT_HOST=\$(hostname -I | awk '{print \$1}') \
+              -e DD_SERVICE=juice-shop \
+              -e DD_ENV=benchmark \
+              -e DD_VERSION=latest \
+              juice-shop-zen
+
+            echo "=== Verify Startup ==="
+            for i in {1..60}; do
+              if curl -f http://localhost:3000 >/dev/null 2>&1; then
+                echo "✅ Juice Shop is running"
+                break
+              fi
+              sleep 3
+            done
           ENDSSH
 
       - name: Verify Deployment
@@ -216,6 +221,7 @@ jobs:
       - name: Generate Traffic
         run: |
           TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
+          mkdir -p benchmark-results
           for i in {1..5}; do
             curl -s "${TARGET}/api/Products" >/dev/null
             curl -s "${TARGET}/rest/products/search?q=' OR '1'='1" >/dev/null
@@ -268,5 +274,9 @@ jobs:
       - name: Print Instructions
         run: |
           echo "Benchmark completed successfully."
-          echo "Juice Shop with Zen Firewall and Datadog remains running at http://${{ env.EC2_INSTANCE_IP }}:3000"
-          echo "To stop manually: docker stop juice-shop && docker rm juice-shop"
+          echo "Juice Shop with Zen Firewall and Datadog is running at:"
+          echo "➡ http://${{ env.EC2_INSTANCE_IP }}:3000"
+          echo ""
+          echo "To stop manually:"
+          echo "  ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }}"
+          echo "  docker stop juice-shop && docker rm juice-shop"
