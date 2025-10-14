@@ -1,76 +1,42 @@
-name: DevSecOps Security Tools Benchmark
+name: Juice Shop DevSecOps Benchmark Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "0 2 * * 1"
   workflow_dispatch:
 
 env:
-  JUICE_SHOP_VERSION: "latest"
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-  DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-  DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
   DATADOG_SITE: "us5.datadoghq.com"
-  AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
+  # ------------------------------
+  # 1️⃣  Static Application Security Testing
+  # ------------------------------
   sast-semgrep:
-    name: SAST - Semgrep Analysis
+    name: SAST - Semgrep
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Clone Juice Shop for Analysis
-        run: |
-          git clone https://github.com/juice-shop/juice-shop.git
-          cd juice-shop
-          echo "JUICE_SHOP_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-      - name: Run Semgrep SAST
-        uses: semgrep/semgrep-action@v1
+      - name: Run Semgrep Analysis
+        uses: returntocorp/semgrep-action@v1
         with:
-          config: >-
-            p/security-audit
-            p/owasp-top-ten
-            p/javascript
-            p/typescript
-        continue-on-error: true
+          config: "p/owasp-top-ten"
 
       - name: Upload Semgrep Results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep.sarif
 
-      - name: Generate Semgrep Metrics
-        run: |
-          mkdir -p benchmark-results
-          cat > benchmark-results/semgrep-metrics.json <<'EOF'
-          {
-            "tool": "Semgrep",
-            "type": "SAST",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "commit": "${{ env.JUICE_SHOP_COMMIT }}"
-          }
-          EOF
-
-      - name: Upload Benchmark Metrics
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-metrics
-          path: benchmark-results/
-
+  # ------------------------------
+  # 2️⃣  Deploy Juice Shop with Datadog & Zen Firewall
+  # ------------------------------
   deploy-juice-shop:
     name: Deploy Juice Shop with Datadog & Zen Firewall
     runs-on: ubuntu-latest
@@ -91,192 +57,118 @@ jobs:
         run: |
           ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.EC2_INSTANCE_IP }} 'echo "SSH OK"'
 
-      - name: Deploy Juice Shop with Datadog & Zen
+      - name: Deploy Juice Shop with Datadog & Aikido Zen Firewall
         env:
           DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
           DD_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
           DD_SITE: ${{ env.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.AIKIDO_TOKEN }}
-          EC2_INSTANCE_IP: ${{ env.EC2_INSTANCE_IP }}
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${EC2_INSTANCE_IP} "bash -s" <<ENDSSH
-            set -e
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
+          set -e
 
-            echo "=== System Prep ==="
-            sudo apt-get update -qq
-            sudo apt-get install -y curl jq git docker.io || true
-            sudo systemctl enable docker
-            sudo systemctl start docker
+          echo "=== System Prep ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y curl jq git docker.io || true
+          sudo systemctl enable docker
+          sudo systemctl start docker
 
-            echo "=== Exporting environment variables ==="
-            export DD_API_KEY="${DD_API_KEY}"
-            export DD_SITE="${DD_SITE}"
-            export AIKIDO_TOKEN="${AIKIDO_TOKEN}"
+          echo "=== Install Datadog Agent ==="
+          if ! command -v datadog-agent &>/dev/null; then
+            DD_API_KEY="${DD_API_KEY}" \
+            DD_SITE="${DD_SITE}" \
+            bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+          fi
+          sudo systemctl restart datadog-agent
 
-            echo "=== Install Datadog Agent ==="
-            if ! command -v datadog-agent &>/dev/null; then
-              DD_API_KEY="\${DD_API_KEY}" \
-              DD_SITE="\${DD_SITE}" \
-              bash -c "\$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+          echo "=== Juice Shop Setup ==="
+          rm -rf juice-shop || true
+          git clone https://github.com/juice-shop/juice-shop.git
+          cd juice-shop
+
+          echo "=== Inject Zen Firewall (Aikido) ==="
+          printf "%s\n" \
+          "FROM node:18-alpine" \
+          "WORKDIR /juice-shop" \
+          "COPY . ." \
+          "RUN npm install --save-exact @aikidosec/firewall" \
+          "RUN npm install" \
+          "RUN npm run build" \
+          "EXPOSE 3000" \
+          "ENV AIKIDO_TOKEN=\${AIKIDO_TOKEN}" \
+          "ENV AIKIDO_BLOCK=false" \
+          "CMD [\"npm\", \"start\"]" > Dockerfile
+
+          echo "=== Build & Run Juice Shop ==="
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+          docker build -t juice-shop-zen .
+          docker run -d \
+            --name juice-shop \
+            -p 3000:3000 \
+            -e AIKIDO_TOKEN="${AIKIDO_TOKEN}" \
+            -e AIKIDO_BLOCK=false \
+            -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
+            -e DD_SERVICE=juice-shop \
+            -e DD_ENV=benchmark \
+            -e DD_VERSION=latest \
+            juice-shop-zen
+
+          echo "=== Wait for Startup ==="
+          for i in {1..60}; do
+            if curl -f http://localhost:3000 >/dev/null 2>&1; then
+              echo "Juice Shop is running"
+              exit 0
             fi
-            sudo systemctl restart datadog-agent
-
-            echo "=== Juice Shop Setup ==="
-            rm -rf juice-shop || true
-            git clone https://github.com/juice-shop/juice-shop.git
-            cd juice-shop
-
-            echo "=== Inject Zen Firewall (Aikido) ==="
-            cat > Dockerfile <<'DOCKER'
-            FROM node:18-alpine
-            WORKDIR /juice-shop
-            COPY . .
-            RUN npm install --save-exact @aikidosec/firewall
-            RUN npm install
-            RUN npm run build
-            EXPOSE 3000
-            ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
-            ENV AIKIDO_BLOCK=false
-            CMD ["npm", "start"]
-            DOCKER
-
-            echo "=== Build & Run Juice Shop ==="
-            docker stop juice-shop || true
-            docker rm juice-shop || true
-            docker build -t juice-shop-zen .
-            docker run -d \
-              --name juice-shop \
-              -p 3000:3000 \
-              -e AIKIDO_TOKEN="\${AIKIDO_TOKEN}" \
-              -e AIKIDO_BLOCK=false \
-              -e DD_AGENT_HOST=\$(hostname -I | awk '{print \$1}') \
-              -e DD_SERVICE=juice-shop \
-              -e DD_ENV=benchmark \
-              -e DD_VERSION=latest \
-              juice-shop-zen
-
-            echo "=== Verify Startup ==="
-            for i in {1..60}; do
-              if curl -f http://localhost:3000 >/dev/null 2>&1; then
-                echo "✅ Juice Shop is running"
-                break
-              fi
-              sleep 3
-            done
+            sleep 3
+          done
+          echo "Juice Shop failed to start" >&2
+          exit 1
           ENDSSH
 
-      - name: Verify Deployment
-        run: |
-          sleep 10
-          curl -f -m 10 http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null \
-            && echo "Juice Shop + Zen is live ✅" \
-            || (echo "❌ Juice Shop unreachable" && exit 1)
-
-  dast-owasp-zap:
+  # ------------------------------
+  # 3️⃣  Dynamic Application Security Testing (OWASP ZAP)
+  # ------------------------------
+  dast-zap:
     name: DAST - OWASP ZAP Scan
     runs-on: ubuntu-latest
     needs: deploy-juice-shop
-
     steps:
-      - name: Set Target
-        run: echo "TARGET_URL=http://${{ env.EC2_INSTANCE_IP }}:3000" >> $GITHUB_ENV
-
-      - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          target: ${{ env.TARGET_URL }}
-          cmd_options: "-a -j -l INFO"
-        continue-on-error: true
-
-      - name: ZAP Full Scan
+      - name: Run OWASP ZAP Baseline Scan
         run: |
-          docker run --rm -v $(pwd):/zap/wrk:rw -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py -t ${{ env.TARGET_URL }} \
-            -r zap-full-report.html -J zap-full-report.json \
-            -m 10 -z "-config api.disablekey=true" || true
+          docker run --rm -v $(pwd):/zap/wrk:rw ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
+            -r zap_report.html
 
-      - name: Generate ZAP Metrics
-        run: |
-          mkdir -p benchmark-results
-          HIGH=$(jq '[.site[].alerts[] | select(.riskdesc | contains("High"))] | length' zap-full-report.json 2>/dev/null || echo 0)
-          MEDIUM=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Medium"))] | length' zap-full-report.json 2>/dev/null || echo 0)
-          LOW=$(jq '[.site[].alerts[] | select(.riskdesc | contains("Low"))] | length' zap-full-report.json 2>/dev/null || echo 0)
-          echo "{\"tool\":\"OWASP ZAP\",\"type\":\"DAST\",\"findings\":{\"high\":$HIGH,\"medium\":$MEDIUM,\"low\":$LOW}}" > benchmark-results/zap-metrics.json
-
-      - name: Upload ZAP Results
+      - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         with:
-          name: zap-results
-          path: |
-            zap-*.html
-            zap-*.json
-            benchmark-results/
+          name: zap-report
+          path: zap_report.html
 
-  iast-datadog:
-    name: IAST - Datadog Runtime Scan
-    runs-on: ubuntu-latest
-    needs: deploy-juice-shop
-
-    steps:
-      - name: Generate Traffic
-        run: |
-          TARGET="http://${{ env.EC2_INSTANCE_IP }}:3000"
-          mkdir -p benchmark-results
-          for i in {1..5}; do
-            curl -s "${TARGET}/api/Products" >/dev/null
-            curl -s "${TARGET}/rest/products/search?q=' OR '1'='1" >/dev/null
-            sleep 2
-          done
-          echo '{"tool":"Datadog IAST","note":"Check Datadog dashboard for results"}' > benchmark-results/datadog-iast.json
-
-      - name: Upload IAST Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: datadog-iast-results
-          path: benchmark-results/
-
-  generate-report:
-    name: Generate Final Benchmark Report
-    runs-on: ubuntu-latest
-    needs: [sast-semgrep, dast-owasp-zap, iast-datadog]
-    if: always()
-
-    steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-results/
-
-      - name: Consolidate Results
-        run: |
-          mkdir -p final-report
-          find all-results -name "*.json" -exec cp {} final-report/ \;
-          find all-results -name "*.html" -exec cp {} final-report/ \;
-          echo "# DevSecOps Benchmark Results" > final-report/README.md
-          echo "- SAST: Semgrep" >> final-report/README.md
-          echo "- DAST: OWASP ZAP" >> final-report/README.md
-          echo "- IAST: Datadog" >> final-report/README.md
-          echo "- RASP: Aikido Zen Firewall" >> final-report/README.md
-
-      - name: Upload Final Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-report
-          path: final-report/
-
+  # ------------------------------
+  # 4️⃣  Cleanup EC2
+  # ------------------------------
   cleanup:
-    name: Cleanup EC2
+    name: Cleanup EC2 Environment
     runs-on: ubuntu-latest
-    needs: [generate-report]
     if: always()
-
+    needs: dast-zap
     steps:
-      - name: Print Instructions
+      - name: Setup SSH Key
         run: |
-          echo "Benchmark completed successfully."
-          echo "Juice Shop with Zen Firewall and Datadog is running at:"
-          echo "➡ http://${{ env.EC2_INSTANCE_IP }}:3000"
-          echo ""
-          echo "To stop manually:"
-          echo "  ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }}"
-          echo "  docker stop juice-shop && docker rm juice-shop"
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Stop and Remove Containers
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
+          set -e
+          echo "=== Cleaning up Containers ==="
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+          docker image prune -af || true
+          echo "Cleanup complete ✅"
+          ENDSSH
