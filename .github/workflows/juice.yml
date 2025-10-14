@@ -111,7 +111,7 @@ jobs:
           if ! command -v datadog-agent &>/dev/null; then
             DD_AGENT_MAJOR_VERSION=7 \
             DD_SITE="${DD_SITE}" \
-            bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+            bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
           fi
           sudo systemctl restart datadog-agent
 
