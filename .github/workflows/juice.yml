@@ -56,7 +56,7 @@ jobs:
       - name: Generate Semgrep Metrics
         run: |
           mkdir -p benchmark-results
-          cat > benchmark-results/semgrep-metrics.json <<EOF
+          cat > benchmark-results/semgrep-metrics.json <<'EOF'
           {
             "tool": "Semgrep",
             "type": "SAST",
@@ -99,73 +99,72 @@ jobs:
           AIKIDO_TOKEN: ${{ secrets.AIKIDO_TOKEN }}
           EC2_INSTANCE_IP: ${{ env.EC2_INSTANCE_IP }}
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${EC2_INSTANCE_IP} 'bash -s' <<'ENDSSH'
-          set -e
+          ssh -i ~/.ssh/id_rsa ubuntu@${EC2_INSTANCE_IP} <<EOF
+            set -e
 
-          echo "=== System Prep ==="
-          sudo apt-get update -qq
-          sudo apt-get install -y curl jq git docker.io || true
-          sudo systemctl enable docker
-          sudo systemctl start docker
+            echo "=== System Prep ==="
+            sudo apt-get update -qq
+            sudo apt-get install -y curl jq git docker.io || true
+            sudo systemctl enable docker
+            sudo systemctl start docker
 
-          echo "=== Exporting environment variables ==="
-          export DD_API_KEY="${DD_API_KEY}"
-          export DD_SITE="${DD_SITE}"
-          export AIKIDO_TOKEN="${AIKIDO_TOKEN}"
+            echo "=== Exporting environment variables ==="
+            export DD_API_KEY="${DD_API_KEY}"
+            export DD_APP_KEY="${DD_APP_KEY}"
+            export DD_SITE="${DD_SITE}"
+            export AIKIDO_TOKEN="${AIKIDO_TOKEN}"
 
-          echo "=== Install Datadog Agent ==="
-          if ! command -v datadog-agent &>/dev/null; then
-            DD_API_KEY="${DD_API_KEY}" \
-            DD_SITE="${DD_SITE}" \
-            bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
-          fi
-          sudo systemctl restart datadog-agent
-
-          echo "=== Juice Shop Setup ==="
-          rm -rf juice-shop || true
-          git clone https://github.com/juice-shop/juice-shop.git
-          cd juice-shop
-
-          echo "=== Inject Zen Firewall (Aikido) ==="
-          cat > Dockerfile <<DOCKER
-          FROM node:18-alpine
-          WORKDIR /juice-shop
-          COPY . .
-          RUN npm install --save-exact @aikidosec/firewall
-          RUN npm install
-          RUN npm run build
-          EXPOSE 3000
-          ENV AIKIDO_TOKEN=\${AIKIDO_TOKEN}
-          ENV AIKIDO_BLOCK=false
-          CMD ["npm", "start"]
-          DOCKER
-
-          echo "=== Build & Run Juice Shop ==="
-          docker stop juice-shop || true
-          docker rm juice-shop || true
-          docker build -t juice-shop-zen .
-          docker run -d \
-            --name juice-shop \
-            -p 3000:3000 \
-            -e AIKIDO_TOKEN="${AIKIDO_TOKEN}" \
-            -e AIKIDO_BLOCK=false \
-            -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
-            -e DD_SERVICE=juice-shop \
-            -e DD_ENV=benchmark \
-            -e DD_VERSION=latest \
-            juice-shop-zen
-
-          echo "=== Verify Startup ==="
-          for i in {1..60}; do
-            if curl -f http://localhost:3000 >/dev/null 2>&1; then
-              echo "✅ Juice Shop is running"
-              exit 0
+            echo "=== Install Datadog Agent ==="
+            if ! command -v datadog-agent &>/dev/null; then
+              DD_API_KEY="${DD_API_KEY}" \
+              DD_SITE="${DD_SITE}" \
+              bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
             fi
-            sleep 3
-          done
-          echo "❌ Juice Shop failed to start"
-          exit 1
-          ENDSSH
+            sudo systemctl restart datadog-agent
+
+            echo "=== Juice Shop Setup ==="
+            rm -rf juice-shop || true
+            git clone https://github.com/juice-shop/juice-shop.git
+            cd juice-shop
+
+            echo "=== Inject Zen Firewall (Aikido) ==="
+            cat > Dockerfile <<'DOCKER'
+            FROM node:18-alpine
+            WORKDIR /juice-shop
+            COPY . .
+            RUN npm install --save-exact @aikidosec/firewall
+            RUN npm install
+            RUN npm run build
+            EXPOSE 3000
+            ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
+            ENV AIKIDO_BLOCK=false
+            CMD ["npm", "start"]
+            DOCKER
+
+            echo "=== Build & Run Juice Shop ==="
+            docker stop juice-shop || true
+            docker rm juice-shop || true
+            docker build -t juice-shop-zen .
+            docker run -d \
+              --name juice-shop \
+              -p 3000:3000 \
+              -e AIKIDO_TOKEN="${AIKIDO_TOKEN}" \
+              -e AIKIDO_BLOCK=false \
+              -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
+              -e DD_SERVICE=juice-shop \
+              -e DD_ENV=benchmark \
+              -e DD_VERSION=latest \
+              juice-shop-zen
+
+            echo "=== Verify Startup ==="
+            for i in {1..60}; do
+              if curl -f http://localhost:3000 >/dev/null 2>&1; then
+                echo "✅ Juice Shop is running"
+                break
+              fi
+              sleep 3
+            done
+          EOF
 
       - name: Verify Deployment
         run: |
@@ -273,24 +272,12 @@ jobs:
     if: always()
 
     steps:
-      - name: Setup SSH Key
+      - name: Print Instructions
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-      - name: Stop and Remove Juice Shop Containers
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} 'bash -s' <<'ENDSSH'
-          echo "=== Cleaning up Juice Shop ==="
-          docker stop juice-shop || true
-          docker rm juice-shop || true
-          docker image prune -af || true
-          echo "✅ Cleanup complete."
-          ENDSSH
-
-      - name: Final Message
-        run: |
-          echo "✅ Benchmark completed successfully."
-          echo "All containers cleaned up on EC2 instance (${ env.EC2_INSTANCE_IP })."
+          echo "Benchmark completed successfully."
+          echo "Juice Shop with Zen Firewall and Datadog is running at:"
+          echo "➡ http://${{ env.EC2_INSTANCE_IP }}:3000"
+          echo ""
+          echo "To stop manually:"
+          echo "  ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }}"
+          echo "  docker stop juice-shop && docker rm juice-shop"
