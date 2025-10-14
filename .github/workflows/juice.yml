@@ -110,6 +110,7 @@ jobs:
           echo "=== Install Datadog Agent ==="
           if ! command -v datadog-agent &>/dev/null; then
             DD_AGENT_MAJOR_VERSION=7 \
+            DD_APP_KEY="${DD_APP_KEY}" \
             DD_SITE="${DD_SITE}" \
             bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
           fi
