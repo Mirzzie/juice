@@ -65,10 +65,10 @@ CMD ["npm", "start"]
 DOCKER
 
 echo "=== Build & Run Juice Shop ==="
-docker stop juice-shop || true
-docker rm juice-shop || true
-docker build -t juice-shop-zen .
-docker run -d \
+sudo docker stop juice-shop || true
+sudo docker rm juice-shop || true
+sudo docker build -t juice-shop-zen .
+sudo docker run -d \
     --name juice-shop \
     -p 3000:3000 \
     -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
