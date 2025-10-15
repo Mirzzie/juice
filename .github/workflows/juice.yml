@@ -27,7 +27,7 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
       - name: Install Ansible
@@ -42,7 +42,7 @@ jobs:
           DATADOG_SITE: ${{ secrets.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
         run: |
-          ansible-playbook -i "${{ secrets.EC2_INSTANCE_IP }}," -u ${{ secrets.EC2_SSH_USER }} \
+          ansible-playbook -i "${{ secrets.EC2_INSTANCE_IP }}," -u ubuntu \
             --private-key ~/.ssh/id_rsa ansible/playbook.yml
 
   zap_scan:
