@@ -6,6 +6,18 @@ sudo apt-get update -qq
 sudo apt-get install -y curl jq git docker.io
 sudo systemctl enable --now docker
 
+echo "=== Adding user to docker group ==="
+sudo usermod -aG docker $USER || sudo usermod -aG docker ubuntu || true
+
+echo "=== Restarting Docker service ==="
+sudo systemctl restart docker
+
+echo "=== Checking docker access ==="
+if ! docker info >/dev/null 2>&1; then
+  echo "Warning: Docker commands may still fail without a new login shell."
+fi
+
+
 echo "=== Exporting environment variables ==="
 echo "DD_API_KEY=$DD_API_KEY"
 echo "DD_APP_KEY=$DD_APP_KEY"
