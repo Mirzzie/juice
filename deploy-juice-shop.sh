@@ -3,9 +3,8 @@ set -e
 
 echo "=== System Prep ==="
 sudo apt-get update -qq
-sudo apt-get install -y curl jq git docker.io || true
-sudo systemctl enable docker
-sudo systemctl start docker
+sudo apt-get install -y curl jq git docker.io
+sudo systemctl enable --now docker
 
 echo "=== Exporting environment variables ==="
 echo "DD_API_KEY=$DD_API_KEY"
@@ -13,18 +12,17 @@ echo "DD_APP_KEY=$DD_APP_KEY"
 echo "DD_SITE=$DD_SITE"
 echo "AIKIDO_TOKEN=$AIKIDO_TOKEN"
 
-echo "=== Install Datadog Agent ==="
+echo "=== Install Datadog Agent if missing ==="
 if ! command -v datadog-agent &>/dev/null; then
-    DD_API_KEY="${DD_API_KEY}" \
-    DD_SITE="${DD_SITE}" \
-    bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script_agent7.sh)"
+    DD_API_KEY="$DD_API_KEY" DD_SITE="$DD_SITE" \
+    bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
 fi
 sudo systemctl restart datadog-agent
 
 echo "=== Juice Shop Setup ==="
-rm -rf juice-shop || true
+rm -rf juice-shop
 git clone https://github.com/juice-shop/juice-shop.git
-cd juice-shop
+cd juice-shop || exit 1
 
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
@@ -47,7 +45,7 @@ docker build -t juice-shop-zen .
 docker run -d \
     --name juice-shop \
     -p 3000:3000 \
-    -e AIKIDO_TOKEN="${AIKIDO_TOKEN}" \
+    -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
     -e AIKIDO_BLOCK=false \
     -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
     -e DD_SERVICE=juice-shop \
