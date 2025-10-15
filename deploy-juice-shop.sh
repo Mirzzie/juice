@@ -52,9 +52,10 @@ cd juice-shop || exit 1
 
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /juice-shop
 COPY . .
+RUN apk add --no-cache git python3 make g++ 
 RUN apk add --no-cache git
 RUN npm install --save-exact @aikidosec/firewall
 RUN npm install
