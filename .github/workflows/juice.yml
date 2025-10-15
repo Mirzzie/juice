@@ -36,14 +36,32 @@ jobs:
           sudo apt install -y python3-pip
           pip3 install ansible paramiko
 
-      - name: Run Ansible playbook
+      - name: Run Ansible playbook (deploy)
         env:
           DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
           DATADOG_SITE: ${{ secrets.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+          EC2_USER: ${{ secrets.EC2_SSH_USER }} # ensure this secret exists; if empty, use "ubuntu" below
+          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }} # ensure this secret exists
         run: |
-          ansible-playbook -i "${{ secrets.EC2_INSTANCE_IP }}," -u ubuntu \
-            --private-key ~/.ssh/id_rsa ansible/playbook.yml
+          # write private key
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          # add github runner known_hosts entry to avoid interactive prompt
+          ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
+
+          # fallback to ubuntu if EC2_USER secret is empty
+          if [ -z "$EC2_USER" ]; then
+            EC2_USER=ubuntu
+          fi
+
+          # optionally disable host key checking for quicker runs (uncomment if you prefer)
+          # export ANSIBLE_HOST_KEY_CHECKING=False
+
+          # Run ansible-playbook with proper -i and -u arguments
+          ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" --private-key ~/.ssh/id_rsa ansible/playbook.yml
 
   zap_scan:
     needs: deploy
