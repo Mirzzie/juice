@@ -50,6 +50,15 @@ rm -rf juice-shop
 git clone https://github.com/juice-shop/juice-shop.git
 cd juice-shop || exit 1
 
+echo "Cleaning up Docker containers, images, volumes, and networks..."
+docker container stop $(docker container ls -aq) || true
+docker container rm $(docker container ls -aq) || true
+docker image rm -f $(docker image ls -aq) || true
+docker volume prune -f
+docker network prune -f
+echo "Cleanup complete."
+
+
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
 FROM node:20-bullseye
@@ -65,6 +74,8 @@ RUN apt-get update && apt-get install -y \
     make \
     g++ \
   && rm -rf /var/lib/apt/lists/*
+
+
 
 RUN npm install --save-exact @aikidosec/firewall
 RUN npm install
