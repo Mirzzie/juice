@@ -61,7 +61,7 @@ echo "Cleanup complete."
 
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
-FROM node:20-bullseye
+FROM node:22-bullseye
 
 WORKDIR /juice-shop
 
