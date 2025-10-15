@@ -12,6 +12,20 @@ echo "DD_APP_KEY=$DD_APP_KEY"
 echo "DD_SITE=$DD_SITE"
 echo "AIKIDO_TOKEN=$AIKIDO_TOKEN"
 
+echo "=== Cleaning APT cache ==="
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/*
+sudo apt-get update
+
+echo "=== Checking disk and memory ==="
+df -h
+free -m
+
+echo "=== Fix broken installs if any ==="
+sudo dpkg --configure -a || true
+sudo apt-get install -f -y || true
+
+
 echo "=== Install Datadog Agent if missing ==="
 if ! command -v datadog-agent &>/dev/null; then
     DD_API_KEY="$DD_API_KEY" DD_SITE="$DD_SITE" \
