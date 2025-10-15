@@ -46,7 +46,6 @@ resource "aws_instance" "juice" {
   instance_type          = "t3.micro"
   key_name               = "sec"
   vpc_security_group_ids = [aws_security_group.juice_sg.id]
-  user_data              = file("user-data.sh")
 
   tags = {
     Name = "juice"

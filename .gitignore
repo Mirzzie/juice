@@ -29,7 +29,7 @@ terraform.tfvars
 *.pem
 *.key
 *.p12
-
+*.env
 # IDE/editor junk
 *.swp
 *.swo
