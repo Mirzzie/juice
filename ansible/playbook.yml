@@ -1,4 +1,4 @@
-- hosts: juice
+- hosts: all
   become: true
   vars:
     dd_api_key: "{{ lookup('env','DATADOG_API_KEY') }}"
