@@ -9,14 +9,17 @@ sudo systemctl enable --now docker
 echo "=== Adding user to docker group ==="
 sudo usermod -aG docker $USER || sudo usermod -aG docker ubuntu || true
 
+echo "=== Refreshing group membership (newgrp) ==="
+# This helps activate docker group immediately in the running script
+newgrp docker || true
+
 echo "=== Restarting Docker service ==="
 sudo systemctl restart docker
 
 echo "=== Checking docker access ==="
 if ! docker info >/dev/null 2>&1; then
-  echo "Warning: Docker commands may still fail without a new login shell."
+  echo "Warning: Docker commands may still fail without a new login shell or session."
 fi
-
 
 echo "=== Exporting environment variables ==="
 echo "DD_API_KEY=$DD_API_KEY"
@@ -37,11 +40,10 @@ echo "=== Fix broken installs if any ==="
 sudo dpkg --configure -a || true
 sudo apt-get install -f -y || true
 
-
 echo "=== Install Datadog Agent if missing ==="
 if ! command -v datadog-agent &>/dev/null; then
-    DD_API_KEY="$DD_API_KEY" DD_SITE="$DD_SITE" \
-    bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+  DD_API_KEY="$DD_API_KEY" DD_SITE="$DD_SITE" \
+  bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
 fi
 sudo systemctl restart datadog-agent
 
@@ -51,13 +53,20 @@ git clone https://github.com/juice-shop/juice-shop.git
 cd juice-shop || exit 1
 
 echo "Cleaning up Docker containers, images, volumes, and networks..."
-docker container stop $(docker container ls -aq) || true
-docker container rm $(docker container ls -aq) || true
-docker image rm -f $(docker image ls -aq) || true
-docker volume prune -f
-docker network prune -f
-echo "Cleanup complete."
+container_ids=$(docker container ls -aq || true)
+if [ -n "$container_ids" ]; then
+  docker container stop $container_ids || true
+  docker container rm $container_ids || true
+fi
 
+image_ids=$(docker image ls -aq || true)
+if [ -n "$image_ids" ]; then
+  docker image rm -f $image_ids || true
+fi
+
+docker volume prune -f || true
+docker network prune -f || true
+echo "Cleanup complete."
 
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
@@ -67,15 +76,12 @@ WORKDIR /juice-shop
 
 COPY . .
 
-# Install git and build tools including Python required by node-gyp
 RUN apt-get update && apt-get install -y \
     git \
     python3 \
     make \
     g++ \
   && rm -rf /var/lib/apt/lists/*
-
-
 
 RUN npm install --save-exact @aikidosec/firewall
 RUN npm install
@@ -87,7 +93,6 @@ ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
 ENV AIKIDO_BLOCK=false
 
 CMD ["npm", "start"]
-
 DOCKER
 
 echo "=== Build & Run Juice Shop ==="
@@ -95,21 +100,21 @@ sudo docker stop juice-shop || true
 sudo docker rm juice-shop || true
 sudo docker build -t juice-shop-zen .
 sudo docker run -d \
-    --name juice-shop \
-    -p 3000:3000 \
-    -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
-    -e AIKIDO_BLOCK=false \
-    -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
-    -e DD_SERVICE=juice-shop \
-    -e DD_ENV=benchmark \
-    -e DD_VERSION=latest \
-    juice-shop-zen
+  --name juice-shop \
+  -p 3000:3000 \
+  -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
+  -e AIKIDO_BLOCK=false \
+  -e DD_AGENT_HOST=$(hostname -I | awk '{print $1}') \
+  -e DD_SERVICE=juice-shop \
+  -e DD_ENV=benchmark \
+  -e DD_VERSION=latest \
+  juice-shop-zen
 
 echo "=== Verify Startup ==="
 for i in {1..60}; do
-    if curl -f http://localhost:3000 >/dev/null 2>&1; then
-        echo "✅ Juice Shop is running"
-        break
-    fi
-    sleep 3
+  if curl -f http://localhost:3000 >/dev/null 2>&1; then
+    echo "✅ Juice Shop is running"
+    break
+  fi
+  sleep 3
 done
