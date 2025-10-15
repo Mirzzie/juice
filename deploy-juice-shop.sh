@@ -55,6 +55,7 @@ cat > Dockerfile <<'DOCKER'
 FROM node:18-alpine
 WORKDIR /juice-shop
 COPY . .
+RUN apk add --no-cache git
 RUN npm install --save-exact @aikidosec/firewall
 RUN npm install
 RUN npm run build
