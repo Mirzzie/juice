@@ -8,10 +8,24 @@ sudo systemctl enable --now docker
 
 echo "=== Adding user to docker group ==="
 sudo usermod -aG docker $USER || sudo usermod -aG docker ubuntu || true
+
+echo "=== Refreshing group membership (newgrp) ==="
+# This helps activate docker group immediately in the running script
 newgrp docker || true
 
 echo "=== Restarting Docker service ==="
 sudo systemctl restart docker
+
+echo "=== Checking docker access ==="
+if ! docker info >/dev/null 2>&1; then
+  echo "Warning: Docker commands may still fail without a new login shell or session."
+fi
+
+echo "=== Exporting environment variables ==="
+echo "DD_API_KEY=$DD_API_KEY"
+echo "DD_APP_KEY=$DD_APP_KEY"
+echo "DD_SITE=$DD_SITE"
+echo "AIKIDO_TOKEN=$AIKIDO_TOKEN"
 
 echo "=== Cleaning APT cache ==="
 sudo apt-get clean
@@ -29,11 +43,11 @@ sudo apt-get install -f -y || true
 echo "=== Install Datadog Agent if missing ==="
 if ! command -v datadog-agent &>/dev/null; then
   DD_API_KEY="$DD_API_KEY" DD_SITE="$DD_SITE" \
-    bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+  bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
 fi
 sudo systemctl restart datadog-agent
 
-echo "=== Setup Juice Shop ==="
+echo "=== Juice Shop Setup ==="
 rm -rf juice-shop
 git clone https://github.com/juice-shop/juice-shop.git
 cd juice-shop || exit 1
@@ -60,39 +74,38 @@ docker volume prune -f || true
 docker network prune -f || true
 echo "Cleanup complete."
 
-echo "=== Build Docker image with inline Dockerfile ==="
-docker build -t juice-shop-zen - <<'EOF'
-FROM node:24-bullseye as build
+echo "=== Inject Zen Firewall (Aikido) ==="
+cat > Dockerfile <<'DOCKER'
+FROM node:22-bullseye
 
 WORKDIR /juice-shop
-
-COPY package*.json ./
-
-RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
-
-RUN npm install
 
 COPY . .
 
+RUN apt-get update && apt-get install -y \
+    git \
+    python3 \
+    make \
+    g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --save-exact @aikidosec/firewall
+RUN npm install
 RUN npm run build
-
-FROM node:24-bullseye
-
-WORKDIR /juice-shop
-
-COPY --from=build /juice-shop/dist ./dist
-COPY --from=build /juice-shop/node_modules ./node_modules
-COPY package*.json ./
 
 EXPOSE 3000
 
-USER node
+ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
+ENV AIKIDO_BLOCK=false
 
-CMD ["node", "dist/server.js"]
-EOF
+CMD ["npm", "start"]
+DOCKER
 
-echo "=== Run Juice Shop container ==="
-docker run -d \
+echo "=== Build & Run Juice Shop ==="
+sudo docker stop juice-shop || true
+sudo docker rm juice-shop || true
+sudo docker build -t juice-shop-zen .
+sudo docker run -d \
   --name juice-shop \
   -p 3000:3000 \
   -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
