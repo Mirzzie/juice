@@ -60,17 +60,15 @@ docker volume prune -f || true
 docker network prune -f || true
 echo "Cleanup complete."
 
-echo "=== Write Dockerfile ==="
-cat > Dockerfile <<'DOCKER'
-# Build Stage
+echo "=== Build Docker image with inline Dockerfile ==="
+docker build -t juice-shop-zen - <<'EOF'
 FROM node:24-bullseye as build
 
 WORKDIR /juice-shop
 
 COPY package*.json ./
 
-RUN apt-get update && apt-get install -y git python3 make g++ \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
 
 RUN npm install
 
@@ -78,7 +76,6 @@ COPY . .
 
 RUN npm run build
 
-# Production Stage
 FROM node:24-bullseye
 
 WORKDIR /juice-shop
@@ -92,10 +89,9 @@ EXPOSE 3000
 USER node
 
 CMD ["node", "dist/server.js"]
-DOCKER
+EOF
 
-echo "=== Build & Run Juice Shop container ==="
-docker build -t juice-shop-zen .
+echo "=== Run Juice Shop container ==="
 docker run -d \
   --name juice-shop \
   -p 3000:3000 \
