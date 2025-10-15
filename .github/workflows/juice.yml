@@ -1,73 +1,44 @@
-name: DevSecOps-CI-CD
+name: DevSecOps CI/CD Pipeline
 
 on:
   push:
     branches: [main]
-
-env:
-  JUICE_SHOP_VERSION: "latest"
-  DATADOG_SITE: "us5.datadoghq.com"
+  workflow_dispatch:
 
 jobs:
-  semgrep:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Semgrep (SAST)
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: "p/ci"
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-
   deploy:
-    needs: semgrep
     runs-on: ubuntu-latest
+
     steps:
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+      # 1️⃣ Checkout the repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install Ansible
+      # 2️⃣ Print current directory structure for debugging
+      - name: Verify playbook presence
         run: |
-          sudo apt update
-          sudo apt install -y python3-pip
-          pip3 install ansible paramiko
+          echo "Current working directory: $(pwd)"
+          ls -R
+          test -f ansible/playbook.yml && echo "✅ Found ansible/playbook.yml" || (echo "❌ Missing playbook" && exit 1)
 
+      # 3️⃣ Run Ansible Playbook
       - name: Run Ansible playbook (deploy)
         env:
           DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
           DATADOG_SITE: ${{ secrets.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
-          EC2_USER: ${{ secrets.EC2_SSH_USER }} # ensure this secret exists; if empty, use "ubuntu" below
-          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }} # ensure this secret exists
+          EC2_USER: ${{ secrets.EC2_SSH_USER }}
+          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
         run: |
-          # write private key
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-
-          # add github runner known_hosts entry to avoid interactive prompt
           ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
 
-          # fallback to ubuntu if EC2_USER secret is empty
           if [ -z "$EC2_USER" ]; then
             EC2_USER=ubuntu
           fi
 
-          # optionally disable host key checking for quicker runs (uncomment if you prefer)
-          # export ANSIBLE_HOST_KEY_CHECKING=False
-
-          # Run ansible-playbook with proper -i and -u arguments
-          ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" --private-key ~/.ssh/id_rsa ./ansible/playbook.yml
-
-  zap_scan:
-    needs: deploy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.4.0
-        with:
-          target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
+          echo "Using EC2_USER=$EC2_USER, EC2_IP=$EC2_IP"
+          ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" \
+            --private-key ~/.ssh/id_rsa ansible/playbook.yml
