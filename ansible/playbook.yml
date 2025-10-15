@@ -1,9 +1,7 @@
 - hosts: all
   become: true
-  vars:
-    dd_api_key: "{{ lookup('env','DATADOG_API_KEY') }}"
-    dd_site: "{{ lookup('env','DATADOG_SITE') }}"
-    aikido_token: "{{ lookup('env','AIKIDO_TOKEN') }}"
+  vars_files:
+    - secrets.yml   # load encrypted vault variables
   tasks:
     - name: Ensure apt cache updated
       apt:
@@ -26,6 +24,7 @@
         bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
         creates: /etc/datadog-agent/datadog.yaml
+        executable: /bin/bash
 
     - name: Start Datadog Agent
       service:
