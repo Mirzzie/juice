@@ -52,18 +52,31 @@ cd juice-shop || exit 1
 
 echo "=== Inject Zen Firewall (Aikido) ==="
 cat > Dockerfile <<'DOCKER'
-FROM node:20-alpine
+FROM node:20-bullseye
+
 WORKDIR /juice-shop
+
 COPY . .
-RUN apk add --no-cache git python3 make g++ 
-RUN apk add --no-cache git
+
+# Install git and build tools including Python required by node-gyp
+RUN apt-get update && apt-get install -y \
+    git \
+    python3 \
+    make \
+    g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN npm install --save-exact @aikidosec/firewall
 RUN npm install
 RUN npm run build
+
 EXPOSE 3000
+
 ENV AIKIDO_TOKEN=${AIKIDO_TOKEN}
 ENV AIKIDO_BLOCK=false
+
 CMD ["npm", "start"]
+
 DOCKER
 
 echo "=== Build & Run Juice Shop ==="
