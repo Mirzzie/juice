@@ -1,3 +1,4 @@
+# Build Stage
 FROM node:24-bullseye as build
 
 WORKDIR /juice-shop
@@ -13,6 +14,7 @@ COPY . .
 
 RUN npm run build
 
+# Production Stage
 FROM node:24-bullseye
 
 WORKDIR /juice-shop
@@ -22,5 +24,7 @@ COPY --from=build /juice-shop/node_modules ./node_modules
 COPY package*.json ./
 
 EXPOSE 3000
+
+USER node
 
 CMD ["node", "dist/server.js"]

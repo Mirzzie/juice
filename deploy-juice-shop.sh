@@ -1,56 +1,30 @@
-#!/bin/bash
-set -e
+# Build Stage
+FROM node:24-bullseye as build
 
-# System prep, Docker install, user group... (same as before)
+WORKDIR /juice-shop
 
-echo "=== Setup Juice Shop ==="
-rm -rf juice-shop
-git clone https://github.com/juice-shop/juice-shop.git
-cd juice-shop || exit 1
+COPY package*.json ./
 
-echo "=== Inject Zen Firewall in server.ts ==="
-server_file="server.ts"
-if ! grep -q "require('@aikidosec/firewall')" "$server_file"; then
-  sed -i "1i require('@aikidosec/firewall');" "$server_file"
-fi
+RUN apt-get update && apt-get install -y git python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 
-echo "=== Build & package Juice Shop ==="
-npm install
-npm run build
+RUN npm install
 
-echo "=== Clean old docker containers/images ==="
-container_ids=$(docker container ls -aq || true)
-if [ -n "$container_ids" ]; then
-  docker container stop $container_ids || true
-  docker container rm $container_ids || true
-fi
+COPY . .
 
-image_ids=$(docker image ls -aq || true)
-if [ -n "$image_ids" ]; then
-  docker image rm -f $image_ids || true
-fi
+RUN npm run build
 
-docker volume prune -f || true
-docker network prune -f || true
+# Production Stage
+FROM node:24-bullseye
 
-echo "=== Build and run Docker container ==="
-cat > Dockerfile <<'DOCKER'
-# Dockerfile content from above multi-stage example
-DOCKER
+WORKDIR /juice-shop
 
-docker build -t juice-shop-zen .
-docker run -d \
-  --name juice-shop \
-  -p 3000:3000 \
-  -e AIKIDO_TOKEN="$AIKIDO_TOKEN" \
-  -e AIKIDO_BLOCK=false \
-  juice-shop-zen
+COPY --from=build /juice-shop/dist ./dist
+COPY --from=build /juice-shop/node_modules ./node_modules
+COPY package*.json ./
 
-echo "=== Verify Juice Shop startup ==="
-for i in {1..60}; do
-  if curl -f http://localhost:3000 >/dev/null 2>&1; then
-    echo "✅ Juice Shop is running"
-    break
-  fi
-  sleep 3
-done
+EXPOSE 3000
+
+USER node
+
+CMD ["node", "dist/server.js"]
