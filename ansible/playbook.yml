@@ -2,6 +2,7 @@
   become: true
   vars_files:
     - secrets.yml   # load encrypted vault variables
+
   tasks:
     - name: Ensure apt cache updated
       apt:
@@ -9,7 +10,7 @@
 
     - name: Install dependencies
       apt:
-        name: ['git','curl','docker.io']
+        name: ['git','curl','docker.io','gnupg','apt-transport-https']
         state: present
 
     - name: Enable and start Docker
@@ -19,12 +20,18 @@
         enabled: yes
 
     - name: Install Datadog Agent
+      become: yes
       shell: |
+        set -e
         DD_API_KEY={{ dd_api_key }} DD_SITE={{ dd_site }} \
         bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
         creates: /etc/datadog-agent/datadog.yaml
         executable: /bin/bash
+      register: datadog_install
+      retries: 3
+      delay: 15
+      until: datadog_install.rc == 0
 
     - name: Start Datadog Agent
       service:
@@ -51,7 +58,7 @@
         chdir: /home/ubuntu/juice-shop
 
     - name: Run Juice Shop container with Datadog & Aikido
-      docker_container:
+      community.docker.docker_container:
         name: juice_shop_zen
         image: juice-shop-zen:latest
         state: started
