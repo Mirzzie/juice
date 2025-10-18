@@ -20,7 +20,7 @@
         enabled: yes
 
     - name: Install Datadog Agent
-      become: yes
+      become: true
       shell: |
         set -e
         DD_API_KEY={{ dd_api_key }} DD_SITE={{ dd_site }} \
