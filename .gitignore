@@ -9,8 +9,7 @@ terraform.tfstate
 terraform.tfstate.backup
 *.tfstate
 *.tfstate.*
-
-secrets.yml
+vault_pass.txt
 # Crash logs
 crash.log
 crash.*.log

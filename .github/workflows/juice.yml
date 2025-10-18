@@ -1,4 +1,4 @@
-name: DevSecOps CI/CD Pipeline
+name: DevSecOps CI/CD Pipeline (Ansible + SAST/DAST)
 
 on:
   push:
@@ -6,52 +6,89 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  deploy-and-scan:
     runs-on: ubuntu-latest
+    env:
+      # optional default; if you prefer to override from vault or secrets
+      DATADOG_SITE: "us5.datadoghq.com"
 
     steps:
-      # 1️⃣ Checkout the repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Print current directory structure for debugging
+      - name: Show repo root (debug)
+        run: |
+          echo "PWD: $(pwd)"
+          ls -la
+
       - name: Verify playbook presence
         run: |
-          echo "Current working directory: $(pwd)"
-          ls -R
-          test -f ansible/playbook.yml && echo "✅ Found ansible/playbook.yml" || (echo "❌ Missing playbook" && exit 1)
+          test -f ansible/playbook.yml && echo "✅ playbook exists" || (echo "❌ ansible/playbook.yml missing" && exit 1)
+          test -f ansible/secrets.yml && echo "✅ secrets.yml exists (encrypted)" || (echo "❌ ansible/secrets.yml missing" && exit 1)
 
-      # 3️⃣ Run Ansible Playbook
-      - name: Run Ansible playbook (deploy)
+      - name: Set up Python & pip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip ssh-client
+          pip3 --version
+
+      - name: Install Ansible
+        run: |
+          pip3 install "ansible-core>=2.15" "cryptography" --quiet
+          ansible --version
+
+      - name: Create vault password file (temporary)
+        run: |
+          # write vault password from GitHub Secret to a file used by ansible
+          mkdir -p ansible
+          printf "%s\n" "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > ansible/vault_pass.txt
+          chmod 600 ansible/vault_pass.txt
+
+      - name: Prepare SSH key (preserve newlines) and known_hosts
         env:
-          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-          DATADOG_SITE: ${{ secrets.DATADOG_SITE }}
-          AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
-          EC2_USER: ${{ secrets.EC2_SSH_USER }}
           EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          # Use printf to preserve multiline PEM formatting
+          printf "%s\n" "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          # ensure host key is present to avoid interactive prompt
           ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
+          ls -la ~/.ssh
 
+      - name: Run Ansible playbook (deploy)
+        env:
+          EC2_USER: ${{ secrets.EC2_SSH_USER }}
+          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
+        run: |
           if [ -z "$EC2_USER" ]; then
             EC2_USER=ubuntu
           fi
-
-          echo "Using EC2_USER=$EC2_USER, EC2_IP=$EC2_IP"
+          echo "Running playbook against $EC2_IP as $EC2_USER"
+          # run ansible-playbook with inline single-host inventory (trailing comma) and vault password file
           ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" \
-            --private-key ~/.ssh/id_rsa ansible/playbook.yml
+            --private-key ~/.ssh/id_rsa \
+            --vault-password-file ansible/vault_pass.txt \
+            ansible/playbook.yml
 
-      # 4️⃣ Run SAST Scan (Semgrep)
+      - name: Clean up sensitive files
+        if: always()
+        run: |
+          shred -u ~/.ssh/id_rsa || rm -f ~/.ssh/id_rsa
+          shred -u ansible/vault_pass.txt || rm -f ansible/vault_pass.txt
+          echo "Cleaned temporary private key and vault password file."
+
+      # === SECURITY SCANS ===
+
       - name: Run Semgrep SAST Scan
         uses: returntocorp/semgrep-action@v1
         with:
           publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
+          publishDeployment: true
           config: "auto"
 
-      # 5️⃣ Run DAST Scan (OWASP ZAP)
-      - name: Run OWASP ZAP Baseline Scan
+      - name: Run OWASP ZAP Baseline Scan (DAST)
         uses: zaproxy/action-baseline@v0.10.0
         with:
           target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
+          # optional: fail_on_warning: true
