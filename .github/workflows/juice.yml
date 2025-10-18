@@ -52,7 +52,7 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           # Preserve multiline PEM formatting
-          printf "%s\n" "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          printf "%s\n" "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           # Add host key to known_hosts to avoid interactive prompt
           ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
