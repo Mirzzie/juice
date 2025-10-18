@@ -32,10 +32,14 @@ jobs:
           sudo apt-get install -y python3 python3-pip ssh-client
           pip3 --version
 
-      - name: Install Ansible
+      - name: Install Ansible and Docker collection
         run: |
-          pip3 install "ansible-core>=2.15" "cryptography" --quiet
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip sshpass
+          pip3 install "ansible-core>=2.15" "cryptography"
+          ansible-galaxy collection install community.docker
           ansible --version
+          ansible-galaxy collection list
 
       - name: Create vault password file (temporary)
         run: |
