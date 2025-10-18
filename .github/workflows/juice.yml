@@ -9,7 +9,6 @@ jobs:
   deploy-and-scan:
     runs-on: ubuntu-latest
     env:
-      # optional default; if you prefer to override from vault or secrets
       DATADOG_SITE: "us5.datadoghq.com"
 
     steps:
@@ -28,22 +27,21 @@ jobs:
 
       - name: Set up Python & pip
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y python3 python3-pip ssh-client
           pip3 --version
 
-      - name: Install Ansible and Docker collection
+      - name: Install Ansible core and Docker collection
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y python3 python3-pip sshpass
+          pip3 install --upgrade pip
           pip3 install "ansible-core>=2.15" "cryptography"
+          # Install community collections required by the playbook (docker modules)
           ansible-galaxy collection install community.docker
-          ansible --version
-          ansible-galaxy collection list
 
       - name: Create vault password file (temporary)
         run: |
-          # write vault password from GitHub Secret to a file used by ansible
           mkdir -p ansible
           printf "%s\n" "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > ansible/vault_pass.txt
           chmod 600 ansible/vault_pass.txt
@@ -53,10 +51,10 @@ jobs:
           EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
         run: |
           mkdir -p ~/.ssh
-          # Use printf to preserve multiline PEM formatting
+          # Preserve multiline PEM formatting
           printf "%s\n" "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          # ensure host key is present to avoid interactive prompt
+          # Add host key to known_hosts to avoid interactive prompt
           ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
           ls -la ~/.ssh
 
@@ -69,7 +67,6 @@ jobs:
             EC2_USER=ubuntu
           fi
           echo "Running playbook against $EC2_IP as $EC2_USER"
-          # run ansible-playbook with inline single-host inventory (trailing comma) and vault password file
           ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" \
             --private-key ~/.ssh/id_rsa \
             --vault-password-file ansible/vault_pass.txt \
@@ -78,8 +75,14 @@ jobs:
       - name: Clean up sensitive files
         if: always()
         run: |
-          shred -u ~/.ssh/id_rsa || rm -f ~/.ssh/id_rsa
-          shred -u ansible/vault_pass.txt || rm -f ansible/vault_pass.txt
+          # Try shred first, fallback to rm
+          if command -v shred >/dev/null 2>&1; then
+            shred -u ~/.ssh/id_rsa || true
+            shred -u ansible/vault_pass.txt || true
+          else
+            rm -f ~/.ssh/id_rsa || true
+            rm -f ansible/vault_pass.txt || true
+          fi
           echo "Cleaned temporary private key and vault password file."
 
       # === SECURITY SCANS ===
@@ -87,6 +90,7 @@ jobs:
       - name: Run Semgrep SAST Scan
         uses: returntocorp/semgrep-action@v1
         with:
+          # If you want Semgrep CI only (no publish) remove publishToken
           publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
           publishDeployment: true
           config: "auto"
@@ -95,4 +99,5 @@ jobs:
         uses: zaproxy/action-baseline@v0.10.0
         with:
           target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
-          # optional: fail_on_warning: true
+          # Uncomment the next line if you want the workflow to fail on warnings
+          # fail_on_warning: true
