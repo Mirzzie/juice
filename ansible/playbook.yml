@@ -1,16 +1,21 @@
 - hosts: all
   become: true
   vars_files:
-    - secrets.yml   # load encrypted vault variables
+    - secrets.yml   # encrypted vault variables
 
   tasks:
-    - name: Ensure apt cache updated
+    - name: Ensure apt cache is updated
       apt:
         update_cache: yes
 
     - name: Install dependencies
       apt:
-        name: ['git','curl','docker.io','gnupg','apt-transport-https']
+        name:
+          - git
+          - curl
+          - docker.io
+          - gnupg
+          - apt-transport-https
         state: present
 
     - name: Enable and start Docker
@@ -19,28 +24,61 @@
         state: started
         enabled: yes
 
-    - name: Install Datadog Agent
-      shell: |
-        export DEBIAN_FRONTEND=noninteractive
-        export DD_API_KEY={{ dd_api_key }}
-        export DD_SITE={{ dd_site }}
-        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
-        executable: /bin/bash
+    # --- Datadog Agent Install via APT ---
+    - name: Pre-accept Datadog license
+      debconf:
+        name: datadog-agent
+        question: datadog-agent/accept-datadog-license
+        value: "true"
+        vtype: boolean
 
-    - name: Start Datadog Agent
+    - name: Add Datadog APT repository
+      apt_repository:
+        repo: "deb https://apt.datadoghq.com/ stable 7"
+        state: present
+        filename: datadog
+
+    - name: Add Datadog GPG key
+      apt_key:
+        url: "https://keys.datadoghq.com/DATADOG_APT_KEY.public"
+        state: present
+
+    - name: Update apt cache after adding Datadog repo
+      apt:
+        update_cache: yes
+
+    - name: Install Datadog Agent
+      apt:
+        name: datadog-agent
+        state: latest
+
+    - name: Configure Datadog Agent API key
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^api_key:'
+        line: "api_key: {{ dd_api_key }}"
+        create: yes
+
+    - name: Configure Datadog Agent site
+      lineinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        regexp: '^site:'
+        line: "site: {{ dd_site }}"
+        create: yes
+
+    - name: Start and enable Datadog Agent
       service:
         name: datadog-agent
         state: started
         enabled: yes
 
+    # --- Juice Shop Setup ---
     - name: Clone Juice Shop latest
-      shell: |
-        rm -rf juice-shop
-        git clone https://github.com/juice-shop/juice-shop.git
-      args:
-        chdir: /home/ubuntu
+      git:
+        repo: https://github.com/juice-shop/juice-shop.git
+        dest: /home/ubuntu/juice-shop
+        force: yes
+        update: yes
 
     - name: Modify server.ts to include Aikido Zen Firewall
       script: ../scripts/modify_server.sh
@@ -48,10 +86,11 @@
         chdir: /home/ubuntu/juice-shop
 
     - name: Build Juice Shop Docker image
-      shell: |
-        docker build -t juice-shop-zen:latest .
-      args:
-        chdir: /home/ubuntu/juice-shop
+      docker_image:
+        path: /home/ubuntu/juice-shop
+        name: juice-shop-zen
+        tag: latest
+        state: present
 
     - name: Run Juice Shop container with Datadog & Aikido
       community.docker.docker_container:
