@@ -83,28 +83,67 @@
         msg: "Docker version: {{ docker_version.stdout }}"
 
     # =======================================================================
-    # DATADOG AGENT INSTALLATION (HOST-BASED)
+    # SWAP CONFIGURATION (for low-memory EC2 instances)
+    # =======================================================================
+    - name: Check if swap is already enabled
+      command: swapon --show
+      register: swap_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Create swapfile if none exists
+      when: swap_check.stdout == ""
+      block:
+        - name: Allocate 2GB swapfile
+          command: fallocate -l 2G /swapfile
+          args:
+            creates: /swapfile
+
+        - name: Set swapfile permissions
+          file:
+            path: /swapfile
+            mode: '0600'
+
+        - name: Setup swap area
+          command: mkswap /swapfile
+          args:
+            creates: /swapfile
+
+        - name: Enable swap
+          command: swapon /swapfile
+
+        - name: Persist swap in fstab
+          lineinfile:
+            path: /etc/fstab
+            line: '/swapfile none swap sw 0 0'
+            state: present
+
+    # =======================================================================
+    # DATADOG AGENT INSTALLATION WITH RETRIES
     # =======================================================================
     - name: Check if DataDog agent is already installed
       stat:
-        path: /etc/datadog-agent/datadog.yaml
+        path: /etc/datadog-agent
       register: datadog_installed
 
     - name: Download DataDog installation script
       get_url:
-        url: https://install.datadoghq.com/scripts/install_script_agent7.sh
+        url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
         dest: /tmp/install_datadog.sh
         mode: '0755'
       when: not datadog_installed.stat.exists
 
     - name: Install DataDog Agent
-      shell: |
-        DD_API_KEY={{ datadog_api_key }} \
-        DD_SITE={{ datadog_site }} \
+      command: >
+        DD_API_KEY={{ datadog_api_key }}
+        DD_SITE={{ datadog_site }}
         bash /tmp/install_datadog.sh
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
       when: not datadog_installed.stat.exists
+      register: datadog_install
+      retries: 2
+      delay: 30
+      until: datadog_install.rc == 0
+
 
     - name: Configure DataDog Agent for APM and IAST
       blockinfile:
