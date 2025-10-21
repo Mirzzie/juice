@@ -1,6 +1,6 @@
 ---
 - name: Configure EC2 for Juice Shop with DevSecOps Tools (Docker-Based)
-  hosts: juice-shop
+  hosts: juiceshop
   become: true
   gather_facts: true
 
