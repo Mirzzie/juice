@@ -230,7 +230,7 @@
           
           # Create DataDog tracer file (only if not present)
           RUN if [ ! -f "tracer.ts" ]; then \
-            cat > tracer.ts << 'EOF' \
+            cat > tracer.ts <<'EOF'
           import tracer from "dd-trace";
           tracer.init({
             service: process.env.DD_SERVICE || "juice-shop",
