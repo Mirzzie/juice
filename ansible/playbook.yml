@@ -230,7 +230,7 @@
           
           # Create DataDog tracer file (only if not present)
           RUN if [ ! -f "tracer.ts" ]; then \
-              cat > tracer.ts <<'EOF'
+                cat > tracer.ts <<'EOF' && \
           import tracer from "dd-trace";
           tracer.init({
             service: process.env.DD_SERVICE || "juice-shop",
@@ -257,7 +257,7 @@
           console.log("[DataDog] Tracer initialized");
           export default tracer;
           EOF
-          fi
+              fi
           
           RUN npm run build || echo "Build completed"
 
@@ -273,10 +273,6 @@
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
           ENV NODE_ENV=production PORT=3000
           CMD ["npm", "start"]
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
-
 
     - name: Create docker-compose.yml
       copy:
