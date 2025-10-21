@@ -80,35 +80,33 @@ jobs:
         run: |
           pip install ansible boto3 botocore
 
-      - name: Setup SSH Key
+      - name: Set up SSH for Ansible
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+          echo "[juiceshop]" > inventory.ini
+          echo "${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+          cat inventory.ini
 
-      - name: Create Ansible Inventory
+      - name: Install Ansible
         run: |
-          mkdir -p ansible
-          cat > ansible/inventory.ini <<EOF
-          [juiceshop]
-          ${{ secrets.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          EOF
-
-          echo "Inventory created:"
-          cat ansible/inventory.ini
-
-      - name: Create Ansible Vault Password File
-        run: |
-          cd ansible
-          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
-          chmod 600 .vault_pass
+          sudo apt-get update -y
+          sudo apt-get install -y ansible
 
       - name: Run Ansible Playbook with Vault
+        env:
+          EC2_INSTANCE_IP: ${{ env.EC2_INSTANCE_IP }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DATADOG_SITE: us5.datadoghq.com
+          AIKIDO_TOKEN: ${{ secrets.AIKIDO_TOKEN }}
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
           cd ansible
-          ansible-playbook -i inventory.ini playbook.yml \
-            --vault-password-file .vault_pass \
-            -v
+          echo "${{ secrets.VAULT_PASSWORD }}" > .vault_pass
+          chmod 600 .vault_pass
+          ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file .vault_pass -v
 
       - name: Clean up Vault Password
         if: always()
