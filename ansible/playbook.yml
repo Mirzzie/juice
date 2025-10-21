@@ -86,42 +86,42 @@
     # SWAP CONFIGURATION (for low-memory EC2 instances)
     # =======================================================================
 
-    - name: Check if swap is already enabled
-      command: swapon --show
-      register: swap_check
-      changed_when: false
-      ignore_errors: true
+    # - name: Check if swap is already enabled
+    #   command: swapon --show
+    #   register: swap_check
+    #   changed_when: false
+    #   ignore_errors: true
 
-    - name: Create swapfile if none exists
-      when: swap_check.stdout == ""
-      block:
-        - name: Allocate 2GB swapfile
-          command: fallocate -l 2G /swapfile
-          args:
-            creates: /swapfile
+    # - name: Create swapfile if none exists
+    #   when: swap_check.stdout == ""
+    #   block:
+    #     - name: Allocate 2GB swapfile
+    #       command: fallocate -l 2G /swapfile
+    #       args:
+    #         creates: /swapfile
 
-        - name: Set swapfile permissions
-          file:
-            path: /swapfile
-            mode: '0600'
+    #     - name: Set swapfile permissions
+    #       file:
+    #         path: /swapfile
+    #         mode: '0600'
 
-        - name: Setup swap area
-          command: mkswap /swapfile
-          # Always run, because file might exist but not be initialized
-          args:
-            warn: false
+    #     - name: Setup swap area
+    #       command: mkswap /swapfile
+    #       # Always run, because file might exist but not be initialized
+    #       args:
+    #         warn: false
 
-        - name: Enable swap
-          command: swapon /swapfile
-          # Only enable if not already active
-          args:
-            warn: false
+    #     - name: Enable swap
+    #       command: swapon /swapfile
+    #       # Only enable if not already active
+    #       args:
+    #         warn: false
 
-        - name: Persist swap in fstab
-          lineinfile:
-            path: /etc/fstab
-            line: '/swapfile none swap sw 0 0'
-            state: present
+    #     - name: Persist swap in fstab
+    #       lineinfile:
+    #         path: /etc/fstab
+    #         line: '/swapfile none swap sw 0 0'
+    #         state: present
 
 
     # =======================================================================
