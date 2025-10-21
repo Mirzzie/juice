@@ -140,15 +140,15 @@
       when: not datadog_installed.stat.exists
 
     - name: Install DataDog Agent
-      command: >
-        DD_API_KEY={{ datadog_api_key }}
-        DD_SITE={{ datadog_site }}
-        bash /tmp/install_datadog.sh
+      shell: "DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
       when: not datadog_installed.stat.exists
       register: datadog_install
-      retries: 2
-      delay: 30
+      retries: 3
+      delay: 10
       until: datadog_install.rc == 0
+
 
 
     - name: Configure DataDog Agent for APM and IAST
