@@ -85,44 +85,45 @@
     # =======================================================================
     # SWAP CONFIGURATION (for low-memory EC2 instances)
     # =======================================================================
+    - name: Check if swap is already enabled
+      command: swapon --show
+      register: swap_check
+      changed_when: false
+      ignore_errors: true
 
-    # - name: Check if swap is already enabled
-    #   command: swapon --show
-    #   register: swap_check
-    #   changed_when: false
-    #   ignore_errors: true
+    - name: Create swapfile if none exists
+      when: swap_check.stdout == ""
+      block:
+        - name: Allocate 2GB swapfile
+          command: fallocate -l 2G /swapfile
+          args:
+            creates: /swapfile
 
-    # - name: Create swapfile if none exists
-    #   when: swap_check.stdout == ""
-    #   block:
-    #     - name: Allocate 2GB swapfile
-    #       command: fallocate -l 2G /swapfile
-    #       args:
-    #         creates: /swapfile
+        - name: Set swapfile permissions
+          file:
+            path: /swapfile
+            mode: '0600'
 
-    #     - name: Set swapfile permissions
-    #       file:
-    #         path: /swapfile
-    #         mode: '0600'
+        - name: Setup swap area (always attempt; idempotent)
+          command: mkswap /swapfile
+          args:
+            warn: false
+          register: mkswap_result
+          failed_when: mkswap_result.rc not in [0,1]  # some systems return 1 if already formatted
 
-    #     - name: Setup swap area
-    #       command: mkswap /swapfile
-    #       # Always run, because file might exist but not be initialized
-    #       args:
-    #         warn: false
+        - name: Enable swap if not active
+          shell: |
+            if ! swapon --show | grep -q '^/swapfile'; then
+              swapon /swapfile
+            fi
+          args:
+            warn: false
 
-    #     - name: Enable swap
-    #       command: swapon /swapfile
-    #       # Only enable if not already active
-    #       args:
-    #         warn: false
-
-    #     - name: Persist swap in fstab
-    #       lineinfile:
-    #         path: /etc/fstab
-    #         line: '/swapfile none swap sw 0 0'
-    #         state: present
-
+        - name: Persist swap in fstab
+          lineinfile:
+            path: /etc/fstab
+            line: '/swapfile none swap sw 0 0'
+            state: present
 
     # =======================================================================
     # DATADOG AGENT INSTALLATION WITH RETRIES
@@ -140,13 +141,14 @@
       when: not datadog_installed.stat.exists
 
     - name: Install DataDog Agent
-      shell: "DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh"
+      shell: >
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
       args:
         creates: /etc/datadog-agent/datadog.yaml
       when: not datadog_installed.stat.exists
       register: datadog_install
       retries: 3
-      delay: 10
+      delay: 15
       until: datadog_install.rc == 0
 
     - name: Configure DataDog Agent for APM and IAST
@@ -190,18 +192,18 @@
         enabled: yes
 
     - name: Verify DataDog Agent status
-      command: sudo datadog-agent status
+      command: datadog-agent status
       register: dd_status
       changed_when: false
       failed_when: false
 
-    - name: Display DataDog Agent status
+    - name: Display DataDog Agent status (top lines)
       debug:
         msg: "{{ dd_status.stdout_lines[:10] }}"
       when: dd_status.rc == 0
 
     # =======================================================================
-    # APPLICATION DIRECTORY SETUP
+    # APPLICATION DIRECTORY SETUP (files & tracer.ts created by Ansible)
     # =======================================================================
     - name: Create application directory
       file:
@@ -211,26 +213,10 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create Dockerfile
+    - name: Create tracer.ts (DataDog tracer) in app context
       copy:
-        dest: "{{ juice_shop_dir }}/Dockerfile"
+        dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
-          # Multi-stage Dockerfile for Juice Shop with Security Tools
-          FROM node:20-bookworm-slim AS builder
-          
-          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
-          
-          WORKDIR /juice-shop
-          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
-          # Install dependencies and security tools
-          RUN npm install --production && \
-              npm install --save-exact @aikidosec/firewall && \
-              npm install --save dd-trace
-          
-          # Create DataDog tracer file (only if not present)
-          RUN if [ ! -f "tracer.ts" ]; then \
-                cat > tracer.ts <<'EOF' && \
           import tracer from "dd-trace";
           tracer.init({
             service: process.env.DD_SERVICE || "juice-shop",
@@ -256,11 +242,35 @@
           });
           console.log("[DataDog] Tracer initialized");
           export default tracer;
-          EOF
-              fi
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Create Dockerfile (builder copies tracer.ts from context)
+      copy:
+        dest: "{{ juice_shop_dir }}/Dockerfile"
+        content: |
+          # Multi-stage Dockerfile for Juice Shop with Security Tools
+          FROM node:20-bookworm-slim AS builder
+          
+          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
+          
+          WORKDIR /juice-shop
+          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          
+          # Install dependencies and security tools
+          RUN npm install --production && \
+              npm install --save-exact @aikidosec/firewall && \
+              npm install --save dd-trace
+          
+          # Copy tracer created by Ansible into build context
+          COPY tracer.ts ./tracer.ts
+          
+          # Ensure tracer is imported in server entry (if server.ts exists, app code should reference tracer)
+          # (We attempt to modify server.ts at runtime in container or ensure the app loads tracer at startup.)
           
           RUN npm run build || echo "Build completed"
-
+          
           # Production stage
           FROM node:20-bookworm-slim
           RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
@@ -273,12 +283,14 @@
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
           ENV NODE_ENV=production PORT=3000
           CMD ["npm", "start"]
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
 
-    - name: Create docker-compose.yml
+    - name: Create docker-compose.yml (no 'version' key to avoid warning)
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
-          version: '3.8'
           services:
             juice-shop:
               build: .
@@ -290,15 +302,15 @@
               env_file:
                 - .env
               environment:
-                - NODE_ENV=production
-                - DD_AGENT_HOST=172.17.0.1
-                - DD_TRACE_AGENT_PORT=8126
-                - DD_SERVICE=juice-shop
-                - DD_LOGS_INJECTION=true
-                - DD_TRACE_SAMPLE_RATE=1
-                - DD_PROFILING_ENABLED=true
-                - DD_APPSEC_ENABLED=true
-                - DD_IAST_ENABLED=true
+                NODE_ENV: production
+                DD_AGENT_HOST: 172.17.0.1
+                DD_TRACE_AGENT_PORT: 8126
+                DD_SERVICE: juice-shop
+                DD_LOGS_INJECTION: "true"
+                DD_TRACE_SAMPLE_RATE: "1"
+                DD_PROFILING_ENABLED: "true"
+                DD_APPSEC_ENABLED: "true"
+                DD_IAST_ENABLED: "true"
               extra_hosts:
                 - "host.docker.internal:host-gateway"
               healthcheck:
@@ -363,15 +375,15 @@
           
           # Stop existing containers
           echo "Stopping existing containers..."
-          docker-compose down || true
+          docker compose down || true
           
           # Build new image
           echo "Building Docker image..."
-          docker-compose build --no-cache
+          docker compose build --no-cache
           
           # Start containers
           echo "Starting containers..."
-          docker-compose up -d
+          docker compose up -d
           
           # Wait for health check
           echo "Waiting for application to be healthy..."
@@ -380,10 +392,10 @@
           # Verify
           if docker ps | grep -q juice-shop; then
             echo "✅ Deployment successful!"
-            docker-compose logs --tail=50
+            docker compose logs --tail=50
           else
             echo "❌ Deployment failed!"
-            docker-compose logs
+            docker compose logs
             exit 1
           fi
         owner: ubuntu
@@ -475,7 +487,7 @@
           - "4. Run: ./deploy.sh"
           - ""
           - "Health check: ./health-check.sh"
-          - "View logs: docker-compose logs -f"
+          - "View logs: docker compose logs -f"
           - ""
           - "Security Dashboards:"
           - "- Aikido: https://app.aikido.dev"
