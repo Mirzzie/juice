@@ -104,7 +104,7 @@ jobs:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
           cd ansible
-          echo "${{ secrets.VAULT_PASSWORD }}" > .vault_pass
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
           chmod 600 .vault_pass
           ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file .vault_pass -v
 
