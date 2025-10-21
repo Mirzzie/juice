@@ -149,8 +149,6 @@
       delay: 10
       until: datadog_install.rc == 0
 
-
-
     - name: Configure DataDog Agent for APM and IAST
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
@@ -232,7 +230,7 @@
           
           # Create DataDog tracer file (only if not present)
           RUN if [ ! -f "tracer.ts" ]; then \
-            cat > tracer.ts << 'EOF'
+            cat > tracer.ts << 'EOF' \
           import tracer from "dd-trace";
           tracer.init({
             service: process.env.DD_SERVICE || "juice-shop",
@@ -260,17 +258,9 @@
           export default tracer;
           EOF
           fi
-          
-          # Prepend Aikido and Datadog imports to server.ts
-          RUN if [ -f "server.ts" ]; then \
-              grep -q "@aikidosec/firewall" server.ts || \
-              sed -i '1i require("@aikidosec/firewall");' server.ts; \
-              grep -q "./tracer" server.ts || \
-              sed -i '2i import "./tracer";' server.ts; \
-          fi
-          
+
           RUN npm run build || echo "Build completed"
-          
+
           # Production stage
           FROM node:20-bookworm-slim
           RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
