@@ -85,6 +85,7 @@
     # =======================================================================
     # SWAP CONFIGURATION (for low-memory EC2 instances)
     # =======================================================================
+
     - name: Check if swap is already enabled
       command: swapon --show
       register: swap_check
@@ -106,17 +107,22 @@
 
         - name: Setup swap area
           command: mkswap /swapfile
+          # Always run, because file might exist but not be initialized
           args:
-            creates: /swapfile
+            warn: false
 
         - name: Enable swap
           command: swapon /swapfile
+          # Only enable if not already active
+          args:
+            warn: false
 
         - name: Persist swap in fstab
           lineinfile:
             path: /etc/fstab
             line: '/swapfile none swap sw 0 0'
             state: present
+
 
     # =======================================================================
     # DATADOG AGENT INSTALLATION WITH RETRIES
