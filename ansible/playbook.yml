@@ -740,15 +740,20 @@
         policy: deny
 
     ########################################################################
-    # DEPLOY APPLICATION
+    # DEPLOY APPLICATION (SAFE RECONNECT)
     ########################################################################
-    - name: Deploy Juice Shop container
+    - name: Wait for SSH reconnection after firewall
+      wait_for_connection:
+        timeout: 120
+
+    - name: Run Juice Shop deployment
       shell: bash {{ juice_shop_dir }}/deploy.sh
       args:
         chdir: "{{ juice_shop_dir }}"
       register: deploy_output
+      become: true
 
-    - name: Show deployment logs
+    - name: Display deployment logs
       debug:
         var: deploy_output.stdout_lines
 
