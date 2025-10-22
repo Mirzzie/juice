@@ -470,22 +470,22 @@
 
   vars:
     juice_shop_dir: /opt/juice-shop
-    node_version: "20"
+    node_version: "22"
     docker_compose_version: "2.23.0"
 
   vars_files:
     - secrets.yml
 
   tasks:
-    # =======================================================================
+    ########################################################################
     # SYSTEM PREPARATION
-    # =======================================================================
-    - name: Update apt cache
+    ########################################################################
+    - name: Update APT cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install required packages
+    - name: Install required system packages
       apt:
         name:
           - curl
@@ -500,9 +500,9 @@
           - jq
         state: present
 
-    # =======================================================================
+    ########################################################################
     # DOCKER INSTALLATION
-    # =======================================================================
+    ########################################################################
     - name: Add Docker GPG key
       apt_key:
         url: https://download.docker.com/linux/ubuntu/gpg
@@ -513,7 +513,7 @@
         repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
 
-    - name: Install Docker and plugins
+    - name: Install Docker and Compose plugin
       apt:
         name:
           - docker-ce
@@ -524,29 +524,25 @@
         state: present
         update_cache: yes
 
-    - name: Add ubuntu user to docker group
-      user:
-        name: ubuntu
-        groups: docker
-        append: yes
-
-    - name: Enable and start Docker
+    - name: Start and enable Docker
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    - name: Display Docker version
+    - name: Verify Docker installation
       command: docker --version
       register: docker_version
       changed_when: false
-    - debug:
-        msg: "✅ Docker installed: {{ docker_version.stdout }}"
 
-    # =======================================================================
-    # DATADOG AGENT INSTALLATION (WITH RETRIES)
-    # =======================================================================
-    - name: Check if Datadog agent exists
+    - name: Display Docker version
+      debug:
+        msg: "Docker version: {{ docker_version.stdout }}"
+
+    ########################################################################
+    # DATADOG AGENT INSTALLATION
+    ########################################################################
+    - name: Check if Datadog Agent is installed
       stat:
         path: /etc/datadog-agent
       register: datadog_installed
@@ -554,27 +550,24 @@
     - name: Download Datadog install script
       get_url:
         url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
-        dest: /tmp/install_dd.sh
+        dest: /tmp/install_datadog.sh
         mode: '0755'
       when: not datadog_installed.stat.exists
 
-    - name: Install Datadog agent
-      shell: |
-        DD_API_KEY={{ datadog_api_key }} \
-        DD_SITE={{ datadog_site }} \
-        bash /tmp/install_dd.sh
+    - name: Install Datadog Agent
+      shell: >
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
       args:
         creates: /etc/datadog-agent/datadog.yaml
       when: not datadog_installed.stat.exists
-      register: dd_install
+      register: datadog_install
       retries: 3
       delay: 15
-      until: dd_install.rc == 0
+      until: datadog_install.rc == 0
 
-    - name: Configure Datadog Agent for APM & IAST
+    - name: Configure Datadog Agent for APM, AppSec, and IAST
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS CONFIG"
         block: |
           apm_config:
             enabled: true
@@ -583,10 +576,13 @@
             enabled: true
           runtime_security_config:
             enabled: true
-          logs_enabled: true
           process_config:
             enabled: "true"
             scrub_args: true
+          logs_enabled: true
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS CONFIG"
+        create: no
+        backup: yes
       notify: Restart Datadog Agent
 
     - name: Ensure Datadog Agent is running
@@ -595,156 +591,170 @@
         state: started
         enabled: yes
 
-    # =======================================================================
-    # JUICE SHOP DEPLOYMENT PREP
-    # =======================================================================
-    - name: Create application directory
+    ########################################################################
+    # APPLICATION DIRECTORY SETUP
+    ########################################################################
+    - name: Create Juice Shop directory
       file:
         path: "{{ juice_shop_dir }}"
         state: directory
-        owner: ubuntu
-        group: ubuntu
         mode: '0755'
-
-    - name: Install Node 22
-      shell: |
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-        apt-get install -y nodejs
-      args:
-        creates: /usr/bin/node
 
     - name: Create tracer.ts (Datadog tracer)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
           import tracer from "dd-trace";
-          tracer.init();
+          tracer.init({
+            service: process.env.DD_SERVICE || "juice-shop",
+            env: process.env.DD_ENV || "production",
+            version: process.env.DD_VERSION || "latest",
+            hostname: process.env.DD_AGENT_HOST || "172.17.0.1",
+            port: process.env.DD_TRACE_AGENT_PORT || "8126",
+            appsec: { enabled: true },
+            iast: { enabled: true },
+          });
+          console.log("[DataDog] Tracer initialized");
           export default tracer;
-        owner: ubuntu
-        group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile (Node 22 + permissions fix)
+    ########################################################################
+    # DOCKERFILE CREATION (NODE 22 + SECURITY TOOLS)
+    ########################################################################
+    - name: Create Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
           FROM node:22-bookworm-slim AS builder
+          RUN apt-get update && apt-get install -y git python3 make g++ curl && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
-          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           COPY tracer.ts ./tracer.ts
-          RUN npm install --production && npm install @aikidosec/firewall dd-trace --no-audit --no-fund
-          RUN if [ -f server.ts ]; then \
-                grep -qxF "import './tracer';" server.ts || sed -i "1iimport './tracer';" server.ts; \
-                grep -qxF "require('@aikidosec/firewall');" server.ts || sed -i "1irequire('@aikidosec/firewall');" server.ts; \
-              fi
-          RUN npm run build --if-present || echo "Build skipped"
+          RUN npm install --production && npm install --save-exact @aikidosec/firewall dd-trace
+          RUN npm run build || echo "Build skipped"
 
           FROM node:22-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
-          RUN useradd -r -s /bin/false juiceshop && mkdir -p /juice-shop/logs && chown -R juiceshop:juiceshop /juice-shop
+          RUN useradd -r -s /bin/false juiceshop && chown -R juiceshop:juiceshop /juice-shop
           USER juiceshop
-          EXPOSE 3000 8126
+          EXPOSE 3000
+          ENV DD_IAST_ENABLED=true
+          ENV NODE_ENV=production
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
           CMD ["npm", "start"]
-        owner: ubuntu
-        group: ubuntu
         mode: '0644'
+
+    ########################################################################
+    # DOCKER COMPOSE + ENV SETUP
+    ########################################################################
+    - name: Create .env file
+      copy:
+        dest: "{{ juice_shop_dir }}/.env"
+        content: |
+          DD_API_KEY={{ datadog_api_key }}
+          DD_SITE={{ datadog_site }}
+          DD_ENV=production
+          DD_SERVICE=juice-shop
+          DD_VERSION=1.0.0
+          DD_AGENT_HOST=172.17.0.1
+          DD_TRACE_AGENT_PORT=8126
+          DD_IAST_ENABLED=true
+          NODE_ENV=production
+        mode: '0600'
 
     - name: Create docker-compose.yml
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
-          version: "3.8"
+          version: "3.9"
           services:
             juice-shop:
               build: .
-              image: juice-shop-secure:latest
               container_name: juice-shop
-              restart: unless-stopped
+              restart: always
               ports:
                 - "3000:3000"
-                - "8126:8126"
-              env_file: .env
+              env_file:
+                - .env
               environment:
-                DD_AGENT_HOST: "172.17.0.1"
-                DD_TRACE_AGENT_PORT: "8126"
-                DD_SERVICE: "juice-shop"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                DD_LOGS_INJECTION: "true"
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
+                - DD_IAST_ENABLED=true
+                - DD_APPSEC_ENABLED=true
+                - DD_TRACE_ENABLED=true
+                - NODE_ENV=production
+              labels:
+                com.datadoghq.ad.logs: '[{"source": "nodejs", "service": "juice-shop"}]'
               healthcheck:
                 test: ["CMD", "curl", "-f", "http://localhost:3000"]
                 interval: 30s
                 timeout: 10s
                 retries: 3
-        owner: ubuntu
-        group: ubuntu
+              networks:
+                - juice_net
+          networks:
+            juice_net:
+              driver: bridge
         mode: '0644'
 
-
+    ########################################################################
+    # DEPLOYMENT SCRIPT
+    ########################################################################
     - name: Create deployment script
       copy:
         dest: "{{ juice_shop_dir }}/deploy.sh"
+        mode: '0755'
         content: |
           #!/bin/bash
           set -e
-          cd "{{ juice_shop_dir }}"
-          echo "=== Deploying Juice Shop (Docker) ==="
+          cd {{ juice_shop_dir }}
+          echo "=============================="
+          echo "Deploying Juice Shop with Docker"
+          echo "=============================="
+          if [ ! -f .env ]; then
+            echo "Error: .env file not found!"
+            exit 1
+          fi
           docker compose down || true
-          docker system prune -af --volumes || true
           docker compose build --no-cache
           docker compose up -d
-          sleep 20
+          echo "Deployment complete!"
           docker ps
-        mode: '0755'
-        owner: ubuntu
-        group: ubuntu
 
-    # =======================================================================
+    ########################################################################
     # FIREWALL CONFIGURATION
-    # =======================================================================
-    - name: Install and configure UFW
-      block:
-        - name: Install ufw
-          apt:
-            name: ufw
-            state: present
+    ########################################################################
+    - name: Allow ports 22, 80, 443, 3000
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+      loop:
+        - "22"
+        - "80"
+        - "443"
+        - "3000"
 
-        - name: Allow SSH
-          ufw:
-            rule: allow
-            port: '22'
-            proto: tcp
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
 
-        - name: Allow Juice Shop
-          ufw:
-            rule: allow
-            port: '3000'
-            proto: tcp
+    ########################################################################
+    # DEPLOY APPLICATION
+    ########################################################################
+    - name: Deploy Juice Shop container
+      shell: bash {{ juice_shop_dir }}/deploy.sh
+      args:
+        chdir: "{{ juice_shop_dir }}"
+      register: deploy_output
 
-        - name: Enable ufw safely
-          shell: |
-            ufw --force enable
-          args:
-            executable: /bin/bash
-
-    # =======================================================================
-    # COMPLETION
-    # =======================================================================
-    - name: Display next steps
+    - name: Show deployment logs
       debug:
-        msg:
-          - "✅ Juice Shop configuration complete!"
-          - "Run: cd {{ juice_shop_dir }} && ./deploy.sh"
-          - "Access: http://<EC2_PUBLIC_IP>:3000"
-          - "Aikido: https://app.aikido.dev"
-          - "Datadog: https://app.{{ datadog_site }}/security/appsec"
+        var: deploy_output.stdout_lines
 
+  ########################################################################
+  # HANDLERS
+  ########################################################################
   handlers:
     - name: Restart Datadog Agent
       systemd:

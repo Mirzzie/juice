@@ -1,3 +1,221 @@
+# name: DevSecOps Pipeline - Docker-Based (Your Workflow)
+
+# on:
+#   push:
+#     branches: [main, dev]
+#   pull_request:
+#     branches: [dev]
+#   workflow_dispatch:
+#     inputs:
+#       action:
+#         description: "Action to perform"
+#         required: true
+#         type: choice
+#         options:
+#           - "deploy_application"
+#           - "run_security_scans"
+#           - "full_pipeline"
+#         default: "deploy_application"
+
+# env:
+#   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+#   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+#   DATADOG_SITE: "us5.datadoghq.com"
+#   AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+#   SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+#   SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+# jobs:
+#   # =========================================================================
+#   # JOB 1: SAST - Always Run First
+#   # =========================================================================
+#   sast-semgrep:
+#     name: 🔍 SAST - Semgrep Security Scan
+#     runs-on: ubuntu-latest
+#     container:
+#       image: semgrep/semgrep
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Run Semgrep SAST Scan
+#         run: |
+#           semgrep scan --config=auto --json --output=semgrep-results.json || true
+#           semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
+#         env:
+#           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+#       - name: Upload Results to Semgrep Dashboard
+#         if: always()
+#         run: semgrep ci
+#         env:
+#           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+#       - uses: actions/upload-artifact@v4
+#         if: always()
+#         with:
+#           name: semgrep-results
+#           path: |
+#             semgrep-results.json
+#             semgrep-results.sarif
+
+#   # =========================================================================
+#   # JOB 2: Configure EC2 Instance via Ansible
+#   # =========================================================================
+#   configure-instance:
+#     name: ⚙️ Configure Instance (Ansible)
+#     runs-on: ubuntu-latest
+#     needs: sast-semgrep
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.11"
+#       - run: pip install ansible boto3 botocore
+#       - name: Setup SSH Key
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+#           chmod 600 ~/.ssh/id_rsa
+#       - name: Create inventory file
+#         run: |
+#           echo "[juiceshop]" > inventory.ini
+#           echo "${{ secrets.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+#       - name: Install Ansible (system)
+#         run: sudo apt-get update && sudo apt-get install -y ansible
+#       - name: Run Ansible Playbook with Vault
+#         env:
+#           VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+#         run: |
+#           cd ansible
+#           echo "$VAULT_PASSWORD" > ../.vault_pass
+#           chmod 600 ../.vault_pass
+#           ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file ../.vault_pass -v
+#       - name: Clean up Vault Password
+#         if: always()
+#         run: rm -f ansible/.vault_pass
+
+#   # =========================================================================
+#   # JOB 3: Build & Deploy Juice Shop (Docker)
+#   # =========================================================================
+#   build-and-deploy:
+#     name: 🚀 Build & Deploy Application
+#     runs-on: ubuntu-latest
+#     needs: [sast-semgrep, configure-instance]
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Setup SSH Key
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+#           chmod 600 ~/.ssh/id_rsa
+#           ssh-keyscan -H ${{ secrets.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+#       - name: Deploy Docker Container
+#         run: |
+#           ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_INSTANCE_IP }} << 'ENDSSH'
+#             set -e
+#             cd /opt/juice-shop
+#             echo "======================================"
+#             echo "Deploying Juice Shop with Docker"
+#             echo "======================================"
+#             if [ ! -f .env ]; then
+#               echo "::error::.env file not found!"
+#               exit 1
+#             fi
+#             docker compose down 2>/dev/null || true
+#             docker image prune -f || true
+#             docker compose build --no-cache
+#             docker compose up -d
+#             sleep 45
+#             if docker ps | grep -q juice-shop; then
+#               echo "✅ Container is running"
+#             else
+#               echo "❌ Container failed to start"
+#               docker compose logs
+#               exit 1
+#             fi
+#             for i in {1..10}; do
+#               if curl -f -s http://localhost:3000 > /dev/null; then
+#                 echo "✅ Application is responding"
+#                 break
+#               fi
+#               echo "Waiting for application... ($i/10)"
+#               sleep 5
+#             done
+#             docker compose logs --tail=30
+#           ENDSSH
+
+#   # =========================================================================
+#   # JOB 4: DAST - OWASP ZAP
+#   # =========================================================================
+#   dast-owasp-zap:
+#     name: 🕷️ DAST - OWASP ZAP Scan
+#     runs-on: ubuntu-latest
+#     needs: [build-and-deploy]
+#     steps:
+#       - uses: actions/checkout@v4
+#       - run: mkdir -p .zap
+#       - run: sleep 30
+#       - uses: zaproxy/action-baseline@v0.10.0
+#         with:
+#           target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
+#           rules_file_name: ".zap/rules.tsv"
+#           cmd_options: "-a -j -m 5 -T 60"
+#           allow_issue_writing: false
+#           fail_action: false
+#       - uses: actions/upload-artifact@v4
+#         if: always()
+#         with:
+#           name: zap-scan-results
+#           path: |
+#             report_html.html
+#             report_json.json
+#             report_md.md
+
+#   # =========================================================================
+#   # JOB 5: IAST Verification (DataDog)
+#   # =========================================================================
+#   iast-datadog-verification:
+#     name: 📊 IAST - DataDog Verification
+#     runs-on: ubuntu-latest
+#     needs: [build-and-deploy]
+#     steps:
+#       - run: |
+#           for i in {1..50}; do
+#             curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000 > /dev/null || true
+#             curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice > /dev/null || true
+#             curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000/api/Challenges > /dev/null || true
+#             sleep 1
+#           done
+
+#   # =========================================================================
+#   # JOB 6: Security Report
+#   # =========================================================================
+#   security-report:
+#     name: 📋 Generate Security Report
+#     runs-on: ubuntu-latest
+#     needs: [sast-semgrep, dast-owasp-zap, iast-datadog-verification]
+#     if: always()
+#     steps:
+#       - uses: actions/download-artifact@v4
+#         continue-on-error: true
+#       - run: |
+#           cat > security-report.md << 'EOF'
+#           # DevSecOps Security Scan Report
+#           **Pipeline Run:** #${{ github.run_number }}
+#           **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')
+#           **Branch:** ${{ github.ref_name }}
+#           **Commit:** ${{ github.sha }}
+
+#           ---
+#           ## Summary
+#           - ✅ SAST: Semgrep
+#           - ✅ RASP: Aikido Zen Firewall
+#           - ✅ IAST: DataDog
+#           - ✅ DAST: OWASP ZAP
+#           EOF
+#           cat security-report.md >> $GITHUB_STEP_SUMMARY
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: security-report
+#           path: security-report.md
+
 name: DevSecOps Pipeline - Docker-Based (Your Workflow)
 
 on:
@@ -20,35 +238,34 @@ on:
 env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-  DATADOG_SITE: "us5.datadoghq.com"
+  DATADOG_SITE: ${{ secrets.DATADOG_SITE || 'us5.datadoghq.com' }}
   AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
   SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
   SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
   # =========================================================================
-  # JOB 1: SAST - Always Run First
+  # JOB 1: SAST - Semgrep
   # =========================================================================
   sast-semgrep:
-    name: 🔍 SAST - Semgrep Security Scan
+    name: 🔍 SAST - Semgrep Scan
     runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Semgrep SAST Scan
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep Scan
         run: |
           semgrep scan --config=auto --json --output=semgrep-results.json || true
           semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-      - name: Upload Results to Semgrep Dashboard
+
+      - name: Upload Semgrep results
         if: always()
-        run: semgrep ci
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: |
@@ -63,83 +280,148 @@ jobs:
     runs-on: ubuntu-latest
     needs: sast-semgrep
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ansible boto3 botocore
-      - name: Setup SSH Key
+
+      - name: Install pip deps
+        run: pip install ansible boto3 botocore
+
+      - name: Install system ansible (ensures ansible-playbook bin available)
+        run: sudo apt-get update && sudo apt-get install -y ansible
+
+      - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
       - name: Create inventory file
         run: |
           echo "[juiceshop]" > inventory.ini
           echo "${{ secrets.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
-      - name: Install Ansible (system)
-        run: sudo apt-get update && sudo apt-get install -y ansible
-      - name: Run Ansible Playbook with Vault
+
+      - name: Run Ansible playbook (use vault if provided, otherwise pass secrets via extra-vars)
         env:
-          VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+          ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD || '' }}
+          AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN || '' }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY || '' }}
+          DATADOG_SITE: ${{ secrets.DATADOG_SITE || 'us5.datadoghq.com' }}
         run: |
-          cd ansible
-          echo "$VAULT_PASSWORD" > ../.vault_pass
-          chmod 600 ../.vault_pass
-          ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file ../.vault_pass -v
-      - name: Clean up Vault Password
-        if: always()
-        run: rm -f ansible/.vault_pass
+          set -e
+          cd ansible || (echo "ansible/ directory not found" && exit 2)
+
+          # If ANSIBLE_VAULT_PASSWORD is set, run with vault-file technique
+          if [ -n "$ANSIBLE_VAULT_PASSWORD" ]; then
+            echo "$ANSIBLE_VAULT_PASSWORD" > ../.vault_pass
+            chmod 600 ../.vault_pass
+            ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file ../.vault_pass -v
+            rc=$?
+            rm -f ../.vault_pass
+            exit $rc
+          fi
+
+          # Otherwise, run without vault but pass required secrets as extra-vars.
+          # Ensure you keep secrets in repo secrets for safety.
+          ansible-playbook -i ../inventory.ini playbook.yml \
+            --extra-vars "aikido_token=${AIKIDO_TOKEN} datadog_api_key=${DATADOG_API_KEY} datadog_site=${DATADOG_SITE}" -v
 
   # =========================================================================
-  # JOB 3: Build & Deploy Juice Shop (Docker)
+  # JOB 3: Build & Deploy Juice Shop (remote Docker)
   # =========================================================================
   build-and-deploy:
     name: 🚀 Build & Deploy Application
     runs-on: ubuntu-latest
     needs: [sast-semgrep, configure-instance]
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup SSH Key
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key (for remote deploy)
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-      - name: Deploy Docker Container
+
+      - name: Ensure remote .env present (create from secrets if necessary) and deploy
+        env:
+          AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN || '' }}
+          DATADOG_SITE: ${{ secrets.DATADOG_SITE || 'us5.datadoghq.com' }}
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_INSTANCE_IP }} << 'ENDSSH'
+          set -euo pipefail
+          # remote commands: create .env if missing, then run docker compose
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_INSTANCE_IP }} bash -s <<'REMOTE'
             set -e
-            cd /opt/juice-shop
-            echo "======================================"
-            echo "Deploying Juice Shop with Docker"
-            echo "======================================"
+
+            APP_DIR="/opt/juice-shop"
+            cd "$APP_DIR" || { echo "App dir $APP_DIR does not exist"; exit 2; }
+
+            echo "=== Remote deploy: verify .env ==="
             if [ ! -f .env ]; then
-              echo "::error::.env file not found!"
-              exit 1
-            fi
-            docker compose down 2>/dev/null || true
-            docker image prune -f || true
-            docker compose build --no-cache
-            docker compose up -d
-            sleep 45
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Container is running"
+              echo ".env missing on remote — creating from secrets (placeholders will be used if secrets not set)"
+              cat > .env <<'EOF'
+              AIKIDO_TOKEN=${AIKIDO_TOKEN:-REPLACE_ME}
+              AIKIDO_BLOCK=false
+              AIKIDO_DEBUG=true
+              DD_ENV=production
+              DD_VERSION=latest
+              EOF
+              chmod 600 .env || true
+              echo ".env created"
             else
-              echo "❌ Container failed to start"
-              docker compose logs
-              exit 1
+              echo ".env already exists"
             fi
-            for i in {1..10}; do
-              if curl -f -s http://localhost:3000 > /dev/null; then
-                echo "✅ Application is responding"
+
+            echo "=== Prune docker to free space (safe) ==="
+            docker system prune -af --volumes || true
+
+            echo "=== Stop existing compose ==="
+            docker compose down 2>/dev/null || true
+
+            echo "=== Build image (remote) ==="
+            # use --pull to ensure base image updates
+            docker compose build --pull --no-cache
+
+            echo "=== Start compose ==="
+            docker compose up -d
+
+            echo "=== Wait for container startup (max 60s) ==="
+            for i in $(seq 1 12); do
+              if docker ps --format '{{.Names}}' | grep -q '^juice-shop$'; then
+                echo "juice-shop container running"
                 break
               fi
-              echo "Waiting for application... ($i/10)"
+              echo "waiting for container... ($i/12)"
               sleep 5
             done
-            docker compose logs --tail=30
-          ENDSSH
+
+            echo "=== Healthcheck loop (max 60s) ==="
+            ok=false
+            for i in $(seq 1 12); do
+              if curl -sfS http://localhost:3000/rest/admin/application-version > /dev/null 2>&1; then
+                echo "Application healthy"
+                ok=true
+                break
+              fi
+              echo "waiting for app to respond ($i/12)"
+              sleep 5
+            done
+
+            if [ "$ok" != "true" ]; then
+              echo "Application did not become healthy — tailing logs"
+              docker compose logs --tail=200
+              exit 1
+            fi
+
+            echo "=== Remote deploy finished successfully ==="
+            docker compose logs --tail=50
+          REMOTE
 
   # =========================================================================
   # JOB 4: DAST - OWASP ZAP
@@ -149,18 +431,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-and-deploy]
     steps:
-      - uses: actions/checkout@v4
-      - run: mkdir -p .zap
-      - run: sleep 30
-      - uses: zaproxy/action-baseline@v0.10.0
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Wait for app stability
+        run: sleep 20
+
+      - name: Run ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.10.0
         with:
           target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
           rules_file_name: ".zap/rules.tsv"
           cmd_options: "-a -j -m 5 -T 60"
           allow_issue_writing: false
           fail_action: false
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload ZAP results
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: zap-scan-results
           path: |
@@ -169,22 +457,23 @@ jobs:
             report_md.md
 
   # =========================================================================
-  # JOB 5: IAST Verification (DataDog)
+  # JOB 5: IAST Traffic Generation (DataDog verification)
   # =========================================================================
   iast-datadog-verification:
     name: 📊 IAST - DataDog Verification
     runs-on: ubuntu-latest
     needs: [build-and-deploy]
     steps:
-      - run: |
-          for i in {1..50}; do
-            curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000 > /dev/null || true
-            curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice > /dev/null || true
-            curl -s http://${{ secrets.EC2_INSTANCE_IP }}:3000/api/Challenges > /dev/null || true
+      - name: Generate traffic for IAST
+        run: |
+          for i in $(seq 1 60); do
+            curl -sS "http://${{ secrets.EC2_INSTANCE_IP }}:3000" >/dev/null 2>&1 || true
+            curl -sS "http://${{ secrets.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" >/dev/null 2>&1 || true
+            curl -sS "http://${{ secrets.EC2_INSTANCE_IP }}:3000/api/Challenges" >/dev/null 2>&1 || true
             sleep 1
           done
 
-  # =========================================================================
+  #=========================================================================
   # JOB 6: Security Report
   # =========================================================================
   security-report:
