@@ -725,16 +725,16 @@
     # # DEPLOY APPLICATION (SAFE RECONNECT)
     # #######################################################################
 
-    - name: Run Juice Shop deployment
-      shell: bash {{ juice_shop_dir }}/deploy.sh
-      args:
-        chdir: "{{ juice_shop_dir }}"
-      register: deploy_output
-      become: true
+    # - name: Run Juice Shop deployment
+    #   shell: bash {{ juice_shop_dir }}/deploy.sh
+    #   args:
+    #     chdir: "{{ juice_shop_dir }}"
+    #   register: deploy_output
+    #   become: true
 
-    - name: Display deployment logs
-      debug:
-        var: deploy_output.stdout_lines
+    # - name: Display deployment logs
+    #   debug:
+    #     var: deploy_output.stdout_lines
 
     # =======================================================================
     # DEPLOYMENT SCRIPTS
