@@ -697,33 +697,33 @@
               driver: bridge
         mode: '0644'
 
-    ########################################################################
-    # DEPLOYMENT SCRIPT
-    ########################################################################
-    - name: Create deployment script
-      copy:
-        dest: "{{ juice_shop_dir }}/deploy.sh"
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          set -e
-          cd {{ juice_shop_dir }}
-          echo "=============================="
-          echo "Deploying Juice Shop with Docker"
-          echo "=============================="
-          if [ ! -f .env ]; then
-            echo "Error: .env file not found!"
-            exit 1
-          fi
-          docker compose down || true
-          docker compose build --no-cache
-          docker compose up -d
-          echo "Deployment complete!"
-          docker ps
+    # ########################################################################
+    # # DEPLOYMENT SCRIPT
+    # ########################################################################
+    # - name: Create deployment script
+    #   copy:
+    #     dest: "{{ juice_shop_dir }}/deploy.sh"
+    #     mode: '0755'
+    #     content: |
+    #       #!/bin/bash
+    #       set -e
+    #       cd {{ juice_shop_dir }}
+    #       echo "=============================="
+    #       echo "Deploying Juice Shop with Docker"
+    #       echo "=============================="
+    #       if [ ! -f .env ]; then
+    #         echo "Error: .env file not found!"
+    #         exit 1
+    #       fi
+    #       docker compose down || true
+    #       docker compose build --no-cache
+    #       docker compose up -d
+    #       echo "Deployment complete!"
+    #       docker ps
 
-    ########################################################################
-    # DEPLOY APPLICATION (SAFE RECONNECT)
-    #######################################################################
+    # ########################################################################
+    # # DEPLOY APPLICATION (SAFE RECONNECT)
+    # #######################################################################
 
     - name: Run Juice Shop deployment
       shell: bash {{ juice_shop_dir }}/deploy.sh
@@ -735,6 +735,85 @@
     - name: Display deployment logs
       debug:
         var: deploy_output.stdout_lines
+
+    # =======================================================================
+    # DEPLOYMENT SCRIPTS
+    # =======================================================================
+    - name: Create deployment script
+      copy:
+        dest: "{{ juice_shop_dir }}/deploy.sh"
+        content: |
+          #!/bin/bash
+          set -e
+          cd "{{ juice_shop_dir }}"
+          
+          echo "======================================"
+          echo "Deploying Juice Shop with Security Tools"
+          echo "======================================"
+          
+          # Stop existing containers
+          echo "Stopping existing containers..."
+          docker compose down || true
+          
+          # Build new image
+          echo "Building Docker image..."
+          docker compose build --no-cache
+          
+          # Start containers
+          echo "Starting containers..."
+          docker compose up -d
+          
+          # Wait for health check
+          echo "Waiting for application to be healthy..."
+          sleep 30
+          
+          # Verify
+          if docker ps | grep -q juice-shop; then
+            echo "✅ Deployment successful!"
+            docker compose logs --tail=50
+          else
+            echo "❌ Deployment failed!"
+            docker compose logs
+            exit 1
+          fi
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create health check script
+      copy:
+        dest: "{{ juice_shop_dir }}/health-check.sh"
+        content: |
+          #!/bin/bash
+          echo "=== Health Check ==="
+          
+          # Container status
+          if docker ps | grep -q juice-shop; then
+            echo "✅ Container: Running"
+          else
+            echo "❌ Container: Not running"
+            exit 1
+          fi
+          
+          # Application health
+          if curl -f -s http://localhost:3000 > /dev/null; then
+            echo "✅ Application: Responding"
+          else
+            echo "❌ Application: Not responding"
+            exit 1
+          fi
+          
+          # Check logs for security tools
+          echo ""
+          echo "Security Tools Status:"
+          docker logs juice-shop 2>&1 | grep -i "aikido" | tail -3 || echo "⚠ Aikido logs not found"
+          docker logs juice-shop 2>&1 | grep -i "datadog" | tail -3 || echo "⚠ DataDog logs not found"
+          
+          echo ""
+          echo "=== Health Check Complete ==="
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
 
   ########################################################################
   # HANDLERS
