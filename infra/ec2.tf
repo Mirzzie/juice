@@ -9,31 +9,35 @@ data "aws_vpc" "default" {
 
 resource "aws_security_group" "juice_sg" {
   name        = "juice-sg"
-  description = "Allow SSH and app port"
+  description = "Allow SSH, Juice Shop app, and Datadog APM"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
+    description = "SSH Access"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-    ingress {
+  ingress {
+    description = "Juice Shop Application"
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-      ingress {
-    from_port   = 4000
-    to_port     = 4000
+  ingress {
+    description = "DataDog APM / Trace Agent"
+    from_port   = 8126
+    to_port     = 8126
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
+    description = "Allow all outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -46,6 +50,12 @@ resource "aws_instance" "juice" {
   instance_type          = "t3.medium"
   key_name               = "sec"
   vpc_security_group_ids = [aws_security_group.juice_sg.id]
+
+  root_block_device {
+    volume_size           = 20
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
 
   tags = {
     Name = "juice"
