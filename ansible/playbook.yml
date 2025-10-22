@@ -606,15 +606,14 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Ensure logs directory exists with correct permissions
-      file:
-        path: "{{ juice_shop_dir }}/logs"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+    - name: Install Node 22
+      shell: |
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install -y nodejs
+      args:
+        creates: /usr/bin/node
 
-    - name: Create tracer.ts (minimal Datadog tracer)
+    - name: Create tracer.ts (Datadog tracer)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
@@ -625,28 +624,28 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile
+    - name: Create Dockerfile (Node 22 + permissions fix)
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:20-bookworm-slim AS builder
+          FROM node:22-bookworm-slim AS builder
           WORKDIR /juice-shop
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           COPY tracer.ts ./tracer.ts
-          RUN npm install --production && npm install --save-exact @aikidosec/firewall dd-trace --no-audit --no-fund
+          RUN npm install --production && npm install @aikidosec/firewall dd-trace --no-audit --no-fund
           RUN if [ -f server.ts ]; then \
                 grep -qxF "import './tracer';" server.ts || sed -i "1iimport './tracer';" server.ts; \
                 grep -qxF "require('@aikidosec/firewall');" server.ts || sed -i "1irequire('@aikidosec/firewall');" server.ts; \
               fi
           RUN npm run build --if-present || echo "Build skipped"
 
-          FROM node:20-bookworm-slim
+          FROM node:22-bookworm-slim
           WORKDIR /juice-shop
-          COPY --from=builder /juice-shop . 
-          RUN mkdir -p /juice-shop/logs && chown -R ubuntu:ubuntu /juice-shop
-          USER ubuntu
-          EXPOSE 3000
+          COPY --from=builder /juice-shop .
+          RUN useradd -r -s /bin/false juiceshop && mkdir -p /juice-shop/logs && chown -R juiceshop:juiceshop /juice-shop
+          USER juiceshop
+          EXPOSE 3000 8126
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
           CMD ["npm", "start"]
@@ -667,6 +666,7 @@
               restart: unless-stopped
               ports:
                 - "3000:3000"
+                - "8126:8126"
               env_file: .env
               environment:
                 DD_AGENT_HOST: "172.17.0.1"
@@ -686,19 +686,6 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create .env (with secrets)
-      copy:
-        dest: "{{ juice_shop_dir }}/.env"
-        content: |
-          AIKIDO_TOKEN={{ aikido_token }}
-          AIKIDO_BLOCK=false
-          AIKIDO_DEBUG=true
-          DD_ENV=production
-          DD_VERSION=latest
-        owner: ubuntu
-        group: ubuntu
-        mode: '0600'
-      no_log: true
 
     - name: Create deployment script
       copy:
