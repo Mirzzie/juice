@@ -126,28 +126,36 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Docker Container
+      - name: Deploy Juice Shop Container
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_INSTANCE_IP }} << 'ENDSSH'
             set -e
             cd /opt/juice-shop
-            
+
             echo "======================================"
             echo "Deploying Juice Shop with Docker"
             echo "======================================"
-            
+
             if [ ! -f .env ]; then
               echo "::error::.env file not found!"
               exit 1
             fi
-            
+
+            # Stop and clean old containers/images
             docker compose down 2>/dev/null || true
             docker image prune -f || true
+
+            # Ensure logs directory exists with correct permissions
+            mkdir -p /opt/juice-shop/logs
+            chown -R $(id -u):$(id -g) /opt/juice-shop/logs
+
+            # Build and start container
             docker compose build --no-cache
             docker compose up -d
-            
-            sleep 45
-            
+
+            sleep 30  # Wait for app to start
+
+            # Check container status
             if docker ps | grep -q juice-shop; then
               echo "✅ Container is running"
             else
@@ -155,7 +163,8 @@ jobs:
               docker compose logs
               exit 1
             fi
-            
+
+            # Check app responsiveness
             for i in {1..10}; do
               if curl -f -s http://localhost:3000 > /dev/null; then
                 echo "✅ Application is responding"
@@ -164,7 +173,7 @@ jobs:
               echo "Waiting for application... ($i/10)"
               sleep 5
             done
-            
+
             docker compose logs --tail=30
           ENDSSH
 

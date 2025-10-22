@@ -606,7 +606,15 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create tracer.ts (Datadog tracer)
+    - name: Ensure logs directory exists with correct permissions
+      file:
+        path: "{{ juice_shop_dir }}/logs"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create tracer.ts (minimal Datadog tracer)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
@@ -626,7 +634,7 @@
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           COPY tracer.ts ./tracer.ts
-          RUN npm install --production && npm install @aikidosec/firewall dd-trace --no-audit --no-fund
+          RUN npm install --production && npm install --save-exact @aikidosec/firewall dd-trace --no-audit --no-fund
           RUN if [ -f server.ts ]; then \
                 grep -qxF "import './tracer';" server.ts || sed -i "1iimport './tracer';" server.ts; \
                 grep -qxF "require('@aikidosec/firewall');" server.ts || sed -i "1irequire('@aikidosec/firewall');" server.ts; \
@@ -635,9 +643,9 @@
 
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
-          COPY --from=builder /juice-shop .
-          RUN useradd -r -s /bin/false juiceshop && chown -R juiceshop /juice-shop
-          USER juiceshop
+          COPY --from=builder /juice-shop . 
+          RUN mkdir -p /juice-shop/logs && chown -R ubuntu:ubuntu /juice-shop
+          USER ubuntu
           EXPOSE 3000
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
