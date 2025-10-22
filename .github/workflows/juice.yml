@@ -55,30 +55,49 @@ jobs:
   # JOB 2: Configure Instance (Ansible)
   # =========================================================================
   configure-instance:
-    name: ⚙️ Configure EC2 Instance
+    name: ⚙️ Configure Instance (Ansible)
     runs-on: ubuntu-latest
     needs: sast-semgrep
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Setup Ansible
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible
         run: |
-          sudo apt-get update && sudo apt-get install -y ansible python3-boto3
+          pip install ansible boto3 botocore
 
-      - name: Setup SSH Key
+      - name: Set up SSH key
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Create inventory
+      - name: Create inventory file
         run: |
           echo "[juiceshop]" > inventory.ini
-          echo "${{ secrets.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+          echo "${{ secrets.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
 
-      - name: Run Playbook
-        run: ansible-playbook -i inventory.ini ansible/playbook.yml -v
+      - name: Install Ansible
+        run: sudo apt-get update && sudo apt-get install -y ansible
+
+      - name: Run Ansible Playbook with Vault
+        env:
+          VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+        run: |
+          cd ansible
+          echo "$VAULT_PASSWORD" > ../.vault_pass
+          chmod 600 ../.vault_pass
+          ansible-playbook -i ../inventory.ini playbook.yml --vault-password-file ../.vault_pass -v
+
+      - name: Clean up Vault Password
+        if: always()
+        run: |
+          rm -f ansible/.vault_pass
 
   # =========================================================================
   # JOB 3: Build & Deploy
