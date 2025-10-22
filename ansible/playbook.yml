@@ -722,29 +722,8 @@
           docker ps
 
     ########################################################################
-    # FIREWALL CONFIGURATION
-    ########################################################################
-    - name: Allow ports 22, 80, 443, 3000
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-      loop:
-        - "22"
-        - "80"
-        - "443"
-        - "3000"
-
-    - name: Enable UFW firewall
-      ufw:
-        state: enabled
-        policy: deny
-
-    ########################################################################
     # DEPLOY APPLICATION (SAFE RECONNECT)
-    ########################################################################
-    - name: Wait for SSH reconnection after firewall
-      wait_for_connection:
-        timeout: 120
+    #######################################################################
 
     - name: Run Juice Shop deployment
       shell: bash {{ juice_shop_dir }}/deploy.sh
