@@ -7,9 +7,9 @@ name: DevSecOps Pipeline - Deploy & Security Scans
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
     inputs:
       skip_ansible:
@@ -45,7 +45,7 @@ jobs:
       - name: Run Semgrep Scan
         run: |
           semgrep scan --config=auto --json --output=semgrep-results.json || true
-          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
+          semgrep scan --config=auto --sarif --output=semgrep-result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s.sarif || true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
