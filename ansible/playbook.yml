@@ -6,7 +6,7 @@
 
   vars:
     juice_shop_dir: /opt/juice-shop
-    node_version: "20"
+    node_version: "22"
     docker_compose_version: "2.23.0"
 
   # Load encrypted secrets from vault
@@ -112,7 +112,6 @@
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
-          # APM Configuration
           apm_config:
             enabled: true
             apm_non_local_traffic: true
@@ -120,20 +119,16 @@
             receiver_timeout: 10
             max_traces_per_second: 100
           
-          # Application Security Monitoring (ASM)
           appsec_config:
             enabled: true
           
-          # Runtime Security
           runtime_security_config:
             enabled: true
           
-          # Process monitoring
           process_config:
             enabled: "true"
             scrub_args: true
           
-          # Logs
           logs_enabled: true
           logs_config:
             container_collect_all: true
@@ -160,7 +155,7 @@
       when: dd_status.rc == 0
 
     # =======================================================================
-    # APPLICATION DIRECTORY SETUP (files & tracer.ts created by Ansible)
+    # APPLICATION DIRECTORY & CODE MODIFICATIONS
     # =======================================================================
     - name: Create application directory
       file:
@@ -170,86 +165,94 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create tracer.ts (DataDog tracer) in app context
+    - name: Create Datadog tracer (minimal)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
           import tracer from "dd-trace";
-          tracer.init({
-            service: process.env.DD_SERVICE || "juice-shop",
-            env: process.env.DD_ENV || "production",
-            version: process.env.DD_VERSION || "latest",
-            hostname: process.env.DD_AGENT_HOST || "172.17.0.1",
-            port: process.env.DD_TRACE_AGENT_PORT || "8126",
-            logInjection: process.env.DD_LOGS_INJECTION === "true",
-            sampleRate: parseFloat(process.env.DD_TRACE_SAMPLE_RATE || "1"),
-            profiling: process.env.DD_PROFILING_ENABLED === "true",
-            runtimeMetrics: true,
-            appsec: {
-              enabled: process.env.DD_APPSEC_ENABLED === "true",
-              waf: { timeout: 5000 }
-            },
-            iast: {
-              enabled: process.env.DD_IAST_ENABLED === "true",
-              requestSampling: 100,
-              maxConcurrentRequests: 2
-            },
-            dataStreamsEnabled: process.env.DD_DATA_STREAMS_ENABLED === "true",
-            startupLogs: true
-          });
-          console.log("[DataDog] Tracer initialized");
+          tracer.init(); // Initialized globally for all instrumented modules
           export default tracer;
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile (builder copies tracer.ts from context)
+    - name: Insert Aikido + Datadog imports into Juice Shop entry file
+      block:
+        - name: Detect server.ts
+          stat:
+            path: "{{ juice_shop_dir }}/server.ts"
+          register: server_ts
+
+        - name: Detect server.js
+          stat:
+            path: "{{ juice_shop_dir }}/server.js"
+          register: server_js
+
+        - name: Patch server.ts
+          blockinfile:
+            path: "{{ juice_shop_dir }}/server.ts"
+            insertafter: BOF
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - SECURITY IMPORTS"
+            block: |
+              require('@aikidosec/firewall');
+              import "./tracer";
+          when: server_ts.stat.exists
+
+        - name: Patch server.js
+          blockinfile:
+            path: "{{ juice_shop_dir }}/server.js"
+            insertafter: BOF
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - SECURITY IMPORTS"
+            block: |
+              require('@aikidosec/firewall');
+              require("./tracer");
+          when: server_js.stat.exists
+
+    # =======================================================================
+    # DOCKER CONFIGURATION
+    # =======================================================================
+    - name: Create Dockerfile (Node 22 + Security Agents)
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Multi-stage Dockerfile for Juice Shop with Security Tools
-          FROM node:20-bookworm-slim AS builder
-          
+          FROM node:22-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
-          
           WORKDIR /juice-shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
-          # Install dependencies and security tools
-          RUN npm install --production && \
-              npm install --save-exact @aikidosec/firewall && \
-              npm install --save dd-trace
-          
-          # Copy tracer created by Ansible into build context
+          RUN npm install --production
+          RUN npm install --save-exact @aikidosec/firewall
+          RUN npm install --save dd-trace
           COPY tracer.ts ./tracer.ts
-          
-          # Ensure tracer is imported in server entry (if server.ts exists, app code should reference tracer)
-          # (We attempt to modify server.ts at runtime in container or ensure the app loads tracer at startup.)
-          
-          RUN npm run build || echo "Build completed"
-          
-          # Production stage
-          FROM node:20-bookworm-slim
+          RUN npm run build || echo "Build skipped"
+
+          FROM node:22-bookworm-slim
           RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
           USER juiceshop
+
+          ENV NODE_ENV=production \
+              DD_ENV=production \
+              DD_LOGS_INJECTION=true \
+              DD_TRACE_SAMPLE_RATE=1 \
+              DD_PROFILING_ENABLED=true \
+              DD_APPSEC_ENABLED=true \
+              DD_IAST_ENABLED=true \
+              DD_DATA_STREAMS_ENABLED=true \
+              AIKIDO_BLOCK=false \
+              AIKIDO_DEBUG=true
+
           EXPOSE 3000
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
-          ENV NODE_ENV=production PORT=3000
-          # Fix permissions
-          RUN mkdir -p /juice-shop/logs && \
-          chown -R node:node /juice-shop && \
-          chmod -R 755 /juice-shop
 
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create docker-compose.yml (no 'version' key to avoid warning)
+    - name: Create docker-compose.yml (with Datadog Agent host)
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
@@ -294,12 +297,9 @@
       copy:
         dest: "{{ juice_shop_dir }}/.env.template"
         content: |
-          # Aikido Zen Firewall
           AIKIDO_TOKEN=AIK_RUN_XXXXXXXXX
           AIKIDO_BLOCK=false
           AIKIDO_DEBUG=true
-          
-          # DataDog (API key not needed in container, agent is on host)
           DD_ENV=production
           DD_VERSION=latest
         owner: ubuntu
@@ -323,80 +323,47 @@
     # =======================================================================
     # DEPLOYMENT SCRIPTS
     # =======================================================================
-    - name: Create deployment script
+    - name: Create deploy.sh
       copy:
         dest: "{{ juice_shop_dir }}/deploy.sh"
         content: |
           #!/bin/bash
           set -e
           cd "{{ juice_shop_dir }}"
-          
-          echo "======================================"
-          echo "Deploying Juice Shop with Security Tools"
-          echo "======================================"
-          
-          # Stop existing containers
-          echo "Stopping existing containers..."
+          echo "Deploying Juice Shop with Security Tools..."
           docker compose down || true
-          
-          # Build new image
-          echo "Building Docker image..."
           docker compose build --no-cache
-          
-          # Start containers
-          echo "Starting containers..."
           docker compose up -d
-          
-          # Wait for health check
-          echo "Waiting for application to be healthy..."
           sleep 30
-          
-          # Verify
           if docker ps | grep -q juice-shop; then
             echo "✅ Deployment successful!"
-            docker compose logs --tail=50
           else
             echo "❌ Deployment failed!"
             docker compose logs
             exit 1
           fi
-        owner: ubuntu
-        group: ubuntu
         mode: '0755'
 
-    - name: Create health check script
+    - name: Create health-check.sh
       copy:
         dest: "{{ juice_shop_dir }}/health-check.sh"
         content: |
           #!/bin/bash
           echo "=== Health Check ==="
-          
-          # Container status
           if docker ps | grep -q juice-shop; then
-            echo "✅ Container: Running"
+            echo "✅ Container running"
           else
-            echo "❌ Container: Not running"
+            echo "❌ Container not running"
             exit 1
           fi
-          
-          # Application health
-          if curl -f -s http://localhost:3000 > /dev/null; then
-            echo "✅ Application: Responding"
+          if curl -fs http://localhost:3000 >/dev/null; then
+            echo "✅ App responding"
           else
-            echo "❌ Application: Not responding"
+            echo "❌ App not responding"
             exit 1
           fi
-          
-          # Check logs for security tools
-          echo ""
-          echo "Security Tools Status:"
-          docker logs juice-shop 2>&1 | grep -i "aikido" | tail -3 || echo "⚠ Aikido logs not found"
-          docker logs juice-shop 2>&1 | grep -i "datadog" | tail -3 || echo "⚠ DataDog logs not found"
-          
-          echo ""
-          echo "=== Health Check Complete ==="
-        owner: ubuntu
-        group: ubuntu
+          docker logs juice-shop | grep -i "datadog" | tail -3 || echo "⚠ No Datadog logs"
+          docker logs juice-shop | grep -i "aikido" | tail -3 || echo "⚠ No Aikido logs"
         mode: '0755'
 
     # =======================================================================
@@ -421,7 +388,7 @@
             port: '3000'
             proto: tcp
 
-        - name: Allow DataDog APM
+        - name: Allow Datadog APM
           ufw:
             rule: allow
             port: '8126'
@@ -433,27 +400,22 @@
             policy: deny
 
     # =======================================================================
-    # COMPLETION
+    # COMPLETION MESSAGE
     # =======================================================================
-    - name: Display deployment instructions
+    - name: Display completion message
       debug:
         msg:
           - "============================================"
-          - "Configuration Complete!"
+          - "✅ Configuration Complete!"
           - "============================================"
-          - ""
           - "Next steps:"
-          - "1. SSH to the instance"
+          - "1. SSH into instance"
           - "2. cd {{ juice_shop_dir }}"
-          - "3. Verify .env file has correct tokens"
-          - "4. Run: ./deploy.sh"
+          - "3. ./deploy.sh"
+          - "4. ./health-check.sh"
           - ""
-          - "Health check: ./health-check.sh"
-          - "View logs: docker compose logs -f"
-          - ""
-          - "Security Dashboards:"
-          - "- Aikido: https://app.aikido.dev"
-          - "- DataDog: https://app.{{ datadog_site }}/security/appsec"
+          - "Aikido Dashboard: https://app.aikido.dev"
+          - "Datadog Dashboard: https://app.{{ datadog_site }}/security/appsec"
 
   handlers:
     - name: Restart DataDog Agent
