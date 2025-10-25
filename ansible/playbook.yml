@@ -212,7 +212,7 @@
               NODE_OPTIONS="--max-old-space-size=2048"
           
           # ✅ Start application with npm start (NOT app.ts)
-          CMD ["npm", "start"]
+          CMD ["npm", "start" "app.ts"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
