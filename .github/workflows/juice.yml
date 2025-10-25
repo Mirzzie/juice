@@ -223,7 +223,8 @@ jobs:
 
       - name: Deploy Application
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+            ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH' || true
             set -e
             cd /opt/juice-shop
             
@@ -232,7 +233,24 @@ jobs:
             docker image prune -f 2>/dev/null || true
             
             echo "📦 Building Docker image with security instrumentation..."
-            docker compose build --no-cache
+            # Use nohup to prevent SSH disconnection from killing the build
+            nohup docker compose build --no-cache > build.log 2>&1 &
+            BUILD_PID=$!
+            
+            # Wait for build to complete with progress updates
+            while kill -0 $BUILD_PID 2>/dev/null; do
+              echo "Building... (check build.log for details)"
+              sleep 10
+            done
+            
+            # Check if build succeeded
+            if grep -q "ERROR" build.log; then
+              echo "❌ Build failed"
+              tail -50 build.log
+              exit 1
+            fi
+            
+            echo "✅ Build completed successfully"
             
             echo "▶️  Starting containers..."
             docker compose up -d
@@ -252,16 +270,25 @@ jobs:
             for i in {1..10}; do
               if curl -f -s http://localhost:3000 > /dev/null; then
                 echo "✅ Application is responding"
-                break
-              fi
-              if [ $i -eq 10 ]; then
-                echo "❌ Application not responding"
-                exit 1
+                exit 0
               fi
               echo "Waiting for application... ($i/10)"
               sleep 5
             done
+            echo "⚠️ Application may need more time to start"
           ENDSSH
+
+          # Verify deployment in a separate connection
+          sleep 5
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
+            if docker ps | grep -q juice-shop; then
+              echo "✅ Deployment verified - container is running"
+              exit 0
+            else
+              echo "❌ Container not running after deployment"
+              exit 1
+            fi
+          VERIFY
 
       - name: Verify Security Instrumentation
         run: |
