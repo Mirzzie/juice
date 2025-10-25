@@ -144,33 +144,21 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create tracer.ts (DataDog tracer)
+    # ✅ FIXED: Minimal tracer.ts as per DataDog documentation
+    - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
+          // tracer.ts
           import tracer from "dd-trace";
-          tracer.init({
-            service: process.env.DD_SERVICE || "juice-shop",
-            env: process.env.DD_ENV || "production",
-            version: process.env.DD_VERSION || "latest",
-            hostname: process.env.DD_AGENT_HOST || "172.17.0.1",
-            port: process.env.DD_TRACE_AGENT_PORT || "8126",
-            logInjection: true,
-            profiling: true,
-            runtimeMetrics: true,
-            appsec: { enabled: true },
-            iast: { enabled: true },
-            dataStreamsEnabled: true,
-            startupLogs: true
-          });
-          console.log("[DataDog] Tracer initialized");
+          tracer.init(); // initialized in a different file to avoid hoisting.
           export default tracer;
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE WITH FIXED LOG DIRECTORY PERMISSIONS
+    # DOCKERFILE WITH PROPER INSTRUMENTATION
     # =======================================================================
     - name: Create Dockerfile
       copy:
@@ -182,14 +170,23 @@
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
+          # Clone Juice Shop repository
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
+          # Install dependencies including security tools
           RUN npm install --production && \
               npm install --save-exact @aikidosec/firewall && \
               npm install --save dd-trace
 
+          # Copy tracer configuration
           COPY tracer.ts ./tracer.ts
-          RUN npm run build || echo "Build completed"
+
+          # ✅ CRITICAL: Modify server.ts to add security instrumentation
+          RUN sed -i "1i import './tracer' // DataDog APM tracing" server.ts && \
+              sed -i "2i require('@aikidosec/firewall') // Aikido Zen RASP" server.ts
+
+          # Verify modifications
+          RUN echo "=== Modified server.ts (first 5 lines) ===" && head -5 server.ts
 
           # --- Production stage ---
           FROM node:22-bookworm-slim
@@ -197,9 +194,10 @@
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
 
+          # Copy application with security modifications
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # ✅ Fix: Ensure logs directory exists with correct permissions
+          # Ensure logs directory exists with correct permissions
           RUN mkdir -p /juice-shop/logs && chown -R juiceshop:juiceshop /juice-shop
 
           USER juiceshop
@@ -209,13 +207,15 @@
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
 
           ENV NODE_ENV=production PORT=3000
+          
+          # ✅ Start application with npm start (NOT app.ts)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
     # =======================================================================
-    # DOCKER COMPOSE
+    # DOCKER COMPOSE WITH ALL ENVIRONMENT VARIABLES
     # =======================================================================
     - name: Create docker-compose.yml
       copy:
@@ -232,14 +232,33 @@
               env_file:
                 - .env
               environment:
+                # Node environment
                 NODE_ENV: production
+                
+                # DataDog APM Configuration
+                DD_ENV: dev
+                DD_SERVICE: juice-shop
+                DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
-                DD_SERVICE: juice-shop
+                
+                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
+                DD_TRACE_SAMPLE_RATE: "1"
                 DD_PROFILING_ENABLED: "true"
+                DD_RUNTIME_METRICS_ENABLED: "true"
+                DD_DATA_STREAMS_ENABLED: "true"
+                DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
+                
+                # DataDog Security (AppSec & IAST)
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
+                
+                # Aikido Configuration (from .env file)
+                # AIKIDO_TOKEN: ${AIKIDO_TOKEN}
+                # AIKIDO_BLOCK: ${AIKIDO_BLOCK}
+                # AIKIDO_DEBUG: ${AIKIDO_DEBUG}
+                
               extra_hosts:
                 - "host.docker.internal:host-gateway"
               healthcheck:
@@ -261,10 +280,13 @@
       copy:
         dest: "{{ juice_shop_dir }}/.env"
         content: |
+          # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
           AIKIDO_BLOCK=false
           AIKIDO_DEBUG=true
-          DD_ENV=production
+          
+          # DataDog Configuration (backup - also in docker-compose)
+          DD_ENV=dev
           DD_VERSION=latest
         owner: ubuntu
         group: ubuntu
@@ -281,12 +303,80 @@
           #!/bin/bash
           set -e
           cd "{{ juice_shop_dir }}"
-          echo "Deploying Juice Shop..."
+          
+          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
+          
+          # Stop existing containers
           docker compose down || true
+          
+          # Remove old images
+          docker rmi juice-shop-secure:latest 2>/dev/null || true
+          
+          # Build with no cache to ensure fresh instrumentation
+          echo "📦 Building Docker image..."
           docker compose build --no-cache
+          
+          # Start containers
+          echo "▶️  Starting containers..."
           docker compose up -d
+          
+          # Wait for container to be healthy
+          echo "⏳ Waiting for application to start..."
           sleep 30
-          docker ps | grep juice-shop && echo "✅ Deployed successfully!" || (echo "❌ Deployment failed!" && exit 1)
+          
+          # Verify deployment
+          if docker ps | grep -q juice-shop; then
+            echo "✅ Container is running"
+            
+            # Check instrumentation
+            echo ""
+            echo "🔍 Verifying Security Instrumentation:"
+            echo "======================================"
+            docker logs juice-shop 2>&1 | grep -i "DataDog" | head -3 || echo "⚠️  DataDog logs not found yet"
+            docker logs juice-shop 2>&1 | grep -i "Aikido" | head -3 || echo "⚠️  Aikido logs not found yet"
+            
+            # Test application
+            if curl -f -s http://localhost:3000 > /dev/null; then
+              echo ""
+              echo "✅ Application is accessible at http://localhost:3000"
+              echo "✅ Deployment successful!"
+            else
+              echo "⚠️  Application not responding yet (may need more time)"
+            fi
+          else
+            echo "❌ Deployment failed - container not running"
+            docker compose logs
+            exit 1
+          fi
+        mode: '0755'
+
+    - name: Create verification script
+      copy:
+        dest: "{{ juice_shop_dir }}/verify-instrumentation.sh"
+        content: |
+          #!/bin/bash
+          echo "🔍 Security Instrumentation Verification"
+          echo "========================================"
+          
+          echo ""
+          echo "📋 Container Status:"
+          docker ps | grep juice-shop || echo "❌ Container not running"
+          
+          echo ""
+          echo "📝 Server.ts modifications (first 10 lines):"
+          docker exec juice-shop head -10 server.ts
+          
+          echo ""
+          echo "📄 Tracer.ts content:"
+          docker exec juice-shop cat tracer.ts
+          
+          echo ""
+          echo "🔧 Environment Variables:"
+          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+          
+          echo ""
+          echo "📊 Recent Logs:"
+          docker logs juice-shop --tail=50 2>&1 | grep -i -E "datadog|aikido|tracer"
         mode: '0755'
 
   handlers:

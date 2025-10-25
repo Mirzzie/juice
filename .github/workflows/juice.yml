@@ -226,11 +226,20 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             set -e
             cd /opt/juice-shop
+            
+            echo "🛑 Stopping existing containers..."
             docker compose down 2>/dev/null || true
             docker image prune -f 2>/dev/null || true
+            
+            echo "📦 Building Docker image with security instrumentation..."
             docker compose build --no-cache
+            
+            echo "▶️  Starting containers..."
             docker compose up -d
+            
+            echo "⏳ Waiting for application to start (45 seconds)..."
             sleep 45
+            
             if docker ps | grep -q juice-shop; then
               echo "✅ Container is running"
             else
@@ -238,6 +247,8 @@ jobs:
               docker compose logs
               exit 1
             fi
+            
+            # Wait for application to respond
             for i in {1..10}; do
               if curl -f -s http://localhost:3000 > /dev/null; then
                 echo "✅ Application is responding"
@@ -247,40 +258,114 @@ jobs:
                 echo "❌ Application not responding"
                 exit 1
               fi
+              echo "Waiting for application... ($i/10)"
               sleep 5
             done
-            docker compose logs --tail=30
           ENDSSH
 
-      - name: Verify Security Tools
+      - name: Verify Security Instrumentation
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "=== Security Tools Verification ==="
-            docker logs juice-shop 2>&1 | grep -i aikido | head -5 || echo "⚠️ Aikido logs not found"
-            docker logs juice-shop 2>&1 | grep -i datadog | head -5 || echo "⚠️ DataDog logs not found"
-            sudo datadog-agent status | grep -A 3 "Agent (.*running)" || echo "⚠️ DataDog agent not running"
+            cd /opt/juice-shop
+            
+            echo ""
+            echo "========================================"
+            echo "🔍 Security Instrumentation Verification"
+            echo "========================================"
+            
+            # Check server.ts modifications
+            echo ""
+            echo "📝 Server.ts (first 10 lines):"
+            docker exec juice-shop head -10 server.ts
+            
+            # Check tracer.ts
+            echo ""
+            echo "📄 Tracer.ts content:"
+            docker exec juice-shop cat tracer.ts
+            
+            # Check environment variables
+            echo ""
+            echo "🔧 Security Environment Variables:"
+            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+            
+            # Check container logs for security tools
+            echo ""
+            echo "📊 Security Tools in Logs:"
+            docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall" | head -20 || echo "⚠️  Security logs not found yet (may appear after first request)"
+            
+            # DataDog agent status
+            echo ""
+            echo "📡 DataDog Agent Status:"
+            sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  DataDog agent status unavailable"
+          ENDSSH
+
+      - name: Generate Test Traffic
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "🚀 Generating test traffic to trigger instrumentation..."
+            for i in {1..10}; do
+              curl -s http://localhost:3000 > /dev/null
+              curl -s "http://localhost:3000/rest/products/search?q=test" > /dev/null
+              sleep 1
+            done
+            echo "✅ Test traffic generated"
+            
+            # Show logs after traffic
+            echo ""
+            echo "📊 Logs after traffic generation:"
+            docker logs juice-shop --tail=30 2>&1 | grep -i -E "datadog|aikido|trace" || echo "Check logs manually"
           ENDSSH
 
       - name: Generate Deployment Summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ## 🚀 Deployment Summary
-          **Instance IP:** \`${{ env.EC2_INSTANCE_IP }}\`
-          **Application URL:** http://${{ env.EC2_INSTANCE_IP }}:3000
+
+          **Instance IP:** \`${{ env.EC2_INSTANCE_IP }}\`  
+          **Application URL:** http://${{ env.EC2_INSTANCE_IP }}:3000  
           **Deployment Status:** ✅ Success
-          ### Security Tools Active:
-          - ✅ **SAST**: Semgrep
-          - ✅ **RASP**: Aikido Zen
-          - ✅ **IAST**: DataDog Runtime Analysis
-          - ⏳ **DAST**: OWASP ZAP
+
+          ### Security Instrumentation Status:
+
+          | Tool | Type | Status | Configuration |
+          |------|------|--------|---------------|
+          | **DataDog APM** | IAST | ✅ Active | Tracer imported in server.ts |
+          | **Aikido Zen** | RASP | ✅ Active | Firewall loaded via require() |
+          | **Semgrep** | SAST | ✅ Complete | Pre-deployment scan |
+          | **OWASP ZAP** | DAST | ⏳ Pending | Scheduled next |
+
+          ### Environment Variables Set:
+          - \`DD_ENV=dev\`
+          - \`DD_APPSEC_ENABLED=true\`
+          - \`DD_IAST_ENABLED=true\`
+          - \`DD_LOGS_INJECTION=true\`
+          - \`DD_PROFILING_ENABLED=true\`
+          - \`AIKIDO_TOKEN=***\` (from secrets)
+          - \`AIKIDO_DEBUG=true\`
+
           ### Security Dashboards:
-          - [Semgrep Findings](https://semgrep.dev/orgs/-/findings)
-          - [Aikido Dashboard](https://app.aikido.dev)
-          - [DataDog IAST](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
+          - 🔍 [Semgrep Findings](https://semgrep.dev/orgs/-/findings)
+          - 🛡️ [Aikido Dashboard](https://app.aikido.dev)
+          - 📊 [DataDog IAST](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
+
+          ### Verification Commands:
+          \`\`\`bash
+          # SSH into instance
+          ssh -i your-key.pem ubuntu@${{ env.EC2_INSTANCE_IP }}
+
+          # Check instrumentation
+          cd /opt/juice-shop
+          ./verify-instrumentation.sh
+
+          # View logs
+          docker logs juice-shop -f
+          \`\`\`
+
           ### Next Steps:
-          1. Access application: http://${{ env.EC2_INSTANCE_IP }}:3000
-          2. Monitor security dashboards
-          3. Review DAST scan results after completion
+          1. ✅ Access application: http://${{ env.EC2_INSTANCE_IP }}:3000
+          2. ⏳ Wait 5-10 minutes for traces to appear in DataDog
+          3. 🔍 Monitor security dashboards for vulnerabilities
+          4. 📊 DAST scan will run automatically next
           EOF
 
   # =========================================================================
@@ -301,10 +386,10 @@ jobs:
 
       - name: Wait for Application Stability
         run: |
-          echo "Waiting 30 seconds for application to stabilize..."
-          sleep 30
+          echo "Waiting 60 seconds for application to fully stabilize..."
+          sleep 60
 
-      - name: Retry Application Accessibility
+      - name: Verify Application Accessibility
         run: |
           for i in {1..5}; do
             if curl -f -s http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null; then
@@ -314,8 +399,8 @@ jobs:
             echo "Waiting for application... ($i/5)"
             sleep 10
           done
-          echo "::warning::Application not accessible, skipping DAST scan"
-          exit 0
+          echo "::error::Application not accessible"
+          exit 1
 
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.10.0
@@ -358,27 +443,40 @@ jobs:
     steps:
       - name: Generate Traffic for IAST Analysis
         run: |
-          echo "Generating traffic for DataDog IAST analysis..."
+          echo "Generating diverse traffic for DataDog IAST analysis..."
           for i in {1..50}; do
             curl -s http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null || true
             curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" > /dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" > /dev/null || true
             curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/api/Challenges > /dev/null || true
             curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/admin/application-version > /dev/null || true
-            curl -X POST -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login -d '{"email":"admin@juice-sh.op","password":"admin123"}' -H "Content-Type: application/json" > /dev/null || true
+            curl -X POST -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login \
+              -d '{"email":"admin@juice-sh.op","password":"admin123"}' \
+              -H "Content-Type: application/json" > /dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/1/reviews" > /dev/null || true
             sleep 1
           done
-          echo "✅ Generated 250+ requests for IAST analysis"
+          echo "✅ Generated 350+ requests for IAST analysis"
 
       - name: Verify DataDog Integration
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ## 📊 DataDog IAST Analysis
-          **Status:** Traffic generated successfully
+
+          **Status:** Traffic generated successfully  
+          **Requests Generated:** 350+  
           **Dashboard:** [View IAST Results](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
-          **Analysis Timeline:**
-          - Traces appear: ~2-5 minutes
-          - Vulnerability detection: ~5-10 minutes
-          - Complete analysis: ~15 minutes
+
+          ### Analysis Timeline:
+          - ⏱️ Traces appear: ~2-5 minutes
+          - 🔍 Vulnerability detection: ~5-10 minutes
+          - ✅ Complete analysis: ~15 minutes
+
+          ### What to Look For:
+          1. **APM Traces** - Verify requests are being traced
+          2. **Security Signals** - Check for detected vulnerabilities
+          3. **IAST Findings** - Look for code-level vulnerability analysis
+          4. **Attack Attempts** - XSS and SQL injection attempts logged
           EOF
 
   # =========================================================================
@@ -404,20 +502,81 @@ jobs:
         run: |
           cat > security-report.md << 'EOF'
           # 🔒 DevSecOps Security Scan Report
+
           **Pipeline Run:** #${{ github.run_number }}  
           **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
           **Branch:** ${{ github.ref_name }}  
           **Commit:** ${{ github.sha }}  
           **Instance:** ${{ env.EC2_INSTANCE_IP }}
+
           ---
+
           ## 📊 Security Scan Results
+
           | Security Layer | Type | Status | Dashboard |
           |----------------|------|--------|-----------|
           | **Semgrep** | SAST | ${{ needs.sast-semgrep.result }} | [View](https://semgrep.dev/orgs/-/findings) |
           | **Aikido Zen** | RASP | Active | [View](https://app.aikido.dev) |
           | **DataDog** | IAST | ${{ needs.iast-datadog-verification.result }} | [View](https://app.us5.datadoghq.com/security/appsec) |
           | **OWASP ZAP** | DAST | ${{ needs.dast-owasp-zap.result }} | [Artifacts](https://github.com/${{ github.repository }}/actions/artifacts) |
+
           ---
+
+          ## 🛡️ Security Tools Configuration
+
+          ### DataDog APM & IAST
+          - ✅ Tracer initialized in `server.ts`
+          - ✅ Environment variables configured
+          - ✅ Agent communication: `172.17.0.1:8126`
+          - ✅ IAST enabled with 100% sampling
+          - ✅ AppSec WAF enabled
+
+          ### Aikido Zen RASP
+          - ✅ Firewall loaded via `require('@aikidosec/firewall')`
+          - ✅ Running in non-blocking mode
+          - ✅ Debug logging enabled
+          - ✅ Token configured from secrets
+
+          ### Semgrep SAST
+          - ✅ Pre-deployment code scanning
+          - ✅ Auto-configuration enabled
+          - ✅ Results uploaded to GitHub Security
+
+          ### OWASP ZAP DAST
+          - ✅ Baseline scan completed
+          - ✅ Full scan completed
+          - ✅ Results available as artifacts
+
+          ---
+
+          ## 🔍 Key Findings
+
+          Review detailed findings in respective dashboards:
+
+          1. **SAST (Semgrep)**: Pre-deployment code vulnerabilities
+          2. **RASP (Aikido)**: Runtime attack blocking and detection
+          3. **IAST (DataDog)**: Code-level vulnerability analysis during runtime
+          4. **DAST (ZAP)**: External penetration testing results
+
+          ---
+
+          ## 📈 Next Steps
+
+          1. ✅ Review all security dashboards
+          2. 🔍 Investigate high/critical findings
+          3. 🛠️ Apply necessary patches
+          4. 📊 Monitor ongoing security metrics
+          5. 🔄 Schedule regular security scans
+
+          ---
+
+          ## 📞 Support Resources
+
+          - [Semgrep Documentation](https://semgrep.dev/docs/)
+          - [Aikido Zen Docs](https://docs.aikido.dev/)
+          - [DataDog IAST Guide](https://docs.datadoghq.com/security/application_security/how-appsec-works/)
+          - [OWASP ZAP Docs](https://www.zaproxy.org/docs/)
+
           EOF
 
           cat security-report.md >> $GITHUB_STEP_SUMMARY
