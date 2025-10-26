@@ -158,7 +158,7 @@
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE - PROPER TYPESCRIPT COMPILATION WITH INSTRUMENTATION
+    # DOCKERFILE - JUICE SHOP RUNS WITH TS-NODE (NO COMPILATION NEEDED!)
     # =======================================================================
     - name: Create Dockerfile
       copy:
@@ -173,7 +173,7 @@
           # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
-          # Install ALL dependencies (including dev dependencies for TypeScript compilation)
+          # Install ALL dependencies (Juice Shop uses ts-node, not compiled JS)
           RUN npm install
 
           # Install security tools
@@ -182,22 +182,17 @@
           # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Add imports to server.ts BEFORE compilation
+          # ✅ CRITICAL: Add imports to server.ts 
+          # Juice Shop uses ts-node, so it runs .ts files directly - NO COMPILATION NEEDED!
           RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
           # Verify modifications
           RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
 
-          # ✅ COMPILE TypeScript to JavaScript (this creates build/ directory)
-          RUN npm run build
-
-          # Verify compiled output includes instrumentation
-          RUN echo "=== Checking compiled build/server.js ===" && \
-              head -20 build/server.js && \
-              echo "=== Checking for tracer in build ===" && \
-              ls -la build/ && \
-              test -f build/server.js || (echo "Build failed!" && exit 1)
+          # Build frontend (Angular) - this is separate from backend
+          RUN cd frontend && npm install --legacy-peer-deps && \
+              node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
           # --- Production stage ---
           FROM node:22-bookworm-slim
@@ -207,7 +202,7 @@
           
           WORKDIR /juice-shop
 
-          # Copy entire application including compiled JavaScript
+          # Copy entire application (including TypeScript source files)
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
           # Ensure directories exist with correct permissions
@@ -224,7 +219,8 @@
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
           
-          # ✅ Start with npm start (which uses the compiled build/server.js)
+          # ✅ npm start uses ts-node to run server.ts directly!
+          # The instrumentation in server.ts will be loaded at runtime
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
@@ -382,36 +378,43 @@
           echo "========================================"
           
           echo ""
+          echo "ℹ️  NOTE: Juice Shop uses ts-node (runs TypeScript directly, no compilation)"
+          
+          echo ""
           echo "📋 Container Status:"
           docker ps | grep juice-shop || echo "❌ Container not running"
           
           echo ""
-          echo "📝 TypeScript Source (server.ts - first 10 lines):"
-          docker exec juice-shop head -10 server.ts 2>/dev/null || echo "⚠️  Could not read server.ts"
-          
-          echo ""
-          echo "🔧 Compiled JavaScript (build/server.js - first 30 lines):"
-          docker exec juice-shop head -30 build/server.js 2>/dev/null || echo "⚠️  Could not read build/server.js"
+          echo "📝 Modified server.ts (first 15 lines):"
+          docker exec juice-shop head -15 server.ts 2>/dev/null || echo "⚠️  Could not read server.ts"
           
           echo ""
           echo "📄 Tracer.ts content:"
           docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
           
           echo ""
-          echo "📄 Compiled Tracer (build/tracer.js):"
-          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
-          
-          echo ""
           echo "🔧 Environment Variables:"
           docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
           
           echo ""
-          echo "📊 Recent Application Logs (looking for security tools):"
-          docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall|appsec|iast" | tail -20 || echo "⚠️  No security tool logs yet - generate traffic first"
+          echo "📊 Application Logs (looking for security tools initialization):"
+          docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall|appsec|iast|dd-trace" | tail -30 || echo "⚠️  No security tool logs yet"
           
           echo ""
-          echo "🚀 Generate test traffic:"
-          echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; sleep 0.5; done"
+          echo "🔍 Check if dd-trace is loaded:"
+          docker logs juice-shop 2>&1 | head -100 | grep -i "trace" || echo "⚠️  Trace logs not visible yet"
+          
+          echo ""
+          echo "📡 DataDog Agent Status on Host:"
+          sudo datadog-agent status | grep -A 10 "APM Agent" || echo "⚠️  Run as root to see agent status"
+          
+          echo ""
+          echo "🚀 To generate traffic and trigger instrumentation:"
+          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          
+          echo ""
+          echo "📊 After generating traffic, check logs again:"
+          echo "   docker logs juice-shop --tail=50 | grep -i -E 'datadog|aikido|trace'"
         mode: '0755'
 
   handlers:

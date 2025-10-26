@@ -299,36 +299,32 @@ jobs:
             echo "========================================"
             echo "🔍 Security Instrumentation Verification"
             echo "========================================"
+            echo "ℹ️  Juice Shop uses ts-node (runs .ts files directly)"
             
             # Check TypeScript source modifications
             echo ""
-            echo "📝 TypeScript Source (server.ts - first 10 lines):"
-            docker exec juice-shop head -10 server.ts
+            echo "📝 Modified server.ts (first 15 lines):"
+            docker exec juice-shop head -15 server.ts
             
-            # Check COMPILED JavaScript (this is what actually runs!)
+            # Check tracer
             echo ""
-            echo "🔧 Compiled JavaScript (build/server.js - first 30 lines):"
-            docker exec juice-shop head -30 build/server.js
-            
-            # Verify tracer compilation
-            echo ""
-            echo "📄 Compiled Tracer (build/tracer.js exists):"
-            docker exec juice-shop ls -la build/tracer.js
+            echo "📄 Tracer.ts:"
+            docker exec juice-shop cat tracer.ts
             
             # Check environment variables
             echo ""
             echo "🔧 Security Environment Variables:"
             docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
             
-            # Check container logs for security tools
+            # Check initial logs
             echo ""
-            echo "📊 Security Tools in Logs:"
-            docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall|appsec" | head -20 || echo "⚠️  Security logs will appear after first request"
+            echo "📊 Initial Application Logs:"
+            docker logs juice-shop 2>&1 | tail -50
             
             # DataDog agent status
             echo ""
             echo "📡 DataDog Agent Status:"
-            sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  DataDog agent status unavailable"
+            sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  Check agent status manually"
           ENDSSH
 
       - name: Generate Test Traffic
