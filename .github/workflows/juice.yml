@@ -300,15 +300,20 @@ jobs:
             echo "🔍 Security Instrumentation Verification"
             echo "========================================"
             
-            # Check server.ts modifications
+            # Check TypeScript source modifications
             echo ""
-            echo "📝 Server.ts (first 10 lines):"
+            echo "📝 TypeScript Source (server.ts - first 10 lines):"
             docker exec juice-shop head -10 server.ts
             
-            # Check tracer.ts
+            # Check COMPILED JavaScript (this is what actually runs!)
             echo ""
-            echo "📄 Tracer.ts content:"
-            docker exec juice-shop cat tracer.ts
+            echo "🔧 Compiled JavaScript (build/server.js - first 30 lines):"
+            docker exec juice-shop head -30 build/server.js
+            
+            # Verify tracer compilation
+            echo ""
+            echo "📄 Compiled Tracer (build/tracer.js exists):"
+            docker exec juice-shop ls -la build/tracer.js
             
             # Check environment variables
             echo ""
@@ -318,7 +323,7 @@ jobs:
             # Check container logs for security tools
             echo ""
             echo "📊 Security Tools in Logs:"
-            docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall" | head -20 || echo "⚠️  Security logs not found yet (may appear after first request)"
+            docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall|appsec" | head -20 || echo "⚠️  Security logs will appear after first request"
             
             # DataDog agent status
             echo ""

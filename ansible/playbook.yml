@@ -144,21 +144,21 @@
         group: ubuntu
         mode: '0755'
 
-    # ✅ FIXED: Minimal tracer.ts as per DataDog documentation
+    # ✅ Minimal tracer.ts (DataDog standard)
     - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
           // tracer.ts
-          import tracer from "dd-trace";
-          tracer.init(); // initialized in a different file to avoid hoisting.
+          import tracer from 'dd-trace';
+          tracer.init();
           export default tracer;
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE WITH PROPER INSTRUMENTATION
+    # DOCKERFILE - PROPER TYPESCRIPT COMPILATION WITH INSTRUMENTATION
     # =======================================================================
     - name: Create Dockerfile
       copy:
@@ -170,34 +170,47 @@
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
-          # Clone Juice Shop repository
+          # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
-          # Install dependencies including security tools
-          RUN npm install --production && \
-              npm install --save-exact @aikidosec/firewall && \
-              npm install --save dd-trace
+          # Install ALL dependencies (including dev dependencies for TypeScript compilation)
+          RUN npm install
 
-          # Copy tracer configuration
+          # Install security tools
+          RUN npm install --save-exact @aikidosec/firewall dd-trace
+
+          # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Modify server.ts to add security instrumentation
-          RUN sed -i "1i import './tracer' // DataDog APM tracing" server.ts && \
-              sed -i "2i require('@aikidosec/firewall') // Aikido Zen RASP" server.ts
+          # ✅ CRITICAL: Add imports to server.ts BEFORE compilation
+          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
           # Verify modifications
-          RUN echo "=== Modified server.ts (first 5 lines) ===" && head -5 server.ts
+          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+
+          # ✅ COMPILE TypeScript to JavaScript (this creates build/ directory)
+          RUN npm run build
+
+          # Verify compiled output includes instrumentation
+          RUN echo "=== Checking compiled build/server.js ===" && \
+              head -20 build/server.js && \
+              echo "=== Checking for tracer in build ===" && \
+              ls -la build/ && \
+              test -f build/server.js || (echo "Build failed!" && exit 1)
 
           # --- Production stage ---
           FROM node:22-bookworm-slim
+          
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
+          
           WORKDIR /juice-shop
 
-          # Copy application with security modifications
+          # Copy entire application including compiled JavaScript
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Ensure logs directory exists with correct permissions
+          # Ensure directories exist with correct permissions
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
@@ -211,8 +224,8 @@
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
           
-          # ✅ Start application with npm start (NOT app.ts)
-          CMD ["npm", "start" "app.ts"]
+          # ✅ Start with npm start (which uses the compiled build/server.js)
+          CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
@@ -232,8 +245,6 @@
               restart: unless-stopped
               ports:
                 - "3000:3000"
-              env_file:
-                - .env
               environment:
                 # Node environment
                 NODE_ENV: production
@@ -257,11 +268,13 @@
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
                 
-                # Aikido Configuration (from .env file)
-                # AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                # AIKIDO_BLOCK: ${AIKIDO_BLOCK}
-                # AIKIDO_DEBUG: ${AIKIDO_DEBUG}
+                # Aikido Configuration
+                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
+                AIKIDO_BLOCK: "false"
+                AIKIDO_DEBUG: "true"
                 
+              env_file:
+                - .env
               extra_hosts:
                 - "host.docker.internal:host-gateway"
               healthcheck:
@@ -288,7 +301,7 @@
           AIKIDO_BLOCK=false
           AIKIDO_DEBUG=true
           
-          # DataDog Configuration (backup - also in docker-compose)
+          # DataDog Configuration
           DD_ENV=dev
           DD_VERSION=latest
         owner: ubuntu
@@ -315,9 +328,9 @@
           # Remove old images
           docker rmi juice-shop-secure:latest 2>/dev/null || true
           
-          # Build with no cache to ensure fresh instrumentation
-          echo "📦 Building Docker image..."
-          docker compose build --no-cache
+          # Build with progress output
+          echo "📦 Building Docker image (this includes TypeScript compilation)..."
+          docker compose build --no-cache --progress=plain
           
           # Start containers
           echo "▶️  Starting containers..."
@@ -325,24 +338,31 @@
           
           # Wait for container to be healthy
           echo "⏳ Waiting for application to start..."
-          sleep 30
+          sleep 45
           
           # Verify deployment
           if docker ps | grep -q juice-shop; then
             echo "✅ Container is running"
             
-            # Check instrumentation
+            # Check instrumentation in COMPILED code
             echo ""
-            echo "🔍 Verifying Security Instrumentation:"
+            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
             echo "======================================"
-            docker logs juice-shop 2>&1 | grep -i "DataDog" | head -3 || echo "⚠️  DataDog logs not found yet"
-            docker logs juice-shop 2>&1 | grep -i "Aikido" | head -3 || echo "⚠️  Aikido logs not found yet"
+            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
+            
+            # Check logs
+            echo ""
+            echo "📊 Application Logs:"
+            docker logs juice-shop 2>&1 | tail -30
             
             # Test application
             if curl -f -s http://localhost:3000 > /dev/null; then
               echo ""
               echo "✅ Application is accessible at http://localhost:3000"
               echo "✅ Deployment successful!"
+              echo ""
+              echo "🔍 Generate traffic to see traces in DataDog:"
+              echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; done"
             else
               echo "⚠️  Application not responding yet (may need more time)"
             fi
@@ -366,20 +386,32 @@
           docker ps | grep juice-shop || echo "❌ Container not running"
           
           echo ""
-          echo "📝 Server.ts modifications (first 10 lines):"
-          docker exec juice-shop head -10 server.ts
+          echo "📝 TypeScript Source (server.ts - first 10 lines):"
+          docker exec juice-shop head -10 server.ts 2>/dev/null || echo "⚠️  Could not read server.ts"
+          
+          echo ""
+          echo "🔧 Compiled JavaScript (build/server.js - first 30 lines):"
+          docker exec juice-shop head -30 build/server.js 2>/dev/null || echo "⚠️  Could not read build/server.js"
           
           echo ""
           echo "📄 Tracer.ts content:"
-          docker exec juice-shop cat tracer.ts
+          docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
+          
+          echo ""
+          echo "📄 Compiled Tracer (build/tracer.js):"
+          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
           
           echo ""
           echo "🔧 Environment Variables:"
           docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
           
           echo ""
-          echo "📊 Recent Logs:"
-          docker logs juice-shop --tail=50 2>&1 | grep -i -E "datadog|aikido|tracer"
+          echo "📊 Recent Application Logs (looking for security tools):"
+          docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido|tracer|firewall|appsec|iast" | tail -20 || echo "⚠️  No security tool logs yet - generate traffic first"
+          
+          echo ""
+          echo "🚀 Generate test traffic:"
+          echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; sleep 0.5; done"
         mode: '0755'
 
   handlers:
