@@ -421,16 +421,16 @@
           docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
           
           echo ""
-          echo "🔧 Environment Variables:"
-          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+          echo "🔧 Environment Variables (tokens redacted for security):"
+          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sed 's/\(TOKEN\|KEY\)=.*/\1=***REDACTED***/g' | sort
           
           echo ""
-          echo "📊 Application Startup Logs (looking for AIKIDO and DataDog):"
-          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
+          echo "📊 Application Startup Logs (tokens redacted, first 100 lines):"
+          docker logs juice-shop 2>&1 | head -100 | sed -E 's/(token|key)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi'
           
           echo ""
           echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
-          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
+          docker logs juice-shop 2>&1 | grep "AIKIDO:" | sed -E 's/(token|key)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi' | head -20
           
           echo ""
           echo "📡 DataDog Agent Status on Host:"
@@ -442,7 +442,7 @@
           
           echo ""
           echo "📊 After generating traffic, check for trace activity:"
-          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
+          echo "   docker logs juice-shop --tail=100 | sed -E 's/(token|key)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi' | grep -i -E 'trace|span|aikido'"
         mode: '0755'
 
   handlers:
