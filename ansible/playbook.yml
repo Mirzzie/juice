@@ -149,32 +149,90 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Install OWASP ZAP
-      shell: |
-        if [ ! -f /usr/local/bin/zaproxy ]; then
-          cd /tmp
-          wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
-          tar -xzf ZAP_2.14.0_Linux.tar.gz -C /opt/
-          ln -sf /opt/ZAP_2.14.0/zap.sh /usr/local/bin/zaproxy
-          rm ZAP_2.14.0_Linux.tar.gz
-        fi
-      args:
-        creates: /usr/local/bin/zaproxy
+    - name: Check if OWASP ZAP is already installed
+      stat:
+        path: /usr/local/bin/zaproxy
+      register: zap_installed
 
-    - name: Install Nuclei
-      shell: |
-        if [ ! -f /usr/local/bin/nuclei ]; then
-          cd /tmp
-          wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.1.0/nuclei_3.1.0_linux_amd64.zip
-          unzip -q nuclei_3.1.0_linux_amd64.zip
-          mv nuclei /usr/local/bin/
-          rm nuclei_3.1.0_linux_amd64.zip
-          nuclei -update-templates
-        fi
-      args:
-        creates: /usr/local/bin/nuclei
+    - name: Download OWASP ZAP
+      get_url:
+        url: https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
+        dest: /tmp/ZAP_2.14.0_Linux.tar.gz
+        mode: '0644'
+        timeout: 300
+      when: not zap_installed.stat.exists
+      register: zap_download
+      retries: 3
+      delay: 10
+      until: zap_download is succeeded
+
+    - name: Extract OWASP ZAP
+      unarchive:
+        src: /tmp/ZAP_2.14.0_Linux.tar.gz
+        dest: /opt/
+        remote_src: yes
+      when: not zap_installed.stat.exists
+
+    - name: Create ZAP symlink
+      file:
+        src: /opt/ZAP_2.14.0/zap.sh
+        dest: /usr/local/bin/zaproxy
+        state: link
+      when: not zap_installed.stat.exists
+
+    - name: Clean up ZAP download
+      file:
+        path: /tmp/ZAP_2.14.0_Linux.tar.gz
+        state: absent
+      when: not zap_installed.stat.exists
+
+    - name: Check if Nuclei is already installed
+      stat:
+        path: /usr/local/bin/nuclei
+      register: nuclei_installed
+
+    - name: Download Nuclei
+      get_url:
+        url: https://github.com/projectdiscovery/nuclei/releases/download/v3.1.0/nuclei_3.1.0_linux_amd64.zip
+        dest: /tmp/nuclei_3.1.0_linux_amd64.zip
+        mode: '0644'
+        timeout: 300
+      when: not nuclei_installed.stat.exists
+      register: nuclei_download
+      retries: 3
+      delay: 10
+      until: nuclei_download is succeeded
+
+    - name: Extract Nuclei
+      unarchive:
+        src: /tmp/nuclei_3.1.0_linux_amd64.zip
+        dest: /tmp/
+        remote_src: yes
+      when: not nuclei_installed.stat.exists
+
+    - name: Move Nuclei binary
+      copy:
+        src: /tmp/nuclei
+        dest: /usr/local/bin/nuclei
+        mode: '0755'
+        remote_src: yes
+      when: not nuclei_installed.stat.exists
+
+    - name: Clean up Nuclei download
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/nuclei_3.1.0_linux_amd64.zip
+        - /tmp/nuclei
+      when: not nuclei_installed.stat.exists
+
+    - name: Update Nuclei templates
+      command: nuclei -update-templates
       become: true
       become_user: ubuntu
+      when: not nuclei_installed.stat.exists
+      changed_when: true
 
     - name: Install Python attack libraries
       pip:
