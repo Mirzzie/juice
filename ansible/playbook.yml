@@ -234,14 +234,24 @@
       when: not nuclei_installed.stat.exists
       changed_when: true
 
-    - name: Install Python attack libraries
-      pip:
+    - name: Install Python attack libraries (system packages)
+      apt:
         name:
-          - requests
-          - beautifulsoup4
-          - colorama
-          - pandas
+          - python3-requests
+          - python3-bs4
+          - python3-colorama
+          - python3-pandas
         state: present
+      become: true
+
+    - name: Install additional Python tools via apt
+      apt:
+        name:
+          - python3-urllib3
+          - python3-chardet
+        state: present
+      become: true
+      ignore_errors: true
 
     # =======================================================================
     # APPLICATION SETUP
