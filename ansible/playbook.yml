@@ -176,7 +176,7 @@
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE - MATCH LOCAL WORKING SETUP (COMPILE THEN RUN)
+    # DOCKERFILE - SECURE MULTI-STAGE (Aikido + Datadog integrated)
     # =======================================================================
     - name: Create Dockerfile
       copy:
@@ -194,34 +194,35 @@
           # Install ALL dependencies (needed for TypeScript compilation)
           RUN npm install
 
-          # Install security tools
+          # Install security tools (exact versions to avoid drift)
           RUN npm install --save-exact @aikidosec/firewall dd-trace
 
           # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
-          # 1. Modify app.ts (main entry point)
+          # ✅ Inject Aikido + Tracer imports BEFORE compilation
           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
-          
-          # 2. Also modify server.ts (in case it's loaded independently)
-          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
+              sed -i "2i import Zen from '@aikidosec/firewall'; // Aikido RASP" app.ts && \
+              sed -i "3i Zen.addExpressMiddleware(require('express')()); // Initialize Aikido" app.ts && \
+              sed -i "4i // --- End of Aikido Injection ---" app.ts && \
+              \
+              sed -i "1i import './tracer' // DataDog APM" server.ts && \
+              sed -i "2i import Zen from '@aikidosec/firewall'; // Aikido RASP" server.ts && \
+              sed -i "3i // Zen.addExpressMiddleware(app); // Ensure RASP loads before routes" server.ts && \
+              sed -i "4i // --- End of Aikido Injection ---" server.ts
 
           # Verify modifications
-          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
-          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts && \
+              echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
 
           # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
-          # This mimics what happens before running locally
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
-          
-          # Verify build directory was created
+
+          # Verify build output includes tracer/aikido hooks
           RUN ls -la build/ && \
-              echo "=== build/app.js (first 30 lines) ===" && \
+              echo '=== build/app.js (first 30 lines) ===' && \
               head -30 build/app.js && \
-              echo "=== Checking for tracer/aikido in build/app.js ===" && \
+              echo '=== Checking for tracer/aikido in build/app.js ===' && \
               grep -E "tracer|aikido" build/app.js | head -5
 
           # Build frontend (Angular)
@@ -230,13 +231,12 @@
 
           # --- Production stage ---
           FROM node:22-bookworm-slim
-          
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
-          
+
           WORKDIR /juice-shop
 
-          # Copy entire application including compiled build/ directory
+          # Copy compiled build and dependencies
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
           # Ensure directories exist with correct permissions
@@ -252,13 +252,13 @@
           ENV NODE_ENV=production \
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
-          
-          # ✅ This matches your local command: npm start (which runs: node build/app)
-          # The compiled build/app.js will have the instrumentation
+
+          # ✅ Run compiled app with instrumentation (build/app.js)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
+
 
     # =======================================================================
     # DOCKER COMPOSE WITH ALL ENVIRONMENT VARIABLES
