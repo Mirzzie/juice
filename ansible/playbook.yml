@@ -156,8 +156,8 @@
 
     - name: Download OWASP ZAP
       get_url:
-        url: https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
-        dest: /tmp/ZAP_2.14.0_Linux.tar.gz
+        url: https://github.com/zaproxy/zaproxy/releases/download/v2.15.0/ZAP_2.15.0_Linux.tar.gz
+        dest: /tmp/ZAP_2.15.0_Linux.tar.gz
         mode: '0644'
         timeout: 300
       when: not zap_installed.stat.exists
@@ -168,21 +168,21 @@
 
     - name: Extract OWASP ZAP
       unarchive:
-        src: /tmp/ZAP_2.14.0_Linux.tar.gz
+        src: /tmp/ZAP_2.15.0_Linux.tar.gz
         dest: /opt/
         remote_src: yes
       when: not zap_installed.stat.exists
 
     - name: Create ZAP symlink
       file:
-        src: /opt/ZAP_2.14.0/zap.sh
+        src: /opt/ZAP_2.15.0/zap.sh
         dest: /usr/local/bin/zaproxy
         state: link
       when: not zap_installed.stat.exists
 
     - name: Clean up ZAP download
       file:
-        path: /tmp/ZAP_2.14.0_Linux.tar.gz
+        path: /tmp/ZAP_2.15.0_Linux.tar.gz
         state: absent
       when: not zap_installed.stat.exists
 
