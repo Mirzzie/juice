@@ -162,31 +162,6 @@
         group: ubuntu
         recurse: yes
 
-    - name: Generate package-lock.json inside container (no Node on host required)
-      shell: >
-        docker run --rm
-          -v "{{ juice_shop_dir }}":/app
-          -w /app
-          node:22-bookworm-slim
-          bash -lc "npm install --package-lock-only && chown $(stat -c '%u:%g' /app) package-lock.json"
-      args:
-        warn: false
-      register: lockfile_result
-      changed_when: "'package-lock.json' in lockfile_result.stdout or lockfile_result.rc == 0"
-      failed_when: lockfile_result.rc != 0 and "'package-lock.json' not in lockfile_result.stdout"
-      become: true
-
-    - name: Verify lockfile exists
-      stat:
-        path: "{{ juice_shop_dir }}/package-lock.json"
-      register: lockfile_stat
-
-    - name: Fail if lockfile missing (helpful during debugging)
-      fail:
-        msg: "package-lock.json not created in {{ juice_shop_dir }} - check previous task output"
-      when: not lockfile_stat.stat.exists
-
-
     # ✅ Minimal tracer.ts (DataDog standard)
     - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
       copy:
