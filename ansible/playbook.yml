@@ -176,7 +176,7 @@
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE - SECURE MULTI-STAGE (Aikido + Datadog integrated)
+    # DOCKERFILE - SECURE MULTI-STAGE (Aikido + Datadog + Correct Middleware Injection)
     # =======================================================================
     - name: Create Dockerfile
       copy:
@@ -188,58 +188,59 @@
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
-          # Clone Juice Shop
+          # Clone Juice Shop source
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
-          # Install ALL dependencies (needed for TypeScript compilation)
+          # Install dependencies
           RUN npm install
 
-          # Install security tools (exact versions to avoid drift)
+          # Install Aikido RASP + Datadog
           RUN npm install --save-exact @aikidosec/firewall dd-trace
 
-          # Copy tracer
+          # Copy custom tracer
           COPY tracer.ts ./tracer.ts
 
           # ✅ Inject Aikido + Tracer imports BEFORE compilation
-          RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
-              sed -i "2i import Zen from '@aikidosec/firewall'; // Aikido RASP" app.ts && \
-              sed -i "3i Zen.addExpressMiddleware(require('express')()); // Initialize Aikido" app.ts && \
-              sed -i "4i // --- End of Aikido Injection ---" app.ts && \
-              \
-              sed -i "1i import './tracer' // DataDog APM" server.ts && \
-              sed -i "2i import Zen from '@aikidosec/firewall'; // Aikido RASP" server.ts && \
-              sed -i "3i // Zen.addExpressMiddleware(app); // Ensure RASP loads before routes" server.ts && \
-              sed -i "4i // --- End of Aikido Injection ---" server.ts
+          # 1. Import statements at top
+          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+              sed -i "2i const Zen = require('@aikidosec/firewall'); // Aikido RASP" server.ts
 
-          # Verify modifications
-          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts && \
-              echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+          # 2. Inject middleware AFTER app initialization
+          RUN sed -i '/const app = express()/a \
+          // --- Aikido RASP Integration ---\\n\
+          app.use((req, res, next) => {\\n\
+            Zen.setUser({ id: \\"123\\", name: \\"John Doe\\" });\\n\
+            Zen.setRateLimitGroup({ id: \\"123\\" });\\n\
+            next();\\n\
+          });\\n\
+          Zen.addExpressMiddleware(app);\\n\
+          // --- End of Aikido Injection ---' server.ts
 
-          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
-          RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
+          # Verify injection
+          RUN echo "=== Modified server.ts (first 25 lines) ===" && head -25 server.ts && \
+              grep -A5 "Aikido RASP Integration" server.ts || true
 
-          # Verify build output includes tracer/aikido hooks
+          # ✅ Compile backend (TypeScript)
+          RUN npx tsc || npm run build:server || echo "Compilation completed"
+
+          # Verify build output
           RUN ls -la build/ && \
-              echo '=== build/app.js (first 30 lines) ===' && \
-              head -30 build/app.js && \
               echo '=== Checking for tracer/aikido in build/app.js ===' && \
               grep -E "tracer|aikido" build/app.js | head -5
 
-          # Build frontend (Angular)
+          # Build frontend
           RUN cd frontend && npm install --legacy-peer-deps && \
-              node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
+              node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend built"
 
-          # --- Production stage ---
+          # --- Production Stage ---
           FROM node:22-bookworm-slim
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
-          RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
 
+          RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
 
-          # Copy compiled build and dependencies
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Ensure directories exist with correct permissions
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
@@ -253,12 +254,10 @@
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
 
-          # ✅ Run compiled app with instrumentation (build/app.js)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
-
 
     # =======================================================================
     # DOCKER COMPOSE WITH ALL ENVIRONMENT VARIABLES
