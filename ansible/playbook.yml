@@ -7,7 +7,6 @@
   vars:
     juice_shop_dir: /opt/juice-shop
     node_version: "22"
-    docker_compose_version: "2.23.0"
     benchmark_tools_dir: /opt/benchmark-tools
 
   vars_files:
@@ -139,7 +138,7 @@
         enabled: yes
 
     # =======================================================================
-    # ATTACK TOOLS INSTALLATION (for benchmarking)
+    # ATTACK TOOLS INSTALLATION (FIXED)
     # =======================================================================
     - name: Create benchmark tools directory
       file:
@@ -149,6 +148,7 @@
         group: ubuntu
         mode: '0755'
 
+    # FIXED: OWASP ZAP - Using Ansible modules instead of shell
     - name: Check if OWASP ZAP is already installed
       stat:
         path: /usr/local/bin/zaproxy
@@ -186,6 +186,7 @@
         state: absent
       when: not zap_installed.stat.exists
 
+    # FIXED: Nuclei - Using Ansible modules instead of shell
     - name: Check if Nuclei is already installed
       stat:
         path: /usr/local/bin/nuclei
@@ -234,6 +235,7 @@
       when: not nuclei_installed.stat.exists
       changed_when: true
 
+    # FIXED: Python packages - Using apt instead of pip (PEP 668 compliance)
     - name: Install Python attack libraries (system packages)
       apt:
         name:
@@ -273,14 +275,14 @@
       become: true
       become_user: ubuntu
 
-    - name: Ensure repo ownership is ubuntu
+    - name: Ensure repo ownership
       file:
         path: "{{ juice_shop_dir }}"
         owner: ubuntu
         group: ubuntu
         recurse: yes
 
-    - name: Create tracer.ts (DataDog tracer)
+    - name: Create tracer.ts
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
@@ -293,58 +295,43 @@
         mode: '0644'
 
     # =======================================================================
-    # DOCKERFILE - Multi-stage build with security instrumentation
+    # DOCKERFILE
     # =======================================================================
     - name: Create Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Multi-stage Dockerfile for Juice Shop with Security Tools
           FROM node:22-bookworm-slim AS builder
 
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
-          # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-
-          # Install ALL dependencies (needed for TypeScript compilation)
           RUN npm install
-
-          # Install security tools
           RUN npm install --save-exact @aikidosec/firewall dd-trace
 
-          # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
-          # 1. Modify app.ts (main entry point)
           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
-          
-          # 2. Also modify server.ts (in case it's loaded independently)
+
           RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
-          # Verify modifications
-          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
-          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+          RUN echo "=== Modified app.ts ===" && head -10 app.ts
+          RUN echo "=== Modified server.ts ===" && head -10 server.ts
 
-          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
           
-          # Verify build directory was created
           RUN ls -la build/ && \
-              echo "=== build/app.js (first 30 lines) ===" && \
+              echo "=== build/app.js ===" && \
               head -30 build/app.js && \
-              echo "=== Checking for tracer/aikido in build/app.js ===" && \
+              echo "=== Checking instrumentation ===" && \
               grep -E "tracer|aikido" build/app.js | head -5
 
-          # Build frontend (Angular)
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
-          # --- Production stage ---
           FROM node:22-bookworm-slim
           
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
@@ -352,10 +339,8 @@
           
           WORKDIR /juice-shop
 
-          # Copy entire application including compiled build/ directory
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Ensure directories exist with correct permissions
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
@@ -375,7 +360,7 @@
         mode: '0644'
 
     # =======================================================================
-    # BASE DOCKER COMPOSE TEMPLATE (will be modified by pipeline)
+    # DOCKER COMPOSE
     # =======================================================================
     - name: Create docker-compose.yml template
       copy:
@@ -390,33 +375,22 @@
               ports:
                 - "3000:3000"
               environment:
-                # Node environment
                 NODE_ENV: production
-                
-                # DataDog APM Configuration
                 DD_ENV: dev
                 DD_SERVICE: juice-shop
                 DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
-                
-                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
                 DD_PROFILING_ENABLED: "true"
                 DD_RUNTIME_METRICS_ENABLED: "true"
                 DD_DATA_STREAMS_ENABLED: "true"
-                DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
-                
-                # DataDog Security (AppSec & IAST) - Will be toggled by pipeline
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
-                
-                # Aikido Configuration - Will be toggled by pipeline
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
                 AIKIDO_BLOCK: "false"
                 AIKIDO_DEBUG: "true"
-                
               env_file:
                 - .env
               extra_hosts:
@@ -436,16 +410,13 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create .env file with secrets
+    - name: Create .env file
       copy:
         dest: "{{ juice_shop_dir }}/.env"
         content: |
-          # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
           AIKIDO_BLOCK=false
           AIKIDO_DEBUG=true
-          
-          # DataDog Configuration
           DD_ENV=dev
           DD_VERSION=latest
         owner: ubuntu
@@ -454,7 +425,7 @@
       no_log: true
 
     # =======================================================================
-    # BENCHMARKING SCRIPTS
+    # ATTACK SCRIPTS
     # =======================================================================
     - name: Create SQL Injection attack script
       copy:
@@ -466,7 +437,6 @@
           
           echo "🎯 Running SQL Injection attacks against $TARGET"
           
-          # Test payloads
           declare -a PAYLOADS=(
             "' OR '1'='1"
             "' OR 1=1--"
@@ -484,11 +454,8 @@
           
           for payload in "${PAYLOADS[@]}"; do
             ATTACK_COUNT=$((ATTACK_COUNT + 1))
-            
-            # URL encode the payload
             ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
             
-            # Attack login endpoint
             RESPONSE=$(curl -s -w "\n%{http_code}" \
               -X POST "$TARGET/rest/user/login" \
               -H "Content-Type: application/json" \
@@ -497,21 +464,19 @@
             HTTP_CODE=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | head -n -1)
             
-            # Check for detection/blocking
-            if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]] || [[ "$BODY" == *"forbidden"* ]]; then
+            if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
               BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "  ✅ Blocked: SQL injection in login"
+              echo "  ✅ Blocked: SQL injection"
             elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
               DETECTED_COUNT=$((DETECTED_COUNT + 1))
-              echo "  ⚠️  Detected: SQL injection attempt logged"
-            elif [[ "$HTTP_CODE" == "200" ]]; then
-              echo "  ❌ Successful: SQL injection not prevented"
+              echo "  ⚠️  Detected: SQL injection"
+            else
+              echo "  ❌ Passed: SQL injection not prevented"
             fi
             
             sleep 0.5
           done
           
-          # Output results
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
@@ -544,10 +509,8 @@
           
           for payload in "${PAYLOADS[@]}"; do
             ATTACK_COUNT=$((ATTACK_COUNT + 1))
-            
             ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
             
-            # Attack search endpoint
             RESPONSE=$(curl -s -w "\n%{http_code}" \
               "$TARGET/rest/products/search?q=$ENCODED" 2>&1)
             
@@ -556,12 +519,12 @@
             
             if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
               BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "  ✅ Blocked: XSS attempt"
+              echo "  ✅ Blocked: XSS"
             elif [[ "$BODY" != *"$payload"* ]] && [[ "$HTTP_CODE" == "200" ]]; then
               DETECTED_COUNT=$((DETECTED_COUNT + 1))
-              echo "  ⚠️  Detected: XSS payload sanitized"
+              echo "  ⚠️  Detected: XSS sanitized"
             else
-              echo "  ❌ Successful: XSS not prevented"
+              echo "  ❌ Passed: XSS not prevented"
             fi
             
             sleep 0.5
@@ -611,7 +574,7 @@
               DETECTED_COUNT=$((DETECTED_COUNT + 1))
               echo "  ⚠️  Detected: Path blocked"
             elif [[ "$BODY" == *"root:"* ]]; then
-              echo "  ❌ Successful: /etc/passwd accessed"
+              echo "  ❌ Passed: /etc/passwd accessed"
             fi
             
             sleep 0.5
@@ -627,7 +590,6 @@
         dest: "{{ benchmark_tools_dir }}/collect_metrics.sh"
         content: |
           #!/bin/bash
-          
           CONFIG=$1
           RESULTS_DIR=$2
           TARGET="http://localhost:3000"
@@ -635,8 +597,6 @@
           
           echo "📊 Collecting performance metrics for $CONFIG..."
           
-          # Measure latency
-          echo "Measuring response latency (${SAMPLES} samples)..."
           TOTAL_TIME=0
           SUCCESS_COUNT=0
           
@@ -657,120 +617,66 @@
           AVG_LATENCY=$((TOTAL_TIME / SUCCESS_COUNT))
           SUCCESS_RATE=$(echo "scale=2; $SUCCESS_COUNT * 100 / $SAMPLES" | bc)
           
-          # Save metrics
-          cat > "$RESULTS_DIR/performance_metrics.csv" << PERFEOF
+          cat > "$RESULTS_DIR/performance_metrics.csv" << EOF
           METRIC,VALUE
           AVG_LATENCY_MS,$AVG_LATENCY
           SUCCESS_RATE_PERCENT,$SUCCESS_RATE
           SAMPLES,$SAMPLES
-          PERFEOF
+          EOF
           
-          echo "✅ Performance metrics collected"
-          echo "   Average Latency: ${AVG_LATENCY}ms"
-          echo "   Success Rate: ${SUCCESS_RATE}%"
+          echo "✅ Metrics collected - Latency: ${AVG_LATENCY}ms, Success: ${SUCCESS_RATE}%"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    # =======================================================================
-    # DEPLOYMENT & VERIFICATION SCRIPTS
-    # =======================================================================
-    - name: Create deploy.sh
+    - name: Create master attack orchestrator
       copy:
-        dest: "{{ juice_shop_dir }}/deploy.sh"
+        dest: "{{ benchmark_tools_dir }}/run_all_attacks.sh"
         content: |
           #!/bin/bash
           set -e
-          cd "{{ juice_shop_dir }}"
           
-          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
+          TARGET=$1
+          CONFIG_NAME=$2
+          RESULTS_DIR=$3
           
-          # Stop existing containers
-          docker compose down || true
+          echo "════════════════════════════════════════"
+          echo "🚀 Running Attack Suite"
+          echo "════════════════════════════════════════"
+          echo "Target: $TARGET"
+          echo "Configuration: $CONFIG_NAME"
+          echo "Results: $RESULTS_DIR"
+          echo "════════════════════════════════════════"
           
-          # Remove old images
-          docker rmi juice-shop-secure:latest 2>/dev/null || true
+          mkdir -p "$RESULTS_DIR"
           
-          # Build with progress output
-          echo "📦 Building Docker image (this includes TypeScript compilation)..."
-          docker compose build --no-cache --progress=plain
+          START_TIME=$(date +%s)
           
-          # Start containers
-          echo "▶️  Starting containers..."
-          docker compose up -d
+          /opt/benchmark-tools/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv"
+          /opt/benchmark-tools/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv"
+          /opt/benchmark-tools/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv"
           
-          # Wait for container to be healthy
-          echo "⏳ Waiting for application to start..."
-          sleep 45
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
           
-          # Verify deployment
-          if docker ps | grep -q juice-shop; then
-            echo "✅ Container is running"
-            
-            # Check instrumentation in COMPILED code
-            echo ""
-            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
-            echo "======================================"
-            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
-            
-            # Check logs
-            echo ""
-            echo "📊 Application Logs:"
-            docker logs juice-shop 2>&1 | tail -30
-            
-            # Test application
-            if curl -f -s http://localhost:3000 > /dev/null; then
-              echo ""
-              echo "✅ Application is accessible at http://localhost:3000"
-              echo "✅ Deployment successful!"
-            else
-              echo "⚠️  Application not responding yet (may need more time)"
-            fi
-          else
-            echo "❌ Deployment failed - container not running"
-            docker compose logs
-            exit 1
-          fi
-        mode: '0755'
-
-    - name: Create verification script
-      copy:
-        dest: "{{ juice_shop_dir }}/verify-instrumentation.sh"
-        content: |
-          #!/bin/bash
-          echo "🔍 Security Instrumentation Verification"
-          echo "========================================"
+          echo "ATTACK_TYPE,TOTAL,DETECTED,BLOCKED" > "$RESULTS_DIR/summary.csv"
+          
+          echo -n "SQL_INJECTION," >> "$RESULTS_DIR/summary.csv"
+          cat "$RESULTS_DIR/sqli_results.csv" >> "$RESULTS_DIR/summary.csv"
+          
+          echo -n "XSS," >> "$RESULTS_DIR/summary.csv"
+          cat "$RESULTS_DIR/xss_results.csv" >> "$RESULTS_DIR/summary.csv"
+          
+          echo -n "PATH_TRAVERSAL," >> "$RESULTS_DIR/summary.csv"
+          cat "$RESULTS_DIR/path_results.csv" >> "$RESULTS_DIR/summary.csv"
+          
+          echo "DURATION_SECONDS,$DURATION" >> "$RESULTS_DIR/summary.csv"
           
           echo ""
-          echo "ℹ️  Juice Shop compiles TypeScript then runs: node build/app"
-          
-          echo ""
-          echo "📋 Container Status:"
-          docker ps | grep juice-shop || echo "❌ Container not running"
-          
-          echo ""
-          echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
-          docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
-          
-          echo ""
-          echo "🔧 Compiled build/app.js (what actually runs - first 40 lines):"
-          docker exec juice-shop head -40 build/app.js 2>/dev/null || echo "⚠️  Could not read build/app.js"
-          
-          echo ""
-          echo "🔍 Check for instrumentation in compiled code:"
-          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found"
-          
-          echo ""
-          echo "🔧 Environment Variables:"
-          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
-          
-          echo ""
-          echo "📊 Application Startup Logs:"
-          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer" || echo "⚠️  Security tool logs not found"
-          
-          echo ""
-          echo "📡 DataDog Agent Status on Host:"
-          sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo"
+          echo "✅ Attack suite completed in ${DURATION}s"
+          echo "📊 Results: $RESULTS_DIR/summary.csv"
+        owner: ubuntu
+        group: ubuntu
         mode: '0755'
 
   handlers:
