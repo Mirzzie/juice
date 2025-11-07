@@ -299,38 +299,29 @@ jobs:
             echo "========================================"
             echo "🔍 Security Instrumentation Verification"
             echo "========================================"
+            echo "ℹ️  Juice Shop uses ts-node (runs .ts files directly)"
             
             # Check TypeScript source modifications
             echo ""
-            echo "📝 Modified app.ts (first 12 lines):"
-            docker exec juice-shop head -12 app.ts
-            
-            # Check compiled JavaScript
-            echo ""
-            echo "🔧 Compiled build/app.js (first 40 lines):"
-            docker exec juice-shop head -40 build/app.js
+            echo "📝 Modified server.ts (first 15 lines):"
+            docker exec juice-shop head -15 server.ts
             
             # Check tracer
             echo ""
             echo "📄 Tracer.ts:"
             docker exec juice-shop cat tracer.ts
             
-            # Check environment variables (REDACT SENSITIVE VALUES)
+            # Check environment variables
             echo ""
-            echo "🔧 Security Environment Variables (tokens redacted):"
-            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sed 's/\(TOKEN\|KEY\)=.*/\1=***REDACTED***/g' | sort
+            echo "🔧 Security Environment Variables:"
+            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
             
-            # Check initial logs (REDACT TOKENS)
+            # Check initial logs
             echo ""
-            echo "📊 Initial Application Logs (first 100 lines, tokens redacted):"
-            docker logs juice-shop 2>&1 | head -100 | sed -E 's/(token|key)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi'
+            echo "📊 Initial Application Logs:"
+            docker logs juice-shop 2>&1 | tail -50
             
-            # Look for AIKIDO startup
-            echo ""
-            echo "🔍 AIKIDO Startup Messages:"
-            docker logs juice-shop 2>&1 | grep "AIKIDO:" | sed -E 's/(token|key)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi'
-            
-            # DataDog agent status (no sensitive data here)
+            # DataDog agent status
             echo ""
             echo "📡 DataDog Agent Status:"
             sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  Check agent status manually"
@@ -347,10 +338,10 @@ jobs:
             done
             echo "✅ Test traffic generated"
             
-            # Show logs after traffic (with sensitive data redacted)
+            # Show logs after traffic
             echo ""
-            echo "📊 Logs after traffic generation (tokens redacted):"
-            docker logs juice-shop --tail=50 2>&1 | sed -E 's/(token|key|TOKEN|KEY)=[a-zA-Z0-9_-]{10,}/\1=***REDACTED***/gi' | grep -i -E "aikido|datadog|trace|span" || echo "Check full logs manually"
+            echo "📊 Logs after traffic generation:"
+            docker logs juice-shop --tail=30 2>&1 | grep -i -E "datadog|aikido|trace" || echo "Check logs manually"
           ENDSSH
 
       - name: Generate Deployment Summary
