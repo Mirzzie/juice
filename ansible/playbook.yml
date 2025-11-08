@@ -8,6 +8,8 @@
     juice_shop_dir: /opt/juice-shop
     node_version: "22"
     benchmark_tools_dir: /opt/benchmark-tools
+    zap_version: "2.15.0"
+    nuclei_version: "3.1.0"
 
   vars_files:
     - secrets.yml
@@ -41,17 +43,25 @@
         state: present
 
     # =======================================================================
-    # DOCKER INSTALLATION
+    # DOCKER INSTALLATION (FIXED)
     # =======================================================================
-    - name: Add Docker GPG key
-      apt_key:
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker GPG key (updated method)
+      ansible.builtin.get_url:
         url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
 
     - name: Add Docker repository
       apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
+        filename: docker
 
     - name: Install Docker
       apt:
@@ -77,30 +87,74 @@
         enabled: yes
 
     # =======================================================================
-    # DATADOG AGENT INSTALLATION
+    # FIREWALL CONFIGURATION (NEW)
+    # =======================================================================
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: Configure UFW defaults
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+
+    - name: Allow SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Allow Juice Shop
+      ufw:
+        rule: allow
+        port: '3000'
+        proto: tcp
+
+    - name: Allow DataDog Agent
+      ufw:
+        rule: allow
+        port: '8126'
+        proto: tcp
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # =======================================================================
+    # DATADOG AGENT INSTALLATION (IMPROVED)
     # =======================================================================
     - name: Check if DataDog agent is already installed
       stat:
-        path: /etc/datadog-agent
+        path: /etc/datadog-agent/datadog.yaml
       register: datadog_installed
 
-    - name: Download DataDog installation script
-      get_url:
-        url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
-        dest: /tmp/install_datadog.sh
-        mode: '0755'
-      when: not datadog_installed.stat.exists
+    - name: Download and Install DataDog Agent
+      block:
+        - name: Download DataDog installation script
+          get_url:
+            url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
+            dest: /tmp/install_datadog.sh
+            mode: '0755'
 
-    - name: Install DataDog Agent
-      shell: >
-        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
+        - name: Install DataDog Agent
+          shell: >
+            DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
+          args:
+            creates: /etc/datadog-agent/datadog.yaml
+          register: datadog_install
+          retries: 3
+          delay: 15
+          until: datadog_install.rc == 0
+
+        - name: Wait for DataDog config file to be created
+          wait_for:
+            path: /etc/datadog-agent/datadog.yaml
+            timeout: 60
       when: not datadog_installed.stat.exists
-      register: datadog_install
-      retries: 3
-      delay: 15
-      until: datadog_install.rc == 0
 
     - name: Configure DataDog Agent for APM and IAST
       blockinfile:
@@ -131,6 +185,17 @@
         backup: yes
       notify: Restart DataDog Agent
 
+    - name: Validate DataDog configuration
+      command: datadog-agent configcheck
+      register: dd_config_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display DataDog config validation result
+      debug:
+        var: dd_config_check.stdout_lines
+      when: dd_config_check.stdout_lines is defined
+
     - name: Ensure DataDog Agent is running
       systemd:
         name: datadog-agent
@@ -138,7 +203,7 @@
         enabled: yes
 
     # =======================================================================
-    # ATTACK TOOLS INSTALLATION (FIXED)
+    # ATTACK TOOLS INSTALLATION (IMPROVED)
     # =======================================================================
     - name: Create benchmark tools directory
       file:
@@ -146,112 +211,109 @@
         state: directory
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
-    # FIXED: OWASP ZAP - Using Ansible modules instead of shell
+    # OWASP ZAP Installation
     - name: Check if OWASP ZAP is already installed
       stat:
-        path: /usr/local/bin/zaproxy
+        path: /opt/ZAP_{{ zap_version }}
       register: zap_installed
 
-    - name: Download OWASP ZAP
-      get_url:
-        url: https://github.com/zaproxy/zaproxy/releases/download/v2.15.0/ZAP_2.15.0_Linux.tar.gz
-        dest: /tmp/ZAP_2.15.0_Linux.tar.gz
-        mode: '0644'
-        timeout: 300
-      when: not zap_installed.stat.exists
-      register: zap_download
-      retries: 3
-      delay: 10
-      until: zap_download is succeeded
+    - name: Install OWASP ZAP
+      block:
+        - name: Download OWASP ZAP
+          get_url:
+            url: "https://github.com/zaproxy/zaproxy/releases/download/v{{ zap_version }}/ZAP_{{ zap_version }}_Linux.tar.gz"
+            dest: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+            mode: '0644'
+            timeout: 300
+          register: zap_download
+          retries: 3
+          delay: 10
+          until: zap_download is succeeded
 
-    - name: Extract OWASP ZAP
-      unarchive:
-        src: /tmp/ZAP_2.15.0_Linux.tar.gz
-        dest: /opt/
-        remote_src: yes
-      when: not zap_installed.stat.exists
+        - name: Extract OWASP ZAP
+          unarchive:
+            src: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+            dest: /opt/
+            remote_src: yes
 
-    - name: Create ZAP symlink
-      file:
-        src: /opt/ZAP_2.15.0/zap.sh
-        dest: /usr/local/bin/zaproxy
-        state: link
+        - name: Create ZAP symlink
+          file:
+            src: "/opt/ZAP_{{ zap_version }}/zap.sh"
+            dest: /usr/local/bin/zaproxy
+            state: link
+            force: yes
       when: not zap_installed.stat.exists
+      always:
+        - name: Clean up ZAP download
+          file:
+            path: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+            state: absent
 
-    - name: Clean up ZAP download
-      file:
-        path: /tmp/ZAP_2.15.0_Linux.tar.gz
-        state: absent
-      when: not zap_installed.stat.exists
-
-    # FIXED: Nuclei - Using Ansible modules instead of shell
+    # Nuclei Installation
     - name: Check if Nuclei is already installed
       stat:
         path: /usr/local/bin/nuclei
       register: nuclei_installed
 
-    - name: Download Nuclei
-      get_url:
-        url: https://github.com/projectdiscovery/nuclei/releases/download/v3.1.0/nuclei_3.1.0_linux_amd64.zip
-        dest: /tmp/nuclei_3.1.0_linux_amd64.zip
-        mode: '0644'
-        timeout: 300
-      when: not nuclei_installed.stat.exists
-      register: nuclei_download
-      retries: 3
-      delay: 10
-      until: nuclei_download is succeeded
+    - name: Install Nuclei
+      block:
+        - name: Download Nuclei
+          get_url:
+            url: "https://github.com/projectdiscovery/nuclei/releases/download/v{{ nuclei_version }}/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+            dest: "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+            mode: '0644'
+            timeout: 300
+          register: nuclei_download
+          retries: 3
+          delay: 10
+          until: nuclei_download is succeeded
 
-    - name: Extract Nuclei
-      unarchive:
-        src: /tmp/nuclei_3.1.0_linux_amd64.zip
-        dest: /tmp/
-        remote_src: yes
-      when: not nuclei_installed.stat.exists
+        - name: Extract Nuclei
+          unarchive:
+            src: "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+            dest: /tmp/
+            remote_src: yes
 
-    - name: Move Nuclei binary
-      copy:
-        src: /tmp/nuclei
-        dest: /usr/local/bin/nuclei
-        mode: '0755'
-        remote_src: yes
-      when: not nuclei_installed.stat.exists
+        - name: Move Nuclei binary
+          copy:
+            src: /tmp/nuclei
+            dest: /usr/local/bin/nuclei
+            mode: '0755'
+            remote_src: yes
 
-    - name: Clean up Nuclei download
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /tmp/nuclei_3.1.0_linux_amd64.zip
-        - /tmp/nuclei
+        - name: Update Nuclei templates
+          command: nuclei -update-templates
+          become: true
+          become_user: ubuntu
+          changed_when: true
       when: not nuclei_installed.stat.exists
+      always:
+        - name: Clean up Nuclei download files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+            - /tmp/nuclei
 
-    - name: Update Nuclei templates
-      command: nuclei -update-templates
-      become: true
-      become_user: ubuntu
-      when: not nuclei_installed.stat.exists
-      changed_when: true
-
-    # FIXED: Python packages - Using apt instead of pip (PEP 668 compliance)
+    # Python packages - Fixed for Ubuntu 24.04
     - name: Install Python attack libraries (system packages)
       apt:
         name:
           - python3-requests
           - python3-bs4
-          - python3-colorama
-          - python3-pandas
-        state: present
-      become: true
-
-    - name: Install additional Python tools via apt
-      apt:
-        name:
           - python3-urllib3
           - python3-chardet
         state: present
+
+    - name: Install additional Python packages via pip (if needed)
+      pip:
+        name:
+          - colorama
+          - pandas
+        break_system_packages: yes
       become: true
       ignore_errors: true
 
@@ -301,7 +363,7 @@
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:22-bookworm-slim AS builder
+          FROM node:{{ node_version }}-bookworm-slim AS builder
 
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
@@ -332,7 +394,7 @@
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
-          FROM node:22-bookworm-slim
+          FROM node:{{ node_version }}-bookworm-slim
           
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
@@ -352,7 +414,7 @@
 
           ENV NODE_ENV=production \
               PORT=3000 \
-              NODE_OPTIONS="--max-old-space-size=2048"
+              NODE_OPTIONS="--max-old-space-size=3072"
           
           CMD ["npm", "start"]
         owner: ubuntu
@@ -425,17 +487,29 @@
       no_log: true
 
     # =======================================================================
-    # ATTACK SCRIPTS
+    # ATTACK SCRIPTS (IMPROVED)
     # =======================================================================
     - name: Create SQL Injection attack script
       copy:
         dest: "{{ benchmark_tools_dir }}/sqli_attacks.sh"
         content: |
           #!/bin/bash
+          set -euo pipefail
+          
           TARGET=$1
           OUTPUT_FILE=$2
           
           echo "🎯 Running SQL Injection attacks against $TARGET"
+          
+          # Wait for application to be ready
+          for i in {1..10}; do
+            if curl -f -s "$TARGET" > /dev/null 2>&1; then
+              echo "✅ Application is ready"
+              break
+            fi
+            echo "Waiting for application... ($i/10)"
+            sleep 3
+          done
           
           declare -a PAYLOADS=(
             "' OR '1'='1"
@@ -480,13 +554,15 @@
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
     - name: Create XSS attack script
       copy:
         dest: "{{ benchmark_tools_dir }}/xss_attacks.sh"
         content: |
           #!/bin/bash
+          set -euo pipefail
+          
           TARGET=$1
           OUTPUT_FILE=$2
           
@@ -533,13 +609,15 @@
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
     - name: Create Path Traversal attack script
       copy:
         dest: "{{ benchmark_tools_dir }}/path_traversal.sh"
         content: |
           #!/bin/bash
+          set -euo pipefail
+          
           TARGET=$1
           OUTPUT_FILE=$2
           
@@ -583,13 +661,15 @@
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
     - name: Create metrics collection script
       copy:
         dest: "{{ benchmark_tools_dir }}/collect_metrics.sh"
         content: |
           #!/bin/bash
+          set -euo pipefail
+          
           CONFIG=$1
           RESULTS_DIR=$2
           TARGET="http://localhost:3000"
@@ -627,14 +707,14 @@
           echo "✅ Metrics collected - Latency: ${AVG_LATENCY}ms, Success: ${SUCCESS_RATE}%"
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
     - name: Create master attack orchestrator
       copy:
         dest: "{{ benchmark_tools_dir }}/run_all_attacks.sh"
         content: |
           #!/bin/bash
-          set -e
+          set -euo pipefail
           
           TARGET=$1
           CONFIG_NAME=$2
@@ -652,9 +732,9 @@
           
           START_TIME=$(date +%s)
           
-          /opt/benchmark-tools/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv"
-          /opt/benchmark-tools/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv"
-          /opt/benchmark-tools/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv"
+          {{ benchmark_tools_dir }}/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv"
+          {{ benchmark_tools_dir }}/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv"
+          {{ benchmark_tools_dir }}/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv"
           
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
@@ -677,7 +757,7 @@
           echo "📊 Results: $RESULTS_DIR/summary.csv"
         owner: ubuntu
         group: ubuntu
-        mode: '0755'
+        mode: '0750'
 
   handlers:
     - name: Restart DataDog Agent

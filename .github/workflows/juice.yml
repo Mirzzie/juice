@@ -188,7 +188,7 @@ jobs:
 
       - name: Verify Attack Tools Installation
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             echo "📦 Verifying attack automation tools..."
             
             # Check if scripts exist
@@ -273,28 +273,29 @@ jobs:
 
       - name: Deploy Application with ${{ matrix.config }} Configuration
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            set -e
-            cd /opt/juice-shop
-            
-            echo "════════════════════════════════════════"
-            echo "🚀 Deploying: ${{ matrix.config_name }}"
-            echo "════════════════════════════════════════"
-            
-            # Stop existing containers
-            docker compose down 2>/dev/null || true
-            
-            # Update environment configuration
-            cat > .env << ENVEOF
+          # Create deployment script
+          cat > /tmp/deploy.sh << 'DEPLOYEOF'
+          set -e
+          cd /opt/juice-shop
+
+          echo "════════════════════════════════════════"
+          echo "🚀 Deploying: ${{ matrix.config_name }}"
+          echo "════════════════════════════════════════"
+
+          # Stop existing containers
+          docker compose down 2>/dev/null || true
+
+          # Update environment configuration
+          cat > .env << ENVEOF
           AIKIDO_TOKEN=${{ secrets.ZEN_FIREWALL_TOKEN }}
           AIKIDO_BLOCK=${{ matrix.aikido_block }}
           AIKIDO_DEBUG=true
           DD_ENV=${{ matrix.config }}
           DD_VERSION=latest
           ENVEOF
-            
-            # Update docker-compose.yml
-            cat > docker-compose.yml << COMPOSEEOF
+
+          # Update docker-compose.yml
+          cat > docker-compose.yml << COMPOSEEOF
           services:
             juice-shop:
               build: .
@@ -331,65 +332,79 @@ jobs:
                 retries: 3
                 start_period: 60s
           COMPOSEEOF
+
+          # Build image only if doesn't exist
+          if ! docker images | grep -q "juice-shop-secure.*latest"; then
+            echo "📦 Building Docker image (first time - this takes ~15 minutes)..."
+            nohup docker compose build --no-cache > /tmp/build.log 2>&1 &
+            BUILD_PID=$!
             
-            # Build image only if doesn't exist
-            if ! docker images | grep -q "juice-shop-secure.*latest"; then
-              echo "📦 Building Docker image (first time - this takes ~15 minutes)..."
-              nohup docker compose build --no-cache > /tmp/build.log 2>&1 &
-              BUILD_PID=$!
-              
-              # Wait with keep-alive messages
-              while kill -0 $BUILD_PID 2>/dev/null; do
-                echo "Building... ($(date '+%H:%M:%S'))"
-                sleep 30
-              done
-              
-              wait $BUILD_PID
-              if [ $? -ne 0 ]; then
-                echo "❌ Build failed"
-                tail -100 /tmp/build.log
-                exit 1
-              fi
-              echo "✅ Build completed"
-            else
-              echo "✅ Using existing image"
-            fi
-            
-            echo "▶️  Starting container..."
-            docker compose up -d
-            
-            echo "⏳ Waiting for application..."
-            sleep 60
-            
-            # Verify
-            if ! docker ps | grep -q juice-shop; then
-              echo "❌ Container failed to start"
-              docker compose logs --tail=50
-              exit 1
-            fi
-            
-            for i in {1..10}; do
-              if curl -f -s http://localhost:3000 > /dev/null; then
-                echo "✅ Application ready"
-                echo ""
-                echo "📋 Configuration:"
-                echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
-                echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
-                echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
-                echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
-                exit 0
-              fi
-              echo "Waiting... ($i/10)"
-              sleep 5
+            # Wait with keep-alive messages
+            while kill -0 $BUILD_PID 2>/dev/null; do
+              echo "Building... ($(date '+%H:%M:%S'))"
+              sleep 30
             done
             
-            echo "⚠️  Application may need more time"
-          ENDSSH
+            wait $BUILD_PID
+            BUILD_EXIT=$?
+            if [ $BUILD_EXIT -ne 0 ]; then
+              echo "❌ Build failed with exit code $BUILD_EXIT"
+              tail -100 /tmp/build.log
+              exit 1
+            fi
+            echo "✅ Build completed"
+          else
+            echo "✅ Using existing image"
+          fi
+
+          echo "▶️  Starting container..."
+          docker compose up -d
+
+          echo "⏳ Waiting for application..."
+          sleep 60
+
+          # Verify
+          if ! docker ps | grep -q juice-shop; then
+            echo "❌ Container failed to start"
+            docker compose logs --tail=50
+            exit 1
+          fi
+
+          for i in {1..10}; do
+            if curl -f -s http://localhost:3000 > /dev/null; then
+              echo "✅ Application ready"
+              echo ""
+              echo "📋 Configuration:"
+              echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
+              echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
+              echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
+              echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
+              exit 0
+            fi
+            echo "Waiting... ($i/10)"
+            sleep 5
+          done
+
+          echo "⚠️  Application may need more time"
+          exit 0
+          DEPLOYEOF
+
+          # Copy and execute script
+          scp -i ~/.ssh/id_rsa /tmp/deploy.sh ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/deploy.sh
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} "bash /tmp/deploy.sh"
+          DEPLOY_EXIT=$?
+
+          if [ $DEPLOY_EXIT -ne 0 ]; then
+            echo "::error::Deployment failed with exit code $DEPLOY_EXIT"
+            exit 1
+          fi
+
+          echo "✅ Deployment successful"
         timeout-minutes: 25
 
       - name: Collect Performance Baseline
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             mkdir -p "$RESULTS_DIR"
             
@@ -403,7 +418,7 @@ jobs:
 
       - name: Run Attack Suite
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             
             if [ -x /opt/benchmark-tools/run_all_attacks.sh ]; then
@@ -419,7 +434,7 @@ jobs:
 
       - name: Collect Security Logs
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             
             docker logs juice-shop > "$RESULTS_DIR/container.log" 2>&1 || true
@@ -642,8 +657,8 @@ jobs:
 
       - name: Clean Up
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            rm -rf /tmp/benchmark-results
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            rm -rf /tmp/benchmark-results /tmp/deploy.sh
             echo "✅ Cleanup complete"
           ENDSSH
         continue-on-error: true
