@@ -313,7 +313,7 @@
         name:
           - colorama
           - pandas
-        break_system_packages: yes
+        break_system_packages: true
       become: true
       ignore_errors: true
 
@@ -494,63 +494,178 @@
         dest: "{{ benchmark_tools_dir }}/sqli_attacks.sh"
         content: |
           #!/bin/bash
-          set -euo pipefail
+          # Note: Not using set -euo pipefail to handle errors gracefully
           
           TARGET=$1
           OUTPUT_FILE=$2
           
+          if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+            echo "Usage: $0 <target_url> <output_file>"
+            exit 1
+          fi
+          
           echo "🎯 Running SQL Injection attacks against $TARGET"
           
           # Wait for application to be ready
+          APP_READY=false
           for i in {1..10}; do
             if curl -f -s "$TARGET" > /dev/null 2>&1; then
               echo "✅ Application is ready"
+              APP_READY=true
               break
             fi
             echo "Waiting for application... ($i/10)"
             sleep 3
           done
           
-          declare -a PAYLOADS=(
-            "' OR '1'='1"
-            "' OR 1=1--"
-            "admin' --"
-            "1' UNION SELECT NULL--"
-            "' AND 1=0 UNION ALL SELECT 'admin', '81dc9bdb52d04dc20036dbd8313ed055"
-            "' OR 'a'='a"
-            "1' AND '1'='1"
-            "admin'/*"
-          )
+          if [ "$APP_READY" = false ]; then
+            echo "❌ Application not responding after 30 seconds"
+            echo "0,0,0" > "$OUTPUT_FILE"
+            exit 0
+          fi
           
           ATTACK_COUNT=0
           DETECTED_COUNT=0
           BLOCKED_COUNT=0
           
-          for payload in "${PAYLOADS[@]}"; do
-            ATTACK_COUNT=$((ATTACK_COUNT + 1))
-            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-              -X POST "$TARGET/rest/user/login" \
-              -H "Content-Type: application/json" \
-              -d "{\"email\":\"admin@juice-sh.op$payload\",\"password\":\"test\"}" 2>&1)
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | head -n -1)
-            
-            if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-              BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "  ✅ Blocked: SQL injection"
-            elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-              DETECTED_COUNT=$((DETECTED_COUNT + 1))
-              echo "  ⚠️  Detected: SQL injection"
-            else
-              echo "  ❌ Passed: SQL injection not prevented"
-            fi
-            
-            sleep 0.5
-          done
+          # Payload 1
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ' OR '1'='1"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: ' OR '1'='1"
+          else
+            echo "  ❌ Passed: ' OR '1'='1"
+          fi
+          sleep 0.5
           
+          # Payload 2
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"' OR 1=1--","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ' OR 1=1--"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: ' OR 1=1--"
+          else
+            echo "  ❌ Passed: ' OR 1=1--"
+          fi
+          sleep 0.5
+          
+          # Payload 3
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"' --","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: admin' --"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: admin' --"
+          else
+            echo "  ❌ Passed: admin' --"
+          fi
+          sleep 0.5
+          
+          # Payload 4
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"1'"'"' UNION SELECT NULL--","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: UNION SELECT"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: UNION SELECT"
+          else
+            echo "  ❌ Passed: UNION SELECT"
+          fi
+          sleep 0.5
+          
+          # Payload 5
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'a'"'"'='"'"'a","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ' OR 'a'='a"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: ' OR 'a'='a"
+          else
+            echo "  ❌ Passed: ' OR 'a'='a"
+          fi
+          sleep 0.5
+          
+          # Payload 6
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"1'"'"' AND '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: 1' AND '1'='1"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: 1' AND '1'='1"
+          else
+            echo "  ❌ Passed: 1' AND '1'='1"
+          fi
+          sleep 0.5
+          
+          # Payload 7
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"'/*","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: admin'/*"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: admin'/*"
+          else
+            echo "  ❌ Passed: admin'/*"
+          fi
+          sleep 0.5
+          
+          # Payload 8
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op'"'"' OR 1=1#","password":"test"}' 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ' OR 1=1#"
+          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: ' OR 1=1#"
+          else
+            echo "  ❌ Passed: ' OR 1=1#"
+          fi
+          
+          echo ""
+          echo "📊 SQL Injection Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
@@ -561,51 +676,139 @@
         dest: "{{ benchmark_tools_dir }}/xss_attacks.sh"
         content: |
           #!/bin/bash
-          set -euo pipefail
           
           TARGET=$1
           OUTPUT_FILE=$2
           
-          echo "🎯 Running XSS attacks against $TARGET"
+          if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+            echo "Usage: $0 <target_url> <output_file>"
+            exit 1
+          fi
           
-          declare -a PAYLOADS=(
-            "<script>alert('XSS')</script>"
-            "<img src=x onerror=alert('XSS')>"
-            "<svg/onload=alert('XSS')>"
-            "javascript:alert('XSS')"
-            "<iframe src='javascript:alert(1)'>"
-            "<body onload=alert('XSS')>"
-            "<input onfocus=alert('XSS') autofocus>"
-            "<marquee onstart=alert('XSS')>"
-          )
+          echo "🎯 Running XSS attacks against $TARGET"
           
           ATTACK_COUNT=0
           DETECTED_COUNT=0
           BLOCKED_COUNT=0
           
-          for payload in "${PAYLOADS[@]}"; do
-            ATTACK_COUNT=$((ATTACK_COUNT + 1))
-            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-              "$TARGET/rest/products/search?q=$ENCODED" 2>&1)
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | head -n -1)
-            
-            if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-              BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "  ✅ Blocked: XSS"
-            elif [[ "$BODY" != *"$payload"* ]] && [[ "$HTTP_CODE" == "200" ]]; then
-              DETECTED_COUNT=$((DETECTED_COUNT + 1))
-              echo "  ⚠️  Detected: XSS sanitized"
-            else
-              echo "  ❌ Passed: XSS not prevented"
-            fi
-            
-            sleep 0.5
-          done
+          # XSS Payload 1: <script>alert('XSS')</script>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Cscript%3Ealert%28%27XSS%27%29%3C%2Fscript%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <script> tag"
+          elif [[ "$BODY" != *"<script>"* ]] && [[ "$HTTP_CODE" == "200" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: <script> sanitized"
+          else
+            echo "  ❌ Passed: <script> not prevented"
+          fi
+          sleep 0.5
           
+          # XSS Payload 2: <img src=x onerror=alert('XSS')>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <img> onerror"
+          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onerror") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: <img> sanitized"
+          else
+            echo "  ❌ Passed: <img> onerror not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 3: <svg/onload=alert('XSS')>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Csvg%2Fonload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <svg> onload"
+          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onload") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: <svg> sanitized"
+          else
+            echo "  ❌ Passed: <svg> onload not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 4: javascript:alert('XSS')
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=javascript%3Aalert%28%27XSS%27%29" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: javascript: protocol"
+          else
+            echo "  ❌ Passed: javascript: protocol not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 5: <iframe src='javascript:alert(1)'>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Ciframe%20src%3D%27javascript%3Aalert%281%29%27%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <iframe> javascript"
+          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "<iframe") -eq 0 ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: <iframe> sanitized"
+          else
+            echo "  ❌ Passed: <iframe> not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 6: <body onload=alert('XSS')>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Cbody%20onload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <body> onload"
+          else
+            echo "  ❌ Passed: <body> onload not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 7: <input onfocus=alert('XSS') autofocus>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Cinput%20onfocus%3Dalert%28%27XSS%27%29%20autofocus%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <input> onfocus"
+          else
+            echo "  ❌ Passed: <input> onfocus not prevented"
+          fi
+          sleep 0.5
+          
+          # XSS Payload 8: <marquee onstart=alert('XSS')>
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/rest/products/search?q=%3Cmarquee%20onstart%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: <marquee> onstart"
+          else
+            echo "  ❌ Passed: <marquee> onstart not prevented"
+          fi
+          
+          echo ""
+          echo "📊 XSS Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
@@ -616,48 +819,121 @@
         dest: "{{ benchmark_tools_dir }}/path_traversal.sh"
         content: |
           #!/bin/bash
-          set -euo pipefail
           
           TARGET=$1
           OUTPUT_FILE=$2
           
-          echo "🎯 Running Path Traversal attacks against $TARGET"
+          if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+            echo "Usage: $0 <target_url> <output_file>"
+            exit 1
+          fi
           
-          declare -a PAYLOADS=(
-            "../../../etc/passwd"
-            "....//....//....//etc/passwd"
-            "..%252f..%252f..%252fetc%252fpasswd"
-            "../../../../../../../../etc/passwd"
-            "..\\..\\..\\etc\\passwd"
-            "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
-          )
+          echo "🎯 Running Path Traversal attacks against $TARGET"
           
           ATTACK_COUNT=0
           DETECTED_COUNT=0
           BLOCKED_COUNT=0
           
-          for payload in "${PAYLOADS[@]}"; do
-            ATTACK_COUNT=$((ATTACK_COUNT + 1))
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-              "$TARGET/ftp/$payload" 2>&1)
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | head -n -1)
-            
-            if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-              BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "  ✅ Blocked: Path traversal"
-            elif [[ "$HTTP_CODE" == "404" ]]; then
-              DETECTED_COUNT=$((DETECTED_COUNT + 1))
-              echo "  ⚠️  Detected: Path blocked"
-            elif [[ "$BODY" == *"root:"* ]]; then
-              echo "  ❌ Passed: /etc/passwd accessed"
-            fi
-            
-            sleep 0.5
-          done
+          # Path Traversal 1: ../../../etc/passwd
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ../../../etc/passwd"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          elif [[ "$BODY" == *"root:"* ]]; then
+            echo "  ❌ Passed: /etc/passwd accessed!"
+          else
+            echo "  ⚠️  Inconclusive: ../../../etc/passwd"
+          fi
+          sleep 0.5
           
+          # Path Traversal 2: ....//....//....//etc/passwd
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/....%2F%2F....%2F%2F....%2F%2Fetc%2Fpasswd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: ....//....//etc/passwd"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          else
+            echo "  ❌ Passed: ....//....//etc/passwd"
+          fi
+          sleep 0.5
+          
+          # Path Traversal 3: Double URL encoding
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/..%252f..%252f..%252fetc%252fpasswd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: double encoded"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          else
+            echo "  ❌ Passed: double encoded"
+          fi
+          sleep 0.5
+          
+          # Path Traversal 4: Many levels deep
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: many levels"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          else
+            echo "  ❌ Passed: many levels"
+          fi
+          sleep 0.5
+          
+          # Path Traversal 5: Backslash variant
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/..\\..\\..\\etc\\passwd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: backslash variant"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          else
+            echo "  ❌ Passed: backslash variant"
+          fi
+          sleep 0.5
+          
+          # Path Traversal 6: Percent encoding
+          ATTACK_COUNT=$((ATTACK_COUNT + 1))
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "$TARGET/ftp/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd" 2>&1 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          if [[ "$HTTP_CODE" == "403" ]]; then
+            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+            echo "  ✅ Blocked: percent encoding"
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            DETECTED_COUNT=$((DETECTED_COUNT + 1))
+            echo "  ⚠️  Detected: Path blocked (404)"
+          else
+            echo "  ❌ Passed: percent encoding"
+          fi
+          
+          echo ""
+          echo "📊 Path Traversal Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
         owner: ubuntu
         group: ubuntu
@@ -668,21 +944,35 @@
         dest: "{{ benchmark_tools_dir }}/collect_metrics.sh"
         content: |
           #!/bin/bash
-          set -euo pipefail
           
           CONFIG=$1
           RESULTS_DIR=$2
           TARGET="http://localhost:3000"
           SAMPLES=100
           
+          if [ -z "$CONFIG" ] || [ -z "$RESULTS_DIR" ]; then
+            echo "Usage: $0 <config_name> <results_dir>"
+            exit 1
+          fi
+          
           echo "📊 Collecting performance metrics for $CONFIG..."
+          
+          # Test if application is responding
+          if ! curl -s -f "$TARGET" > /dev/null 2>&1; then
+            echo "⚠️  Application not responding, skipping metrics"
+            echo "METRIC,VALUE" > "$RESULTS_DIR/performance_metrics.csv"
+            echo "AVG_LATENCY_MS,0" >> "$RESULTS_DIR/performance_metrics.csv"
+            echo "SUCCESS_RATE_PERCENT,0" >> "$RESULTS_DIR/performance_metrics.csv"
+            echo "SAMPLES,0" >> "$RESULTS_DIR/performance_metrics.csv"
+            exit 0
+          fi
           
           TOTAL_TIME=0
           SUCCESS_COUNT=0
           
           for i in $(seq 1 $SAMPLES); do
             START=$(date +%s%N)
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/rest/products/search?q=apple" 2>/dev/null)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/rest/products/search?q=apple" 2>/dev/null || echo "000")
             END=$(date +%s%N)
             
             if [ "$HTTP_CODE" = "200" ]; then
@@ -694,8 +984,13 @@
             sleep 0.1
           done
           
-          AVG_LATENCY=$((TOTAL_TIME / SUCCESS_COUNT))
-          SUCCESS_RATE=$(echo "scale=2; $SUCCESS_COUNT * 100 / $SAMPLES" | bc)
+          if [ $SUCCESS_COUNT -gt 0 ]; then
+            AVG_LATENCY=$((TOTAL_TIME / SUCCESS_COUNT))
+          else
+            AVG_LATENCY=0
+          fi
+          
+          SUCCESS_RATE=$(echo "scale=2; $SUCCESS_COUNT * 100 / $SAMPLES" | bc 2>/dev/null || echo "0")
           
           cat > "$RESULTS_DIR/performance_metrics.csv" << EOF
           METRIC,VALUE
@@ -714,11 +1009,15 @@
         dest: "{{ benchmark_tools_dir }}/run_all_attacks.sh"
         content: |
           #!/bin/bash
-          set -euo pipefail
           
           TARGET=$1
           CONFIG_NAME=$2
           RESULTS_DIR=$3
+          
+          if [ -z "$TARGET" ] || [ -z "$CONFIG_NAME" ] || [ -z "$RESULTS_DIR" ]; then
+            echo "Usage: $0 <target_url> <config_name> <results_dir>"
+            exit 1
+          fi
           
           echo "════════════════════════════════════════"
           echo "🚀 Running Attack Suite"
@@ -732,23 +1031,50 @@
           
           START_TIME=$(date +%s)
           
-          {{ benchmark_tools_dir }}/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv"
-          {{ benchmark_tools_dir }}/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv"
-          {{ benchmark_tools_dir }}/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv"
+          # Run SQL injection attacks
+          if [ -x {{ benchmark_tools_dir }}/sqli_attacks.sh ]; then
+            {{ benchmark_tools_dir }}/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv" || echo "⚠️  SQLi attacks had issues"
+          else
+            echo "⚠️  sqli_attacks.sh not found"
+            echo "0,0,0" > "$RESULTS_DIR/sqli_results.csv"
+          fi
+          
+          # Run XSS attacks
+          if [ -x {{ benchmark_tools_dir }}/xss_attacks.sh ]; then
+            {{ benchmark_tools_dir }}/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv" || echo "⚠️  XSS attacks had issues"
+          else
+            echo "⚠️  xss_attacks.sh not found"
+            echo "0,0,0" > "$RESULTS_DIR/xss_results.csv"
+          fi
+          
+          # Run path traversal attacks
+          if [ -x {{ benchmark_tools_dir }}/path_traversal.sh ]; then
+            {{ benchmark_tools_dir }}/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv" || echo "⚠️  Path traversal attacks had issues"
+          else
+            echo "⚠️  path_traversal.sh not found"
+            echo "0,0,0" > "$RESULTS_DIR/path_results.csv"
+          fi
           
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           
+          # Create summary CSV
           echo "ATTACK_TYPE,TOTAL,DETECTED,BLOCKED" > "$RESULTS_DIR/summary.csv"
           
-          echo -n "SQL_INJECTION," >> "$RESULTS_DIR/summary.csv"
-          cat "$RESULTS_DIR/sqli_results.csv" >> "$RESULTS_DIR/summary.csv"
+          if [ -f "$RESULTS_DIR/sqli_results.csv" ]; then
+            echo -n "SQL_INJECTION," >> "$RESULTS_DIR/summary.csv"
+            cat "$RESULTS_DIR/sqli_results.csv" >> "$RESULTS_DIR/summary.csv"
+          fi
           
-          echo -n "XSS," >> "$RESULTS_DIR/summary.csv"
-          cat "$RESULTS_DIR/xss_results.csv" >> "$RESULTS_DIR/summary.csv"
+          if [ -f "$RESULTS_DIR/xss_results.csv" ]; then
+            echo -n "XSS," >> "$RESULTS_DIR/summary.csv"
+            cat "$RESULTS_DIR/xss_results.csv" >> "$RESULTS_DIR/summary.csv"
+          fi
           
-          echo -n "PATH_TRAVERSAL," >> "$RESULTS_DIR/summary.csv"
-          cat "$RESULTS_DIR/path_results.csv" >> "$RESULTS_DIR/summary.csv"
+          if [ -f "$RESULTS_DIR/path_results.csv" ]; then
+            echo -n "PATH_TRAVERSAL," >> "$RESULTS_DIR/summary.csv"
+            cat "$RESULTS_DIR/path_results.csv" >> "$RESULTS_DIR/summary.csv"
+          fi
           
           echo "DURATION_SECONDS,$DURATION" >> "$RESULTS_DIR/summary.csv"
           
