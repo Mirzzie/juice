@@ -300,7 +300,7 @@
                 
                 # Aikido Configuration
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "false"
+                AIKIDO_BLOCK: "true"
                 AIKIDO_DEBUG: "true"
                 
               env_file:
@@ -328,7 +328,7 @@
         content: |
           # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
-          AIKIDO_BLOCK=false
+          AIKIDO_BLOCK=true
           AIKIDO_DEBUG=true
           
           # DataDog Configuration
