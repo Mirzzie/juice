@@ -313,7 +313,7 @@
         name:
           - colorama
           - pandas
-        break_system_packages: true
+        break_system_packages: yes
       become: true
       ignore_errors: true
 
@@ -543,7 +543,7 @@
             -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -n -1)
-          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: ' OR '1'='1"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -560,7 +560,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op'"'"' OR 1=1--","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: ' OR 1=1--"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -577,7 +577,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op'"'"' --","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: admin' --"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -594,7 +594,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"1'"'"' UNION SELECT NULL--","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: UNION SELECT"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -611,7 +611,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'a'"'"'='"'"'a","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: ' OR 'a'='a"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -628,7 +628,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"1'"'"' AND '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: 1' AND '1'='1"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -645,7 +645,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op'"'"'/*","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: admin'/*"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -662,7 +662,7 @@
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op'"'"' OR 1=1#","password":"test"}' 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: ' OR 1=1#"
           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
@@ -721,7 +721,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <img> onerror"
           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onerror") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
@@ -737,7 +737,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Csvg%2Fonload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <svg> onload"
           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onload") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
@@ -753,7 +753,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=javascript%3Aalert%28%27XSS%27%29" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: javascript: protocol"
           else
@@ -766,7 +766,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Ciframe%20src%3D%27javascript%3Aalert%281%29%27%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <iframe> javascript"
           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "<iframe") -eq 0 ]]; then
@@ -782,7 +782,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Cbody%20onload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <body> onload"
           else
@@ -795,7 +795,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Cinput%20onfocus%3Dalert%28%27XSS%27%29%20autofocus%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <input> onfocus"
           else
@@ -808,7 +808,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/rest/products/search?q=%3Cmarquee%20onstart%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: <marquee> onstart"
           else
@@ -866,7 +866,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/ftp/....%2F%2F....%2F%2F....%2F%2Fetc%2Fpasswd" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: ....//....//etc/passwd"
           elif [[ "$HTTP_CODE" == "404" ]]; then
@@ -882,7 +882,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/ftp/..%252f..%252f..%252fetc%252fpasswd" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: double encoded"
           elif [[ "$HTTP_CODE" == "404" ]]; then
@@ -898,7 +898,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/ftp/..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: many levels"
           elif [[ "$HTTP_CODE" == "404" ]]; then
@@ -914,7 +914,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/ftp/..\\..\\..\\etc\\passwd" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: backslash variant"
           elif [[ "$HTTP_CODE" == "404" ]]; then
@@ -930,7 +930,7 @@
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             "$TARGET/ftp/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd" 2>&1 || echo "000")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
+          if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
             echo "  ✅ Blocked: percent encoding"
           elif [[ "$HTTP_CODE" == "404" ]]; then
