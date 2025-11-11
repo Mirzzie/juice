@@ -337,13 +337,23 @@ jobs:
           COMPOSEEOF
 
           if ! docker images | grep -q "juice-shop-secure.*latest"; then
-            echo "📦 Building Docker image (first time - this takes ~15 minutes)..."
-            nohup docker compose build --no-cache > /tmp/build.log 2>&1 &
+            echo "📦 Building Docker image..."
+            nohup docker compose build > /tmp/build.log 2>&1 &
             BUILD_PID=$!
             
+            # Wait up to 20 minutes for build
+            BUILD_TIMEOUT=1200
+            BUILD_ELAPSED=0
+            
             while kill -0 $BUILD_PID 2>/dev/null; do
-              echo "Building... ($(date '+%H:%M:%S'))"
+              if [ $BUILD_ELAPSED -ge $BUILD_TIMEOUT ]; then
+                echo "❌ Build timeout after 20 minutes"
+                kill $BUILD_PID 2>/dev/null
+                exit 1
+              fi
+              echo "Building... ($(date '+%H:%M:%S')) - ${BUILD_ELAPSED}s / ${BUILD_TIMEOUT}s"
               sleep 30
+              BUILD_ELAPSED=$((BUILD_ELAPSED + 30))
             done
             
             wait $BUILD_PID
@@ -399,7 +409,7 @@ jobs:
           fi
 
           echo "✅ Deployment successful"
-        timeout-minutes: 25
+        timeout-minutes: 35
 
       - name: Collect Performance Baseline
         run: |
@@ -467,7 +477,7 @@ jobs:
             echo "✅ ZAP scan completed"
           ENDSSH
         continue-on-error: true
-        timeout-minutes: 25
+        timeout-minutes: 35
 
       # NEW: Parse ZAP results for benchmark comparison
       - name: Parse ZAP Results for Benchmark
