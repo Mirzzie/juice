@@ -371,11 +371,11 @@
 
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # Install dependencies and generate lockfile
+          # Install base dependencies (creates lockfile)
           RUN npm install
           
-          # Install security tools and regenerate lockfile to include them
-          RUN npm install --save-exact @aikidosec/firewall dd-trace && npm install
+          # Install security tools (updates package.json and lockfile)
+          RUN npm install @aikidosec/firewall dd-trace
           
           # Verify lockfile exists for Aikido
           RUN ls -la package-lock.json && echo "✅ Lockfile exists for Aikido"
