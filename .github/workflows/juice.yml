@@ -336,53 +336,26 @@ jobs:
                 start_period: 60s
           COMPOSEEOF
 
-          # Verify Dockerfile exists (created by Ansible)
+          # Check if Dockerfile exists
           if [ ! -f Dockerfile ]; then
-            echo "❌ Dockerfile not found! Did you run Ansible (skip_ansible: false)?"
-            echo "Files in /opt/juice-shop:"
+            echo "❌ ERROR: Dockerfile not found!"
+            echo "This means Ansible didn't run. Set skip_ansible: false"
             ls -la /opt/juice-shop/
             exit 1
           fi
 
           if ! docker images | grep -q "juice-shop-secure.*latest"; then
-            echo "📦 Building Docker image..."
-            nohup docker compose build > /tmp/build.log 2>&1 &
-            BUILD_PID=$!
+            echo "📦 Building Docker image (10-15 min first time)..."
+            echo "──────────────────────────────────────────"
             
-            # Wait up to 20 minutes for build
-            BUILD_TIMEOUT=1200
-            BUILD_ELAPSED=0
-            
-            while kill -0 $BUILD_PID 2>/dev/null; do
-              if [ $BUILD_ELAPSED -ge $BUILD_TIMEOUT ]; then
-                echo "❌ Build timeout after 20 minutes"
-                echo "Last 50 lines of build log:"
-                tail -50 /tmp/build.log
-                kill $BUILD_PID 2>/dev/null
-                exit 1
-              fi
-              echo "Building... ($(date '+%H:%M:%S')) - ${BUILD_ELAPSED}s / ${BUILD_TIMEOUT}s"
-              sleep 30
-              BUILD_ELAPSED=$((BUILD_ELAPSED + 30))
-            done
-            
-            wait $BUILD_PID
-            BUILD_EXIT=$?
-            
-            if [ $BUILD_EXIT -ne 0 ]; then
-              echo "❌ Build failed with exit code $BUILD_EXIT"
-              echo "Last 100 lines of build log:"
-              tail -100 /tmp/build.log
+            # Run directly to see output
+            if ! timeout 1200 docker compose build 2>&1 | tee /tmp/build.log; then
+              echo ""
+              echo "❌ Build failed or timed out"
               exit 1
             fi
             
-            wait $BUILD_PID
-            BUILD_EXIT=$?
-            if [ $BUILD_EXIT -ne 0 ]; then
-              echo "❌ Build failed with exit code $BUILD_EXIT"
-              tail -100 /tmp/build.log
-              exit 1
-            fi
+            echo ""
             echo "✅ Build completed"
           else
             echo "✅ Using existing image"
