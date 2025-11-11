@@ -1,3 +1,1101 @@
+# ---
+# - name: Configure EC2 for Juice Shop with RASP vs IAST Benchmarking
+#   hosts: juiceshop
+#   become: true
+#   gather_facts: true
+
+#   vars:
+#     juice_shop_dir: /opt/juice-shop
+#     node_version: "22"
+#     benchmark_tools_dir: /opt/benchmark-tools
+#     zap_version: "2.15.0"
+#     nuclei_version: "3.1.0"
+
+#   vars_files:
+#     - secrets.yml
+
+#   tasks:
+#     # =======================================================================
+#     # SYSTEM PREPARATION
+#     # =======================================================================
+#     - name: Update APT cache
+#       apt:
+#         update_cache: yes
+#         cache_valid_time: 3600
+
+#     - name: Install required system packages
+#       apt:
+#         name:
+#           - curl
+#           - wget
+#           - git
+#           - unzip
+#           - software-properties-common
+#           - apt-transport-https
+#           - ca-certificates
+#           - gnupg
+#           - lsb-release
+#           - jq
+#           - bc
+#           - python3
+#           - python3-pip
+#           - sqlmap
+#         state: present
+
+#     # =======================================================================
+#     # DOCKER INSTALLATION (FIXED)
+#     # =======================================================================
+#     - name: Create keyrings directory
+#       file:
+#         path: /etc/apt/keyrings
+#         state: directory
+#         mode: '0755'
+
+#     - name: Add Docker GPG key (updated method)
+#       ansible.builtin.get_url:
+#         url: https://download.docker.com/linux/ubuntu/gpg
+#         dest: /etc/apt/keyrings/docker.asc
+#         mode: '0644'
+
+#     - name: Add Docker repository
+#       apt_repository:
+#         repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+#         state: present
+#         filename: docker
+
+#     - name: Install Docker
+#       apt:
+#         name:
+#           - docker-ce
+#           - docker-ce-cli
+#           - containerd.io
+#           - docker-buildx-plugin
+#           - docker-compose-plugin
+#         state: present
+#         update_cache: yes
+
+#     - name: Add ubuntu user to docker group
+#       user:
+#         name: ubuntu
+#         groups: docker
+#         append: yes
+
+#     - name: Start and enable Docker service
+#       systemd:
+#         name: docker
+#         state: started
+#         enabled: yes
+
+#     # =======================================================================
+#     # FIREWALL CONFIGURATION (NEW)
+#     # =======================================================================
+#     - name: Install UFW
+#       apt:
+#         name: ufw
+#         state: present
+
+#     - name: Configure UFW defaults
+#       ufw:
+#         direction: "{{ item.direction }}"
+#         policy: "{{ item.policy }}"
+#       loop:
+#         - { direction: 'incoming', policy: 'deny' }
+#         - { direction: 'outgoing', policy: 'allow' }
+
+#     - name: Allow SSH
+#       ufw:
+#         rule: allow
+#         port: '22'
+#         proto: tcp
+
+#     - name: Allow Juice Shop
+#       ufw:
+#         rule: allow
+#         port: '3000'
+#         proto: tcp
+
+#     - name: Allow DataDog Agent
+#       ufw:
+#         rule: allow
+#         port: '8126'
+#         proto: tcp
+
+#     - name: Enable UFW
+#       ufw:
+#         state: enabled
+
+#     # =======================================================================
+#     # DATADOG AGENT INSTALLATION (IMPROVED)
+#     # =======================================================================
+#     - name: Check if DataDog agent is already installed
+#       stat:
+#         path: /etc/datadog-agent/datadog.yaml
+#       register: datadog_installed
+
+#     - name: Download and Install DataDog Agent
+#       block:
+#         - name: Download DataDog installation script
+#           get_url:
+#             url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
+#             dest: /tmp/install_datadog.sh
+#             mode: '0755'
+
+#         - name: Install DataDog Agent
+#           shell: >
+#             DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
+#           args:
+#             creates: /etc/datadog-agent/datadog.yaml
+#           register: datadog_install
+#           retries: 3
+#           delay: 15
+#           until: datadog_install.rc == 0
+
+#         - name: Wait for DataDog config file to be created
+#           wait_for:
+#             path: /etc/datadog-agent/datadog.yaml
+#             timeout: 60
+#       when: not datadog_installed.stat.exists
+
+#     - name: Configure DataDog Agent for APM and IAST
+#       blockinfile:
+#         path: /etc/datadog-agent/datadog.yaml
+#         block: |
+#           apm_config:
+#             enabled: true
+#             apm_non_local_traffic: true
+#             receiver_port: 8126
+#             receiver_timeout: 10
+#             max_traces_per_second: 100
+
+#           appsec_config:
+#             enabled: true
+
+#           runtime_security_config:
+#             enabled: true
+
+#           process_config:
+#             enabled: "true"
+#             scrub_args: true
+
+#           logs_enabled: true
+#           logs_config:
+#             container_collect_all: true
+#         marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS CONFIG"
+#         create: no
+#         backup: yes
+#       notify: Restart DataDog Agent
+
+#     - name: Validate DataDog configuration
+#       command: datadog-agent configcheck
+#       register: dd_config_check
+#       failed_when: false
+#       changed_when: false
+
+#     - name: Display DataDog config validation result
+#       debug:
+#         var: dd_config_check.stdout_lines
+#       when: dd_config_check.stdout_lines is defined
+
+#     - name: Ensure DataDog Agent is running
+#       systemd:
+#         name: datadog-agent
+#         state: started
+#         enabled: yes
+
+#     # =======================================================================
+#     # ATTACK TOOLS INSTALLATION (IMPROVED)
+#     # =======================================================================
+#     - name: Create benchmark tools directory
+#       file:
+#         path: "{{ benchmark_tools_dir }}"
+#         state: directory
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#     # OWASP ZAP Installation
+#     - name: Check if OWASP ZAP is already installed
+#       stat:
+#         path: /opt/ZAP_{{ zap_version }}
+#       register: zap_installed
+
+#     - name: Install OWASP ZAP
+#       block:
+#         - name: Download OWASP ZAP
+#           get_url:
+#             url: "https://github.com/zaproxy/zaproxy/releases/download/v{{ zap_version }}/ZAP_{{ zap_version }}_Linux.tar.gz"
+#             dest: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+#             mode: '0644'
+#             timeout: 300
+#           register: zap_download
+#           retries: 3
+#           delay: 10
+#           until: zap_download is succeeded
+
+#         - name: Extract OWASP ZAP
+#           unarchive:
+#             src: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+#             dest: /opt/
+#             remote_src: yes
+
+#         - name: Create ZAP symlink
+#           file:
+#             src: "/opt/ZAP_{{ zap_version }}/zap.sh"
+#             dest: /usr/local/bin/zaproxy
+#             state: link
+#             force: yes
+#       when: not zap_installed.stat.exists
+#       always:
+#         - name: Clean up ZAP download
+#           file:
+#             path: "/tmp/ZAP_{{ zap_version }}_Linux.tar.gz"
+#             state: absent
+
+#     # Nuclei Installation
+#     - name: Check if Nuclei is already installed
+#       stat:
+#         path: /usr/local/bin/nuclei
+#       register: nuclei_installed
+
+#     - name: Install Nuclei
+#       block:
+#         - name: Download Nuclei
+#           get_url:
+#             url: "https://github.com/projectdiscovery/nuclei/releases/download/v{{ nuclei_version }}/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+#             dest: "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+#             mode: '0644'
+#             timeout: 300
+#           register: nuclei_download
+#           retries: 3
+#           delay: 10
+#           until: nuclei_download is succeeded
+
+#         - name: Extract Nuclei
+#           unarchive:
+#             src: "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+#             dest: /tmp/
+#             remote_src: yes
+
+#         - name: Move Nuclei binary
+#           copy:
+#             src: /tmp/nuclei
+#             dest: /usr/local/bin/nuclei
+#             mode: '0755'
+#             remote_src: yes
+
+#         - name: Update Nuclei templates
+#           command: nuclei -update-templates
+#           become: true
+#           become_user: ubuntu
+#           changed_when: true
+#       when: not nuclei_installed.stat.exists
+#       always:
+#         - name: Clean up Nuclei download files
+#           file:
+#             path: "{{ item }}"
+#             state: absent
+#           loop:
+#             - "/tmp/nuclei_{{ nuclei_version }}_linux_amd64.zip"
+#             - /tmp/nuclei
+
+#     # Python packages - Fixed for Ubuntu 24.04
+#     - name: Install Python attack libraries (system packages)
+#       apt:
+#         name:
+#           - python3-requests
+#           - python3-bs4
+#           - python3-urllib3
+#           - python3-chardet
+#         state: present
+
+#     - name: Install additional Python packages via pip (if needed)
+#       pip:
+#         name:
+#           - colorama
+#           - pandas
+#         break_system_packages: yes
+#       become: true
+#       ignore_errors: true
+
+#     # =======================================================================
+#     # APPLICATION SETUP
+#     # =======================================================================
+#     - name: Create application directory
+#       file:
+#         path: "{{ juice_shop_dir }}"
+#         state: directory
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0755'
+
+#     - name: Clone Juice Shop repository
+#       git:
+#         repo: https://github.com/juice-shop/juice-shop.git
+#         dest: "{{ juice_shop_dir }}"
+#         depth: 1
+#         update: yes
+#         force: yes
+#       become: true
+#       become_user: ubuntu
+
+#     - name: Ensure repo ownership
+#       file:
+#         path: "{{ juice_shop_dir }}"
+#         owner: ubuntu
+#         group: ubuntu
+#         recurse: yes
+
+#     - name: Create tracer.ts
+#       copy:
+#         dest: "{{ juice_shop_dir }}/tracer.ts"
+#         content: |
+#           // tracer.ts - DataDog APM Tracer
+#           import tracer from 'dd-trace';
+#           tracer.init();
+#           export default tracer;
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0644'
+
+#     # =======================================================================
+#     # DOCKERFILE
+#     # =======================================================================
+#     - name: Create Dockerfile
+#       copy:
+#         dest: "{{ juice_shop_dir }}/Dockerfile"
+#         content: |
+#           FROM node:{{ node_version }}-bookworm-slim AS builder
+
+#           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
+#           WORKDIR /juice-shop
+
+#           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          
+#           # Install base dependencies (creates lockfile)
+#           RUN npm install
+          
+#           # Install security tools (updates package.json and lockfile)
+#           RUN npm install @aikidosec/firewall dd-trace
+
+#           COPY tracer.ts ./tracer.ts
+
+#           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
+#               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
+
+#           RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+#               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
+
+#           RUN echo "=== Modified app.ts ===" && head -10 app.ts
+#           RUN echo "=== Modified server.ts ===" && head -10 server.ts
+
+#           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
+          
+#           RUN ls -la build/ && \
+#               echo "=== build/app.js ===" && \
+#               head -30 build/app.js && \
+#               echo "=== Checking instrumentation ===" && \
+#               grep -E "tracer|aikido" build/app.js | head -5
+
+#           RUN cd frontend && npm install --legacy-peer-deps && \
+#               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
+
+#           FROM node:{{ node_version }}-bookworm-slim
+          
+#           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
+#           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
+          
+#           WORKDIR /juice-shop
+
+#           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
+
+#           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
+#               chown -R juiceshop:juiceshop /juice-shop
+
+#           USER juiceshop
+#           EXPOSE 3000
+
+#           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+#             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
+
+#           ENV NODE_ENV=production \
+#               PORT=3000 \
+#               NODE_OPTIONS="--max-old-space-size=3072"
+          
+#           CMD ["npm", "start"]
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0644'
+
+#     # =======================================================================
+#     # DOCKER COMPOSE
+#     # =======================================================================
+#     - name: Create docker-compose.yml template
+#       copy:
+#         dest: "{{ juice_shop_dir }}/docker-compose.yml"
+#         content: |
+#           services:
+#             juice-shop:
+#               build: .
+#               image: juice-shop-secure:latest
+#               container_name: juice-shop
+#               restart: unless-stopped
+#               ports:
+#                 - "3000:3000"
+#               environment:
+#                 NODE_ENV: production
+#                 DD_ENV: dev
+#                 DD_SERVICE: juice-shop
+#                 DD_VERSION: latest
+#                 DD_AGENT_HOST: 172.17.0.1
+#                 DD_TRACE_AGENT_PORT: 8126
+#                 DD_LOGS_INJECTION: "true"
+#                 DD_TRACE_SAMPLE_RATE: "1"
+#                 DD_PROFILING_ENABLED: "true"
+#                 DD_RUNTIME_METRICS_ENABLED: "true"
+#                 DD_DATA_STREAMS_ENABLED: "true"
+#                 DD_APPSEC_ENABLED: "true"
+#                 DD_IAST_ENABLED: "true"
+#                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
+#                 AIKIDO_BLOCK: "false"
+#                 AIKIDO_DEBUG: "true"
+#               env_file:
+#                 - .env
+#               extra_hosts:
+#                 - "host.docker.internal:host-gateway"
+#               healthcheck:
+#                 test: ["CMD", "curl", "-f", "http://localhost:3000"]
+#                 interval: 30s
+#                 timeout: 10s
+#                 retries: 3
+#                 start_period: 60s
+#               logging:
+#                 driver: "json-file"
+#                 options:
+#                   max-size: "10m"
+#                   max-file: "3"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0644'
+
+#     - name: Create .env file
+#       copy:
+#         dest: "{{ juice_shop_dir }}/.env"
+#         content: |
+#           AIKIDO_TOKEN={{ aikido_token }}
+#           AIKIDO_BLOCK=false
+#           AIKIDO_DEBUG=true
+#           DD_ENV=dev
+#           DD_VERSION=latest
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0600'
+#       no_log: true
+
+#     # =======================================================================
+#     # ATTACK SCRIPTS (IMPROVED)
+#     # =======================================================================
+#     - name: Create SQL Injection attack script
+#       copy:
+#         dest: "{{ benchmark_tools_dir }}/sqli_attacks.sh"
+#         content: |
+#           #!/bin/bash
+#           # Note: Not using set -euo pipefail to handle errors gracefully
+          
+#           TARGET=$1
+#           OUTPUT_FILE=$2
+          
+#           if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+#             echo "Usage: $0 <target_url> <output_file>"
+#             exit 1
+#           fi
+          
+#           echo "🎯 Running SQL Injection attacks against $TARGET"
+          
+#           # Wait for application to be ready
+#           APP_READY=false
+#           for i in {1..10}; do
+#             if curl -f -s "$TARGET" > /dev/null 2>&1; then
+#               echo "✅ Application is ready"
+#               APP_READY=true
+#               break
+#             fi
+#             echo "Waiting for application... ($i/10)"
+#             sleep 3
+#           done
+          
+#           if [ "$APP_READY" = false ]; then
+#             echo "❌ Application not responding after 30 seconds"
+#             echo "0,0,0" > "$OUTPUT_FILE"
+#             exit 0
+#           fi
+          
+#           ATTACK_COUNT=0
+#           DETECTED_COUNT=0
+#           BLOCKED_COUNT=0
+          
+#           # Payload 1
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           BODY=$(echo "$RESPONSE" | head -n -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ' OR '1'='1"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: ' OR '1'='1"
+#           else
+#             echo "  ❌ Passed: ' OR '1'='1"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 2
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"' OR 1=1--","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ' OR 1=1--"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: ' OR 1=1--"
+#           else
+#             echo "  ❌ Passed: ' OR 1=1--"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 3
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"' --","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: admin' --"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: admin' --"
+#           else
+#             echo "  ❌ Passed: admin' --"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 4
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"1'"'"' UNION SELECT NULL--","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: UNION SELECT"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: UNION SELECT"
+#           else
+#             echo "  ❌ Passed: UNION SELECT"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 5
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'a'"'"'='"'"'a","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ' OR 'a'='a"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: ' OR 'a'='a"
+#           else
+#             echo "  ❌ Passed: ' OR 'a'='a"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 6
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"1'"'"' AND '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: 1' AND '1'='1"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: 1' AND '1'='1"
+#           else
+#             echo "  ❌ Passed: 1' AND '1'='1"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 7
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"'/*","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: admin'/*"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: admin'/*"
+#           else
+#             echo "  ❌ Passed: admin'/*"
+#           fi
+#           sleep 0.5
+          
+#           # Payload 8
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
+#             -H "Content-Type: application/json" \
+#             -d '{"email":"admin@juice-sh.op'"'"' OR 1=1#","password":"test"}' 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ' OR 1=1#"
+#           elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: ' OR 1=1#"
+#           else
+#             echo "  ❌ Passed: ' OR 1=1#"
+#           fi
+          
+#           echo ""
+#           echo "📊 SQL Injection Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
+#           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#     - name: Create XSS attack script
+#       copy:
+#         dest: "{{ benchmark_tools_dir }}/xss_attacks.sh"
+#         content: |
+#           #!/bin/bash
+          
+#           TARGET=$1
+#           OUTPUT_FILE=$2
+          
+#           if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+#             echo "Usage: $0 <target_url> <output_file>"
+#             exit 1
+#           fi
+          
+#           echo "🎯 Running XSS attacks against $TARGET"
+          
+#           ATTACK_COUNT=0
+#           DETECTED_COUNT=0
+#           BLOCKED_COUNT=0
+          
+#           # XSS Payload 1: <script>alert('XSS')</script>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Cscript%3Ealert%28%27XSS%27%29%3C%2Fscript%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           BODY=$(echo "$RESPONSE" | head -n -1)
+#           if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <script> tag"
+#           elif [[ "$BODY" != *"<script>"* ]] && [[ "$HTTP_CODE" == "200" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: <script> sanitized"
+#           else
+#             echo "  ❌ Passed: <script> not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 2: <img src=x onerror=alert('XSS')>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <img> onerror"
+#           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onerror") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: <img> sanitized"
+#           else
+#             echo "  ❌ Passed: <img> onerror not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 3: <svg/onload=alert('XSS')>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Csvg%2Fonload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <svg> onload"
+#           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onload") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: <svg> sanitized"
+#           else
+#             echo "  ❌ Passed: <svg> onload not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 4: javascript:alert('XSS')
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=javascript%3Aalert%28%27XSS%27%29" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: javascript: protocol"
+#           else
+#             echo "  ❌ Passed: javascript: protocol not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 5: <iframe src='javascript:alert(1)'>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Ciframe%20src%3D%27javascript%3Aalert%281%29%27%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <iframe> javascript"
+#           elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "<iframe") -eq 0 ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: <iframe> sanitized"
+#           else
+#             echo "  ❌ Passed: <iframe> not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 6: <body onload=alert('XSS')>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Cbody%20onload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <body> onload"
+#           else
+#             echo "  ❌ Passed: <body> onload not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 7: <input onfocus=alert('XSS') autofocus>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Cinput%20onfocus%3Dalert%28%27XSS%27%29%20autofocus%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <input> onfocus"
+#           else
+#             echo "  ❌ Passed: <input> onfocus not prevented"
+#           fi
+#           sleep 0.5
+          
+#           # XSS Payload 8: <marquee onstart=alert('XSS')>
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/rest/products/search?q=%3Cmarquee%20onstart%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: <marquee> onstart"
+#           else
+#             echo "  ❌ Passed: <marquee> onstart not prevented"
+#           fi
+          
+#           echo ""
+#           echo "📊 XSS Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
+#           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#     - name: Create Path Traversal attack script
+#       copy:
+#         dest: "{{ benchmark_tools_dir }}/path_traversal.sh"
+#         content: |
+#           #!/bin/bash
+          
+#           TARGET=$1
+#           OUTPUT_FILE=$2
+          
+#           if [ -z "$TARGET" ] || [ -z "$OUTPUT_FILE" ]; then
+#             echo "Usage: $0 <target_url> <output_file>"
+#             exit 1
+#           fi
+          
+#           echo "🎯 Running Path Traversal attacks against $TARGET"
+          
+#           ATTACK_COUNT=0
+#           DETECTED_COUNT=0
+#           BLOCKED_COUNT=0
+          
+#           # Path Traversal 1: ../../../etc/passwd
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           BODY=$(echo "$RESPONSE" | head -n -1)
+#           if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ../../../etc/passwd"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           elif [[ "$BODY" == *"root:"* ]]; then
+#             echo "  ❌ Passed: /etc/passwd accessed!"
+#           else
+#             echo "  ⚠️  Inconclusive: ../../../etc/passwd"
+#           fi
+#           sleep 0.5
+          
+#           # Path Traversal 2: ....//....//....//etc/passwd
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/....%2F%2F....%2F%2F....%2F%2Fetc%2Fpasswd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: ....//....//etc/passwd"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           else
+#             echo "  ❌ Passed: ....//....//etc/passwd"
+#           fi
+#           sleep 0.5
+          
+#           # Path Traversal 3: Double URL encoding
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/..%252f..%252f..%252fetc%252fpasswd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: double encoded"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           else
+#             echo "  ❌ Passed: double encoded"
+#           fi
+#           sleep 0.5
+          
+#           # Path Traversal 4: Many levels deep
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: many levels"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           else
+#             echo "  ❌ Passed: many levels"
+#           fi
+#           sleep 0.5
+          
+#           # Path Traversal 5: Backslash variant
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/..\\..\\..\\etc\\passwd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: backslash variant"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           else
+#             echo "  ❌ Passed: backslash variant"
+#           fi
+#           sleep 0.5
+          
+#           # Path Traversal 6: Percent encoding
+#           ATTACK_COUNT=$((ATTACK_COUNT + 1))
+#           RESPONSE=$(curl -s -w "\n%{http_code}" \
+#             "$TARGET/ftp/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd" 2>&1 || echo "000")
+#           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+#           if [[ "$HTTP_CODE" == "000" ]] || [[ "$HTTP_CODE" == "403" ]]; then
+#             BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+#             echo "  ✅ Blocked: percent encoding"
+#           elif [[ "$HTTP_CODE" == "404" ]]; then
+#             DETECTED_COUNT=$((DETECTED_COUNT + 1))
+#             echo "  ⚠️  Detected: Path blocked (404)"
+#           else
+#             echo "  ❌ Passed: percent encoding"
+#           fi
+          
+#           echo ""
+#           echo "📊 Path Traversal Results: $ATTACK_COUNT attacks, $DETECTED_COUNT detected, $BLOCKED_COUNT blocked"
+#           echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#     - name: Create metrics collection script
+#       copy:
+#         dest: "{{ benchmark_tools_dir }}/collect_metrics.sh"
+#         content: |
+#           #!/bin/bash
+          
+#           CONFIG=$1
+#           RESULTS_DIR=$2
+#           TARGET="http://localhost:3000"
+#           SAMPLES=100
+          
+#           if [ -z "$CONFIG" ] || [ -z "$RESULTS_DIR" ]; then
+#             echo "Usage: $0 <config_name> <results_dir>"
+#             exit 1
+#           fi
+          
+#           echo "📊 Collecting performance metrics for $CONFIG..."
+          
+#           # Test if application is responding
+#           if ! curl -s -f "$TARGET" > /dev/null 2>&1; then
+#             echo "⚠️  Application not responding, skipping metrics"
+#             echo "METRIC,VALUE" > "$RESULTS_DIR/performance_metrics.csv"
+#             echo "AVG_LATENCY_MS,0" >> "$RESULTS_DIR/performance_metrics.csv"
+#             echo "SUCCESS_RATE_PERCENT,0" >> "$RESULTS_DIR/performance_metrics.csv"
+#             echo "SAMPLES,0" >> "$RESULTS_DIR/performance_metrics.csv"
+#             exit 0
+#           fi
+          
+#           TOTAL_TIME=0
+#           SUCCESS_COUNT=0
+          
+#           for i in $(seq 1 $SAMPLES); do
+#             START=$(date +%s%N)
+#             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/rest/products/search?q=apple" 2>/dev/null || echo "000")
+#             END=$(date +%s%N)
+            
+#             if [ "$HTTP_CODE" = "200" ]; then
+#               LATENCY=$(( (END - START) / 1000000 ))
+#               TOTAL_TIME=$((TOTAL_TIME + LATENCY))
+#               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+#             fi
+            
+#             sleep 0.1
+#           done
+          
+#           if [ $SUCCESS_COUNT -gt 0 ]; then
+#             AVG_LATENCY=$((TOTAL_TIME / SUCCESS_COUNT))
+#           else
+#             AVG_LATENCY=0
+#           fi
+          
+#           SUCCESS_RATE=$(echo "scale=2; $SUCCESS_COUNT * 100 / $SAMPLES" | bc 2>/dev/null || echo "0")
+          
+#           cat > "$RESULTS_DIR/performance_metrics.csv" << EOF
+#           METRIC,VALUE
+#           AVG_LATENCY_MS,$AVG_LATENCY
+#           SUCCESS_RATE_PERCENT,$SUCCESS_RATE
+#           SAMPLES,$SAMPLES
+#           EOF
+          
+#           echo "✅ Metrics collected - Latency: ${AVG_LATENCY}ms, Success: ${SUCCESS_RATE}%"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#     - name: Create master attack orchestrator
+#       copy:
+#         dest: "{{ benchmark_tools_dir }}/run_all_attacks.sh"
+#         content: |
+#           #!/bin/bash
+          
+#           TARGET=$1
+#           CONFIG_NAME=$2
+#           RESULTS_DIR=$3
+          
+#           if [ -z "$TARGET" ] || [ -z "$CONFIG_NAME" ] || [ -z "$RESULTS_DIR" ]; then
+#             echo "Usage: $0 <target_url> <config_name> <results_dir>"
+#             exit 1
+#           fi
+          
+#           echo "════════════════════════════════════════"
+#           echo "🚀 Running Attack Suite"
+#           echo "════════════════════════════════════════"
+#           echo "Target: $TARGET"
+#           echo "Configuration: $CONFIG_NAME"
+#           echo "Results: $RESULTS_DIR"
+#           echo "════════════════════════════════════════"
+          
+#           mkdir -p "$RESULTS_DIR"
+          
+#           START_TIME=$(date +%s)
+          
+#           # Run SQL injection attacks
+#           if [ -x {{ benchmark_tools_dir }}/sqli_attacks.sh ]; then
+#             {{ benchmark_tools_dir }}/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv" || echo "⚠️  SQLi attacks had issues"
+#           else
+#             echo "⚠️  sqli_attacks.sh not found"
+#             echo "0,0,0" > "$RESULTS_DIR/sqli_results.csv"
+#           fi
+          
+#           # Run XSS attacks
+#           if [ -x {{ benchmark_tools_dir }}/xss_attacks.sh ]; then
+#             {{ benchmark_tools_dir }}/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv" || echo "⚠️  XSS attacks had issues"
+#           else
+#             echo "⚠️  xss_attacks.sh not found"
+#             echo "0,0,0" > "$RESULTS_DIR/xss_results.csv"
+#           fi
+          
+#           # Run path traversal attacks
+#           if [ -x {{ benchmark_tools_dir }}/path_traversal.sh ]; then
+#             {{ benchmark_tools_dir }}/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv" || echo "⚠️  Path traversal attacks had issues"
+#           else
+#             echo "⚠️  path_traversal.sh not found"
+#             echo "0,0,0" > "$RESULTS_DIR/path_results.csv"
+#           fi
+          
+#           END_TIME=$(date +%s)
+#           DURATION=$((END_TIME - START_TIME))
+          
+#           # Create summary CSV
+#           echo "ATTACK_TYPE,TOTAL,DETECTED,BLOCKED" > "$RESULTS_DIR/summary.csv"
+          
+#           if [ -f "$RESULTS_DIR/sqli_results.csv" ]; then
+#             echo -n "SQL_INJECTION," >> "$RESULTS_DIR/summary.csv"
+#             cat "$RESULTS_DIR/sqli_results.csv" >> "$RESULTS_DIR/summary.csv"
+#           fi
+          
+#           if [ -f "$RESULTS_DIR/xss_results.csv" ]; then
+#             echo -n "XSS," >> "$RESULTS_DIR/summary.csv"
+#             cat "$RESULTS_DIR/xss_results.csv" >> "$RESULTS_DIR/summary.csv"
+#           fi
+          
+#           if [ -f "$RESULTS_DIR/path_results.csv" ]; then
+#             echo -n "PATH_TRAVERSAL," >> "$RESULTS_DIR/summary.csv"
+#             cat "$RESULTS_DIR/path_results.csv" >> "$RESULTS_DIR/summary.csv"
+#           fi
+          
+#           echo "DURATION_SECONDS,$DURATION" >> "$RESULTS_DIR/summary.csv"
+          
+#           echo ""
+#           echo "✅ Attack suite completed in ${DURATION}s"
+#           echo "📊 Results: $RESULTS_DIR/summary.csv"
+#         owner: ubuntu
+#         group: ubuntu
+#         mode: '0750'
+
+#   handlers:
+#     - name: Restart DataDog Agent
+#       systemd:
+#         name: datadog-agent
+#         state: restarted
+
 ---
 - name: Configure EC2 for Juice Shop with RASP vs IAST Benchmarking
   hosts: juiceshop
@@ -1089,6 +2187,234 @@
         owner: ubuntu
         group: ubuntu
         mode: '0750'
+
+    # =======================================================================
+    # MONITORING STACK (PROMETHEUS + GRAFANA)
+    # =======================================================================
+    - name: Create monitoring directory
+      file:
+        path: /opt/monitoring
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Install Prometheus exporter dependencies
+      pip:
+        name:
+          - prometheus-client
+        state: present
+        break_system_packages: yes
+
+    - name: Create Prometheus exporter script
+      copy:
+        dest: /opt/monitoring/prometheus_exporter.py
+        content: |
+          #!/usr/bin/env python3
+          """Prometheus Exporter for RASP vs IAST Benchmark Metrics"""
+          
+          from prometheus_client import start_http_server, Gauge, Counter, Histogram
+          import time, csv, os, json
+          from datetime import datetime
+          
+          # Metrics
+          attacks_total = Counter('security_attacks_total', 'Total attacks', ['config', 'attack_type'])
+          attacks_detected = Counter('security_attacks_detected', 'Detected attacks', ['config', 'attack_type', 'source'])
+          attacks_blocked = Counter('security_attacks_blocked', 'Blocked attacks', ['config', 'attack_type', 'source'])
+          attacks_passed = Counter('security_attacks_passed', 'Passed attacks', ['config', 'attack_type'])
+          detection_rate = Gauge('security_detection_rate', 'Detection rate', ['config', 'attack_type'])
+          blocking_rate = Gauge('security_blocking_rate', 'Blocking rate', ['config', 'attack_type'])
+          false_positive_rate = Gauge('security_false_positive_rate', 'False positive rate', ['config'])
+          zap_alerts_total = Counter('zap_alerts_total', 'ZAP alerts', ['config', 'risk_level'])
+          rasp_advantage = Gauge('security_rasp_advantage', 'RASP advantage %', ['metric_type'])
+          
+          def parse_csv_results(config, results_dir):
+              files = {'sqli': f'{results_dir}/sqli_results.csv', 'xss': f'{results_dir}/xss_results.csv', 'path_traversal': f'{results_dir}/path_results.csv'}
+              for attack_type, filepath in files.items():
+                  if not os.path.exists(filepath): continue
+                  try:
+                      with open(filepath, 'r') as f:
+                          reader = csv.DictReader(f)
+                          total = detected = blocked = passed = 0
+                          for row in reader:
+                              total += 1
+                              status = row.get('STATUS', '').upper()
+                              if status == 'DETECTED': detected += 1; attacks_detected.labels(config=config, attack_type=attack_type, source='custom_script').inc()
+                              elif status == 'BLOCKED': blocked += 1; attacks_blocked.labels(config=config, attack_type=attack_type, source='custom_script').inc()
+                              elif status == 'PASSED': passed += 1; attacks_passed.labels(config=config, attack_type=attack_type).inc()
+                          attacks_total.labels(config=config, attack_type=attack_type).inc(total)
+                          if total > 0:
+                              detection_rate.labels(config=config, attack_type=attack_type).set((detected + blocked) / total)
+                              blocking_rate.labels(config=config, attack_type=attack_type).set(blocked / total)
+                  except Exception as e: print(f"Error parsing {filepath}: {e}")
+          
+          def parse_zap_results(config, results_dir):
+              zap_file = f'{results_dir}/zap-report.json'
+              if not os.path.exists(zap_file): return
+              try:
+                  with open(zap_file, 'r') as f: data = json.load(f)
+                  site = data.get('site', [{}])[0]
+                  alerts = site.get('alerts', [])
+                  for alert in alerts:
+                      risk = alert.get('riskdesc', 'Unknown').split()[0].lower()
+                      count = len(alert.get('instances', []))
+                      zap_alerts_total.labels(config=config, risk_level=risk).inc(count)
+              except Exception as e: print(f"Error parsing ZAP: {e}")
+          
+          def monitor_results(results_base_dir='/tmp/benchmark-results', interval=10):
+              print(f"Starting Prometheus exporter on port 8000")
+              start_http_server(8000)
+              configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
+              while True:
+                  try:
+                      for config in configs:
+                          results_dir = f'{results_base_dir}/{config}'
+                          if not os.path.exists(results_dir): continue
+                          parse_csv_results(config, results_dir)
+                          parse_zap_results(config, results_dir)
+                      print(f"Metrics updated at {datetime.now()}")
+                  except Exception as e: print(f"Error: {e}")
+                  time.sleep(interval)
+          
+          if __name__ == '__main__':
+              monitor_results('/tmp/benchmark-results', 5)
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: /opt/monitoring/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 5s
+            evaluation_interval: 5s
+          
+          scrape_configs:
+            - job_name: 'benchmark-exporter'
+              static_configs:
+                - targets: ['172.17.0.1:8000']
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Create Grafana dashboard JSON
+      copy:
+        dest: /opt/monitoring/grafana-dashboard.json
+        content: |
+          {
+            "dashboard": {
+              "title": "RASP vs IAST Security Benchmark",
+              "panels": [
+                {"id": 1, "title": "Detection Rate by Config", "type": "bargauge", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}},
+                {"id": 2, "title": "Blocking Rate by Config", "type": "bargauge", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}},
+                {"id": 3, "title": "Real-Time Attack Stream", "type": "timeseries", "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8}},
+                {"id": 4, "title": "ZAP Vulnerabilities", "type": "piechart", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}}
+              ]
+            }
+          }
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Create monitoring docker-compose file
+      copy:
+        dest: /opt/monitoring/docker-compose.yml
+        content: |
+          version: '3.8'
+          services:
+            prometheus:
+              image: prom/prometheus:latest
+              container_name: prometheus
+              restart: unless-stopped
+              ports:
+                - "9090:9090"
+              volumes:
+                - ./prometheus.yml:/etc/prometheus/prometheus.yml
+                - prometheus-data:/prometheus
+              command:
+                - '--config.file=/etc/prometheus/prometheus.yml'
+                - '--storage.tsdb.retention.time=7d'
+              network_mode: host
+            
+            grafana:
+              image: grafana/grafana:latest
+              container_name: grafana
+              restart: unless-stopped
+              ports:
+                - "3001:3000"
+              environment:
+                - GF_SECURITY_ADMIN_USER=admin
+                - GF_SECURITY_ADMIN_PASSWORD=rasp_vs_iast_2024
+                - GF_USERS_ALLOW_SIGN_UP=false
+              volumes:
+                - grafana-data:/var/lib/grafana
+              depends_on:
+                - prometheus
+              network_mode: host
+          
+          volumes:
+            prometheus-data:
+            grafana-data:
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Create monitoring startup script
+      copy:
+        dest: /opt/monitoring/start_monitoring.sh
+        content: |
+          #!/bin/bash
+          set -e
+          
+          echo "🚀 Starting Monitoring Stack..."
+          
+          cd /opt/monitoring
+          
+          # Start exporter in background
+          echo "📊 Starting Prometheus exporter..."
+          nohup python3 prometheus_exporter.py > /tmp/exporter.log 2>&1 &
+          echo $! > /tmp/exporter.pid
+          
+          # Start Prometheus and Grafana
+          echo "📈 Starting Prometheus and Grafana..."
+          docker-compose up -d
+          
+          sleep 5
+          
+          echo ""
+          echo "✅ Monitoring Stack Ready!"
+          echo "   Grafana:    http://$(curl -s ifconfig.me):3001"
+          echo "   Prometheus: http://$(curl -s ifconfig.me):9090"
+          echo "   Exporter:   http://localhost:8000/metrics"
+          echo ""
+          echo "   Login: admin / rasp_vs_iast_2024"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create monitoring stop script
+      copy:
+        dest: /opt/monitoring/stop_monitoring.sh
+        content: |
+          #!/bin/bash
+          
+          echo "🛑 Stopping Monitoring Stack..."
+          
+          # Stop exporter
+          if [ -f /tmp/exporter.pid ]; then
+            kill $(cat /tmp/exporter.pid) 2>/dev/null || true
+            rm /tmp/exporter.pid
+          fi
+          
+          # Stop Docker containers
+          cd /opt/monitoring
+          docker-compose down
+          
+          echo "✅ Monitoring stopped"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
 
   handlers:
     - name: Restart DataDog Agent

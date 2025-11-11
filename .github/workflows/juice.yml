@@ -30,7 +30,7 @@ on:
         description: "Include ZAP comprehensive scan (slower but thorough)"
         required: false
         type: boolean
-        default: false
+        default: true
       zap_scan_depth:
         description: "ZAP scan depth"
         required: false
@@ -765,10 +765,91 @@ jobs:
           retention-days: 90
         continue-on-error: true
 
+  # NEW: Deploy and start monitoring stack
+  deploy-monitoring:
+    name: 📊 Deploy Monitoring Stack (Prometheus + Grafana)
+    runs-on: ubuntu-latest
+    needs: comparative-analysis
+    if: always()
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Start Monitoring Stack
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "════════════════════════════════════════"
+            echo "📊 Starting Monitoring Stack"
+            echo "════════════════════════════════════════"
+            
+            # Check if monitoring is already configured
+            if [ ! -f /opt/monitoring/start_monitoring.sh ]; then
+              echo "❌ Monitoring not configured. Run Ansible with skip_ansible: false"
+              exit 1
+            fi
+            
+            # Start monitoring
+            cd /opt/monitoring
+            ./start_monitoring.sh
+            
+            # Wait for services
+            sleep 10
+            
+            # Verify services are running
+            if docker ps | grep -q prometheus && docker ps | grep -q grafana; then
+              echo "✅ Monitoring stack is running"
+              echo ""
+              echo "📊 Access Points:"
+              echo "   Grafana:    http://$(curl -s ifconfig.me):3001"
+              echo "   Prometheus: http://$(curl -s ifconfig.me):9090"
+              echo ""
+              echo "   Login: admin / rasp_vs_iast_2024"
+              echo ""
+              echo "⏰ Monitoring will run for 2 hours to collect data"
+              echo "   Then auto-stop to save costs"
+            else
+              echo "❌ Monitoring failed to start"
+              exit 1
+            fi
+          ENDSSH
+
+      - name: Create Monitoring Info Comment
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const ec2Ip = process.env.EC2_INSTANCE_IP;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📊 Monitoring Stack Deployed
+              
+              Real-time dashboards are now available:
+              
+              - **Grafana**: http://${ec2Ip}:3001
+              - **Prometheus**: http://${ec2Ip}:9090
+              
+              **Login Credentials:**
+              - Username: \`admin\`
+              - Password: \`rasp_vs_iast_2024\`
+              
+              **Dashboard:** Navigate to Dashboards → RASP vs IAST Security Benchmark
+              
+              ⏰ Monitoring will run for 2 hours, then auto-stop to save costs.
+              
+              💡 To stop manually: SSH into EC2 and run \`/opt/monitoring/stop_monitoring.sh\``
+            });
+        continue-on-error: true
+
   cleanup:
     name: 🧹 Cleanup
     runs-on: ubuntu-latest
-    needs: [benchmark-tests, comparative-analysis]
+    needs: [benchmark-tests, comparative-analysis, deploy-monitoring]
     if: always()
     steps:
       - name: Setup SSH
@@ -783,5 +864,9 @@ jobs:
           ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             rm -rf /tmp/benchmark-results /tmp/deploy.sh
             echo "✅ Cleanup complete"
+            echo ""
+            echo "ℹ️  Monitoring stack is still running"
+            echo "   Access: http://$(curl -s ifconfig.me):3001"
+            echo "   To stop: /opt/monitoring/stop_monitoring.sh"
           ENDSSH
         continue-on-error: true
