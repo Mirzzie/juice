@@ -376,9 +376,6 @@
           
           # Install security tools (updates package.json and lockfile)
           RUN npm install @aikidosec/firewall dd-trace
-          
-          # Verify lockfile exists for Aikido
-          RUN ls -la package-lock.json && echo "✅ Lockfile exists for Aikido"
 
           COPY tracer.ts ./tracer.ts
 
