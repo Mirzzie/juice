@@ -120,6 +120,24 @@
         port: '8126'
         proto: tcp
 
+    - name: Allow Prometheus Exporter
+      ufw:
+        rule: allow
+        port: '8000'
+        proto: tcp
+
+    - name: Allow Prometheus
+      ufw:
+        rule: allow
+        port: '9090'
+        proto: tcp
+
+    - name: Allow Grafana
+      ufw:
+        rule: allow
+        port: '3001'
+        proto: tcp
+
     - name: Enable UFW
       ufw:
         state: enabled
@@ -313,6 +331,7 @@
         name:
           - colorama
           - pandas
+          - prometheus-client
         break_system_packages: yes
       become: true
       ignore_errors: true
@@ -1091,6 +1110,305 @@
         mode: '0750'
 
     # =======================================================================
+    # CONTINUOUS ATTACK AUTOMATION SYSTEM
+    # =======================================================================
+    - name: Create continuous benchmark orchestrator
+      copy:
+        dest: /opt/benchmark-tools/continuous_benchmark.py
+        content: |
+          #!/usr/bin/env python3
+          """
+          Continuous Benchmark Orchestrator
+          Rotates through configurations and runs attacks continuously
+          """
+          
+          import subprocess
+          import time
+          import random
+          import json
+          import os
+          from datetime import datetime, timedelta
+          import logging
+          import signal
+          import sys
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s',
+              handlers=[
+                  logging.FileHandler('/var/log/continuous_benchmark.log'),
+                  logging.StreamHandler()
+              ]
+          )
+          logger = logging.getLogger(__name__)
+          
+          class ContinuousBenchmark:
+              def __init__(self):
+                  self.configurations = [
+                      {
+                          'name': 'baseline',
+                          'display_name': 'Baseline (No Protection)',
+                          'dd_appsec': 'false',
+                          'dd_iast': 'false',
+                          'aikido_block': 'false',
+                          'aikido_enabled': 'false'
+                      },
+                      {
+                          'name': 'iast-only',
+                          'display_name': 'DataDog IAST Only',
+                          'dd_appsec': 'true',
+                          'dd_iast': 'true',
+                          'aikido_block': 'false',
+                          'aikido_enabled': 'false'
+                      },
+                      {
+                          'name': 'rasp-monitor',
+                          'display_name': 'Aikido RASP (Monitoring)',
+                          'dd_appsec': 'false',
+                          'dd_iast': 'false',
+                          'aikido_block': 'false',
+                          'aikido_enabled': 'true'
+                      },
+                      {
+                          'name': 'rasp-block',
+                          'display_name': 'Aikido RASP (Blocking)',
+                          'dd_appsec': 'false',
+                          'dd_iast': 'false',
+                          'aikido_block': 'true',
+                          'aikido_enabled': 'true'
+                      }
+                  ]
+                  self.current_config_index = 0
+                  self.running = True
+                  self.results_base = '/var/lib/benchmark-results'
+                  self.rotation_interval = 3600  # 1 hour per configuration
+                  self.attack_interval = 300  # 5 minutes between attack rounds
+                  
+                  # Create results directory
+                  os.makedirs(self.results_base, exist_ok=True)
+                  
+                  # Setup signal handlers
+                  signal.signal(signal.SIGTERM, self.handle_shutdown)
+                  signal.signal(signal.SIGINT, self.handle_shutdown)
+              
+              def handle_shutdown(self, signum, frame):
+                  logger.info("Received shutdown signal, gracefully stopping...")
+                  self.running = False
+                  sys.exit(0)
+              
+              def deploy_configuration(self, config):
+                  """Deploy a specific configuration"""
+                  logger.info(f"Deploying configuration: {config['display_name']}")
+                  
+                  # Update docker-compose
+                  compose_content = f"""
+          services:
+            juice-shop:
+              build: /opt/juice-shop
+              image: juice-shop-secure:latest
+              container_name: juice-shop
+              restart: unless-stopped
+              ports:
+                - "3000:3000"
+              environment:
+                NODE_ENV: production
+                DD_ENV: {config['name']}
+                DD_SERVICE: juice-shop
+                DD_VERSION: latest
+                DD_AGENT_HOST: 172.17.0.1
+                DD_TRACE_AGENT_PORT: 8126
+                DD_LOGS_INJECTION: "true"
+                DD_TRACE_SAMPLE_RATE: "1"
+                DD_PROFILING_ENABLED: "true"
+                DD_RUNTIME_METRICS_ENABLED: "true"
+                DD_APPSEC_ENABLED: "{config['dd_appsec']}"
+                DD_IAST_ENABLED: "{config['dd_iast']}"
+                AIKIDO_TOKEN: "${{AIKIDO_TOKEN}}"
+                AIKIDO_BLOCK: "{config['aikido_block']}"
+                AIKIDO_DEBUG: "true"
+                AIKIDO_ENABLED: "{config['aikido_enabled']}"
+              env_file:
+                - /opt/juice-shop/.env
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:3000"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 60s
+          """
+                  
+                  with open('/opt/juice-shop/docker-compose.yml', 'w') as f:
+                      f.write(compose_content)
+                  
+                  # Restart application
+                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], 
+                                capture_output=True)
+                  time.sleep(5)
+                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d'], 
+                                capture_output=True)
+                  
+                  # Wait for application to be ready
+                  logger.info("Waiting for application to be ready...")
+                  for i in range(30):
+                      try:
+                          result = subprocess.run(['curl', '-f', '-s', 'http://localhost:3000'], 
+                                                capture_output=True, timeout=5)
+                          if result.returncode == 0:
+                              logger.info(f"Application ready with {config['name']} configuration")
+                              return True
+                      except:
+                          pass
+                      time.sleep(5)
+                  
+                  logger.warning("Application failed to start properly")
+                  return False
+              
+              def run_attack_suite(self, config_name):
+                  """Run complete attack suite"""
+                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  results_dir = f"{self.results_base}/{config_name}/{timestamp}"
+                  os.makedirs(results_dir, exist_ok=True)
+                  
+                  logger.info(f"Running attack suite for {config_name} at {timestamp}")
+                  
+                  attacks = [
+                      ('/opt/benchmark-tools/sqli_attacks.sh', 'sqli_results.csv'),
+                      ('/opt/benchmark-tools/xss_attacks.sh', 'xss_results.csv'),
+                      ('/opt/benchmark-tools/path_traversal.sh', 'path_results.csv')
+                  ]
+                  
+                  # Randomize attack order
+                  random.shuffle(attacks)
+                  
+                  for attack_script, output_file in attacks:
+                      if os.path.exists(attack_script):
+                          try:
+                              subprocess.run([attack_script, 'http://localhost:3000', 
+                                            f'{results_dir}/{output_file}'], 
+                                           timeout=300, capture_output=True)
+                              logger.info(f"Completed {attack_script}")
+                          except subprocess.TimeoutExpired:
+                              logger.warning(f"Attack {attack_script} timed out")
+                          except Exception as e:
+                              logger.error(f"Error running {attack_script}: {e}")
+                      
+                      # Random delay between attacks (30-90 seconds)
+                      time.sleep(random.randint(30, 90))
+                  
+                  # Collect performance metrics
+                  if os.path.exists('/opt/benchmark-tools/collect_metrics.sh'):
+                      subprocess.run(['/opt/benchmark-tools/collect_metrics.sh', 
+                                    config_name, results_dir], 
+                                   capture_output=True)
+                  
+                  # Create summary
+                  self.create_summary(config_name, results_dir)
+                  
+                  # Update latest symlink
+                  latest_link = f"{self.results_base}/{config_name}/latest"
+                  if os.path.lexists(latest_link):
+                      os.remove(latest_link)
+                  os.symlink(results_dir, latest_link)
+                  
+                  return results_dir
+              
+              def create_summary(self, config_name, results_dir):
+                  """Create summary JSON for Prometheus exporter"""
+                  summary = {
+                      'configuration': config_name,
+                      'timestamp': datetime.now().isoformat(),
+                      'attacks': {}
+                  }
+                  
+                  # Parse attack results
+                  for attack_type, filename in [('sqli', 'sqli_results.csv'), 
+                                               ('xss', 'xss_results.csv'),
+                                               ('path_traversal', 'path_results.csv')]:
+                      filepath = f"{results_dir}/{filename}"
+                      if os.path.exists(filepath):
+                          try:
+                              with open(filepath, 'r') as f:
+                                  data = f.read().strip().split(',')
+                                  if len(data) >= 3:
+                                      summary['attacks'][attack_type] = {
+                                          'total': int(data[0]),
+                                          'detected': int(data[1]),
+                                          'blocked': int(data[2])
+                                      }
+                          except:
+                              pass
+                  
+                  # Save summary
+                  with open(f"{results_dir}/summary.json", 'w') as f:
+                      json.dump(summary, f, indent=2)
+              
+              def run_continuous_benchmark(self):
+                  """Main loop for continuous benchmarking"""
+                  logger.info("Starting continuous benchmark system")
+                  
+                  while self.running:
+                      config = self.configurations[self.current_config_index]
+                      
+                      # Deploy configuration
+                      if self.deploy_configuration(config):
+                          # Run attacks for this configuration period
+                          config_start_time = time.time()
+                          attack_count = 0
+                          
+                          while (time.time() - config_start_time) < self.rotation_interval and self.running:
+                              # Run attack suite
+                              results_dir = self.run_attack_suite(config['name'])
+                              attack_count += 1
+                              
+                              logger.info(f"Completed attack round {attack_count} for {config['name']}")
+                              
+                              # Wait before next attack round
+                              if self.running:
+                                  time.sleep(self.attack_interval)
+                      
+                      # Move to next configuration
+                      self.current_config_index = (self.current_config_index + 1) % len(self.configurations)
+                      logger.info(f"Rotating to next configuration: {self.configurations[self.current_config_index]['name']}")
+          
+          if __name__ == '__main__':
+              benchmark = ContinuousBenchmark()
+              benchmark.run_continuous_benchmark()
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create systemd service for continuous benchmark
+      copy:
+        dest: /etc/systemd/system/continuous-benchmark.service
+        content: |
+          [Unit]
+          Description=Continuous Security Benchmark Service
+          After=network.target docker.service datadog-agent.service
+          Wants=docker.service
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          Group=ubuntu
+          WorkingDirectory=/opt/benchmark-tools
+          ExecStart=/usr/bin/python3 /opt/benchmark-tools/continuous_benchmark.py
+          Restart=always
+          RestartSec=30
+          StandardOutput=append:/var/log/continuous_benchmark.log
+          StandardError=append:/var/log/continuous_benchmark_error.log
+          
+          # Environment
+          Environment="AIKIDO_TOKEN={{ aikido_token }}"
+          Environment="DD_API_KEY={{ datadog_api_key }}"
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    # =======================================================================
     # MONITORING STACK (PROMETHEUS + GRAFANA)
     # =======================================================================
     - name: Create monitoring directory
@@ -1101,85 +1419,207 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Install Prometheus exporter dependencies
-      pip:
-        name:
-          - prometheus-client
-        state: present
-        break_system_packages: yes
-
-    - name: Create Prometheus exporter script
+    - name: Create enhanced Prometheus exporter for continuous data
       copy:
-        dest: /opt/monitoring/prometheus_exporter.py
+        dest: /opt/monitoring/prometheus_exporter_enhanced.py
         content: |
           #!/usr/bin/env python3
-          """Prometheus Exporter for RASP vs IAST Benchmark Metrics"""
+          """Enhanced Prometheus Exporter for Continuous Benchmarking"""
           
-          from prometheus_client import start_http_server, Gauge, Counter, Histogram
-          import time, csv, os, json
-          from datetime import datetime
+          from prometheus_client import start_http_server, Gauge, Counter, Histogram, Summary
+          import time
+          import json
+          import os
+          from datetime import datetime, timedelta
+          from pathlib import Path
+          import logging
           
-          # Metrics
-          attacks_total = Counter('security_attacks_total', 'Total attacks', ['config', 'attack_type'])
-          attacks_detected = Counter('security_attacks_detected', 'Detected attacks', ['config', 'attack_type', 'source'])
-          attacks_blocked = Counter('security_attacks_blocked', 'Blocked attacks', ['config', 'attack_type', 'source'])
-          attacks_passed = Counter('security_attacks_passed', 'Passed attacks', ['config', 'attack_type'])
-          detection_rate = Gauge('security_detection_rate', 'Detection rate', ['config', 'attack_type'])
-          blocking_rate = Gauge('security_blocking_rate', 'Blocking rate', ['config', 'attack_type'])
-          false_positive_rate = Gauge('security_false_positive_rate', 'False positive rate', ['config'])
-          zap_alerts_total = Counter('zap_alerts_total', 'ZAP alerts', ['config', 'risk_level'])
-          rasp_advantage = Gauge('security_rasp_advantage', 'RASP advantage %', ['metric_type'])
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
           
-          def parse_csv_results(config, results_dir):
-              files = {'sqli': f'{results_dir}/sqli_results.csv', 'xss': f'{results_dir}/xss_results.csv', 'path_traversal': f'{results_dir}/path_results.csv'}
-              for attack_type, filepath in files.items():
-                  if not os.path.exists(filepath): continue
+          # Define metrics with more detail
+          attack_success_rate = Gauge('security_attack_success_rate', 
+                                     'Rate of successful attacks', 
+                                     ['config', 'attack_type'])
+          
+          detection_effectiveness = Gauge('security_detection_effectiveness', 
+                                         'Detection effectiveness percentage', 
+                                         ['config', 'tool'])
+          
+          blocking_effectiveness = Gauge('security_blocking_effectiveness', 
+                                        'Blocking effectiveness percentage', 
+                                        ['config', 'tool'])
+          
+          response_time_histogram = Histogram('security_response_time_ms', 
+                                             'Response time in milliseconds', 
+                                             ['config'],
+                                             buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000))
+          
+          attacks_per_hour = Counter('security_attacks_per_hour', 
+                                    'Total attacks in the last hour', 
+                                    ['config', 'attack_type'])
+          
+          comparative_advantage = Gauge('security_comparative_advantage', 
+                                      'RASP advantage over IAST percentage', 
+                                      ['metric'])
+          
+          configuration_uptime = Gauge('security_config_uptime_seconds', 
+                                     'Time configuration has been running', 
+                                     ['config'])
+          
+          vulnerability_discovery_rate = Gauge('security_vuln_discovery_rate', 
+                                              'Rate of vulnerability discovery', 
+                                              ['config', 'severity'])
+          
+          false_positive_rate = Gauge('security_false_positive_rate', 
+                                     'False positive rate', 
+                                     ['config'])
+          
+          mean_time_to_detect = Summary('security_mean_time_to_detect_ms', 
+                                       'Mean time to detect attacks', 
+                                       ['config'])
+          
+          class EnhancedExporter:
+              def __init__(self, results_base='/var/lib/benchmark-results'):
+                  self.results_base = Path(results_base)
+                  self.last_processed = {}
+                  self.historical_data = {}
+                  
+              def process_results(self):
+                  """Process all results and update metrics"""
+                  configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
+                  
+                  for config in configs:
+                      config_path = self.results_base / config
+                      if not config_path.exists():
+                          continue
+                      
+                      # Get latest results
+                      latest_path = config_path / 'latest'
+                      if latest_path.exists() and latest_path.is_symlink():
+                          latest_dir = latest_path.resolve()
+                          
+                          # Process summary.json
+                          summary_file = latest_dir / 'summary.json'
+                          if summary_file.exists():
+                              with open(summary_file, 'r') as f:
+                                  data = json.load(f)
+                              
+                              self.update_metrics(config, data)
+                      
+                      # Process historical data for trends
+                      self.process_historical(config, config_path)
+              
+              def update_metrics(self, config, data):
+                  """Update Prometheus metrics from data"""
+                  attacks = data.get('attacks', {})
+                  
+                  for attack_type, stats in attacks.items():
+                      total = stats.get('total', 0)
+                      detected = stats.get('detected', 0)
+                      blocked = stats.get('blocked', 0)
+                      
+                      if total > 0:
+                          # Success rate (attacks that passed through)
+                          success_rate = (total - detected - blocked) / total
+                          attack_success_rate.labels(config=config, attack_type=attack_type).set(success_rate)
+                          
+                          # Detection effectiveness
+                          detection_rate = (detected + blocked) / total
+                          detection_effectiveness.labels(config=config, tool=self.get_tool(config)).set(detection_rate * 100)
+                          
+                          # Blocking effectiveness
+                          block_rate = blocked / total
+                          blocking_effectiveness.labels(config=config, tool=self.get_tool(config)).set(block_rate * 100)
+                          
+                          # Update counter
+                          attacks_per_hour.labels(config=config, attack_type=attack_type).inc(total)
+                  
+                  # Calculate comparative advantage
+                  self.calculate_comparative_advantage()
+              
+              def get_tool(self, config):
+                  """Get the security tool name for a configuration"""
+                  if 'iast' in config:
+                      return 'DataDog_IAST'
+                  elif 'rasp' in config:
+                      return 'Aikido_RASP'
+                  else:
+                      return 'None'
+              
+              def calculate_comparative_advantage(self):
+                  """Calculate RASP advantage over IAST"""
                   try:
-                      with open(filepath, 'r') as f:
-                          reader = csv.DictReader(f)
-                          total = detected = blocked = passed = 0
-                          for row in reader:
-                              total += 1
-                              status = row.get('STATUS', '').upper()
-                              if status == 'DETECTED': detected += 1; attacks_detected.labels(config=config, attack_type=attack_type, source='custom_script').inc()
-                              elif status == 'BLOCKED': blocked += 1; attacks_blocked.labels(config=config, attack_type=attack_type, source='custom_script').inc()
-                              elif status == 'PASSED': passed += 1; attacks_passed.labels(config=config, attack_type=attack_type).inc()
-                          attacks_total.labels(config=config, attack_type=attack_type).inc(total)
-                          if total > 0:
-                              detection_rate.labels(config=config, attack_type=attack_type).set((detected + blocked) / total)
-                              blocking_rate.labels(config=config, attack_type=attack_type).set(blocked / total)
-                  except Exception as e: print(f"Error parsing {filepath}: {e}")
-          
-          def parse_zap_results(config, results_dir):
-              zap_file = f'{results_dir}/zap-report.json'
-              if not os.path.exists(zap_file): return
-              try:
-                  with open(zap_file, 'r') as f: data = json.load(f)
-                  site = data.get('site', [{}])[0]
-                  alerts = site.get('alerts', [])
-                  for alert in alerts:
-                      risk = alert.get('riskdesc', 'Unknown').split()[0].lower()
-                      count = len(alert.get('instances', []))
-                      zap_alerts_total.labels(config=config, risk_level=risk).inc(count)
-              except Exception as e: print(f"Error parsing ZAP: {e}")
-          
-          def monitor_results(results_base_dir='/tmp/benchmark-results', interval=10):
-              print(f"Starting Prometheus exporter on port 8000")
-              start_http_server(8000)
-              configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
-              while True:
-                  try:
-                      for config in configs:
-                          results_dir = f'{results_base_dir}/{config}'
-                          if not os.path.exists(results_dir): continue
-                          parse_csv_results(config, results_dir)
-                          parse_zap_results(config, results_dir)
-                      print(f"Metrics updated at {datetime.now()}")
-                  except Exception as e: print(f"Error: {e}")
-                  time.sleep(interval)
+                      # Get blocking rates
+                      rasp_block = blocking_effectiveness._value.get(('rasp-block', 'Aikido_RASP'), 0)
+                      iast_block = blocking_effectiveness._value.get(('iast-only', 'DataDog_IAST'), 0)
+                      
+                      if iast_block > 0:
+                          advantage = ((rasp_block - iast_block) / iast_block) * 100
+                      else:
+                          advantage = 100 if rasp_block > 0 else 0
+                      
+                      comparative_advantage.labels(metric='blocking_rate').set(advantage)
+                      
+                      # Detection advantage
+                      rasp_detect = detection_effectiveness._value.get(('rasp-monitor', 'Aikido_RASP'), 0)
+                      iast_detect = detection_effectiveness._value.get(('iast-only', 'DataDog_IAST'), 0)
+                      
+                      if iast_detect > 0:
+                          detect_advantage = ((rasp_detect - iast_detect) / iast_detect) * 100
+                      else:
+                          detect_advantage = 100 if rasp_detect > 0 else 0
+                      
+                      comparative_advantage.labels(metric='detection_rate').set(detect_advantage)
+                  except Exception as e:
+                      logger.error(f"Error calculating advantage: {e}")
+              
+              def process_historical(self, config, config_path):
+                  """Process historical data for trends"""
+                  # Get all timestamped directories
+                  dirs = [d for d in config_path.iterdir() if d.is_dir() and d.name != 'latest']
+                  dirs.sort()
+                  
+                  # Keep last 24 hours of data
+                  cutoff = datetime.now() - timedelta(hours=24)
+                  
+                  for dir_path in dirs:
+                      try:
+                          timestamp = datetime.strptime(dir_path.name, '%Y%m%d_%H%M%S')
+                          if timestamp > cutoff:
+                              # Process this data point
+                              summary_file = dir_path / 'summary.json'
+                              if summary_file.exists():
+                                  with open(summary_file, 'r') as f:
+                                      data = json.load(f)
+                                  
+                                  # Store for trend analysis
+                                  if config not in self.historical_data:
+                                      self.historical_data[config] = []
+                                  self.historical_data[config].append({
+                                      'timestamp': timestamp,
+                                      'data': data
+                                  })
+                      except:
+                          continue
+              
+              def run(self, port=8000, interval=10):
+                  """Run the exporter"""
+                  logger.info(f"Starting enhanced Prometheus exporter on port {port}")
+                  start_http_server(port)
+                  
+                  while True:
+                      try:
+                          self.process_results()
+                          logger.info(f"Metrics updated at {datetime.now()}")
+                      except Exception as e:
+                          logger.error(f"Error updating metrics: {e}")
+                      
+                      time.sleep(interval)
           
           if __name__ == '__main__':
-              monitor_results('/tmp/benchmark-results', 5)
+              exporter = EnhancedExporter()
+              exporter.run(port=8000, interval=5)
         owner: ubuntu
         group: ubuntu
         mode: '0755'
@@ -1200,26 +1640,175 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Grafana dashboard JSON
+    - name: Create Grafana provisioning directory
+      file:
+        path: /opt/monitoring/grafana-provisioning/dashboards
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create comprehensive Grafana dashboard
       copy:
-        dest: /opt/monitoring/grafana-dashboard.json
+        dest: /opt/monitoring/grafana-provisioning/dashboards/rasp-vs-iast.json
         content: |
           {
             "dashboard": {
-              "title": "RASP vs IAST Security Benchmark",
+              "title": "RASP vs IAST - Comprehensive Security Benchmark",
+              "tags": ["security", "benchmark", "rasp", "iast"],
+              "timezone": "browser",
               "panels": [
-                {"id": 1, "title": "Detection Rate by Config", "type": "bargauge", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}},
-                {"id": 2, "title": "Blocking Rate by Config", "type": "bargauge", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}},
-                {"id": 3, "title": "Real-Time Attack Stream", "type": "timeseries", "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8}},
-                {"id": 4, "title": "ZAP Vulnerabilities", "type": "piechart", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}}
-              ]
+                {
+                  "id": 1,
+                  "title": "⚔️ Blocking Effectiveness Comparison",
+                  "type": "bargauge",
+                  "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+                  "targets": [{
+                    "expr": "security_blocking_effectiveness",
+                    "legendFormat": "{{config}} - {{tool}}"
+                  }],
+                  "fieldConfig": {
+                    "defaults": {
+                      "thresholds": {
+                        "steps": [
+                          {"value": 0, "color": "red"},
+                          {"value": 50, "color": "yellow"},
+                          {"value": 80, "color": "green"}
+                        ]
+                      },
+                      "unit": "percent",
+                      "max": 100
+                    }
+                  }
+                },
+                {
+                  "id": 2,
+                  "title": "🎯 Detection Rate Over Time",
+                  "type": "timeseries",
+                  "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+                  "targets": [{
+                    "expr": "security_detection_effectiveness",
+                    "legendFormat": "{{config}}"
+                  }],
+                  "fieldConfig": {
+                    "defaults": {
+                      "unit": "percent",
+                      "custom": {
+                        "lineInterpolation": "smooth",
+                        "showPoints": "never"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": 3,
+                  "title": "🏆 RASP vs IAST Advantage",
+                  "type": "stat",
+                  "gridPos": {"x": 0, "y": 8, "w": 6, "h": 6},
+                  "targets": [{
+                    "expr": "security_comparative_advantage{metric=\"blocking_rate\"}",
+                    "legendFormat": "Blocking Advantage"
+                  }],
+                  "fieldConfig": {
+                    "defaults": {
+                      "unit": "percent",
+                      "thresholds": {
+                        "steps": [
+                          {"value": -50, "color": "red"},
+                          {"value": 0, "color": "yellow"},
+                          {"value": 50, "color": "green"}
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": 4,
+                  "title": "🚨 Attack Success Rate by Type",
+                  "type": "heatmap",
+                  "gridPos": {"x": 6, "y": 8, "w": 12, "h": 6},
+                  "targets": [{
+                    "expr": "security_attack_success_rate",
+                    "format": "heatmap",
+                    "legendFormat": "{{config}} - {{attack_type}}"
+                  }],
+                  "fieldConfig": {
+                    "defaults": {
+                      "custom": {
+                        "hideFrom": {"tooltip": false, "viz": false, "legend": false}
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": 5,
+                  "title": "📊 Total Attacks Per Hour",
+                  "type": "graph",
+                  "gridPos": {"x": 18, "y": 8, "w": 6, "h": 6},
+                  "targets": [{
+                    "expr": "rate(security_attacks_per_hour[1h])",
+                    "legendFormat": "{{config}} - {{attack_type}}"
+                  }]
+                },
+                {
+                  "id": 6,
+                  "title": "🎭 False Positive Rate",
+                  "type": "gauge",
+                  "gridPos": {"x": 0, "y": 14, "w": 6, "h": 6},
+                  "targets": [{
+                    "expr": "security_false_positive_rate",
+                    "legendFormat": "{{config}}"
+                  }],
+                  "fieldConfig": {
+                    "defaults": {
+                      "unit": "percent",
+                      "max": 100,
+                      "thresholds": {
+                        "steps": [
+                          {"value": 0, "color": "green"},
+                          {"value": 5, "color": "yellow"},
+                          {"value": 10, "color": "red"}
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": 7,
+                  "title": "⚡ Response Time Distribution",
+                  "type": "histogram",
+                  "gridPos": {"x": 6, "y": 14, "w": 12, "h": 6},
+                  "targets": [{
+                    "expr": "histogram_quantile(0.95, rate(security_response_time_ms_bucket[5m]))",
+                    "legendFormat": "p95 - {{config}}"
+                  }]
+                },
+                {
+                  "id": 8,
+                  "title": "📈 Security Score Trend (24h)",
+                  "type": "timeseries",
+                  "gridPos": {"x": 18, "y": 14, "w": 6, "h": 6},
+                  "targets": [
+                    {
+                      "expr": "(security_blocking_effectiveness{config=\"rasp-block\"} * 0.5 + security_detection_effectiveness{config=\"rasp-block\"} * 0.3 + (100 - security_false_positive_rate{config=\"rasp-block\"}) * 0.2)",
+                      "legendFormat": "RASP Score"
+                    },
+                    {
+                      "expr": "(security_blocking_effectiveness{config=\"iast-only\"} * 0.5 + security_detection_effectiveness{config=\"iast-only\"} * 0.3 + (100 - security_false_positive_rate{config=\"iast-only\"}) * 0.2)",
+                      "legendFormat": "IAST Score"
+                    }
+                  ]
+                }
+              ],
+              "refresh": "10s",
+              "time": {"from": "now-24h", "to": "now"}
             }
           }
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create monitoring docker-compose file
+    - name: Update monitoring docker-compose with Grafana provisioning
       copy:
         dest: /opt/monitoring/docker-compose.yml
         content: |
@@ -1236,7 +1825,8 @@
                 - prometheus-data:/prometheus
               command:
                 - '--config.file=/etc/prometheus/prometheus.yml'
-                - '--storage.tsdb.retention.time=7d'
+                - '--storage.tsdb.retention.time=30d'
+                - '--storage.tsdb.retention.size=10GB'
               network_mode: host
             
             grafana:
@@ -1249,8 +1839,10 @@
                 - GF_SECURITY_ADMIN_USER=admin
                 - GF_SECURITY_ADMIN_PASSWORD=rasp_vs_iast_2024
                 - GF_USERS_ALLOW_SIGN_UP=false
+                - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-worldmap-panel
               volumes:
                 - grafana-data:/var/lib/grafana
+                - ./grafana-provisioning:/etc/grafana/provisioning
               depends_on:
                 - prometheus
               network_mode: host
@@ -1262,61 +1854,169 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create monitoring startup script
+    - name: Create automated startup script
       copy:
-        dest: /opt/monitoring/start_monitoring.sh
+        dest: /opt/benchmark-tools/start_benchmark_system.sh
         content: |
           #!/bin/bash
           set -e
           
-          echo "🚀 Starting Monitoring Stack..."
+          echo "════════════════════════════════════════"
+          echo "🚀 Starting Complete Benchmark System"
+          echo "════════════════════════════════════════"
           
+          # Build Docker image if needed
+          echo "📦 Building Juice Shop image..."
+          cd /opt/juice-shop
+          docker compose build
+          
+          # Start monitoring stack
+          echo "📊 Starting monitoring stack..."
           cd /opt/monitoring
-          
-          # Start exporter in background
-          echo "📊 Starting Prometheus exporter..."
-          nohup python3 prometheus_exporter.py > /tmp/exporter.log 2>&1 &
-          echo $! > /tmp/exporter.pid
-          
-          # Start Prometheus and Grafana (use docker compose V2)
-          echo "📈 Starting Prometheus and Grafana..."
+          docker compose down 2>/dev/null || true
           docker compose up -d
           
-          sleep 5
+          # Start enhanced Prometheus exporter
+          echo "📈 Starting enhanced exporter..."
+          pkill -f prometheus_exporter_enhanced.py 2>/dev/null || true
+          nohup python3 /opt/monitoring/prometheus_exporter_enhanced.py > /var/log/prometheus_exporter.log 2>&1 &
+          echo $! > /var/run/prometheus_exporter.pid
+          
+          # Enable and start continuous benchmark service
+          echo "⚔️ Starting continuous benchmark service..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable continuous-benchmark
+          sudo systemctl restart continuous-benchmark
+          
+          sleep 10
+          
+          # Verify everything is running
+          if systemctl is-active --quiet continuous-benchmark; then
+              echo "✅ Continuous benchmark: RUNNING"
+          else
+              echo "❌ Continuous benchmark: FAILED"
+          fi
+          
+          if docker ps | grep -q prometheus; then
+              echo "✅ Prometheus: RUNNING"
+          else
+              echo "❌ Prometheus: FAILED"
+          fi
+          
+          if docker ps | grep -q grafana; then
+              echo "✅ Grafana: RUNNING"
+          else
+              echo "❌ Grafana: FAILED"
+          fi
           
           echo ""
-          echo "✅ Monitoring Stack Ready!"
-          echo "   Grafana:    http://$(curl -s ifconfig.me):3001"
-          echo "   Prometheus: http://$(curl -s ifconfig.me):9090"
-          echo "   Exporter:   http://localhost:8000/metrics"
+          echo "════════════════════════════════════════"
+          echo "📊 Access Points:"
+          echo "════════════════════════════════════════"
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "Grafana Dashboard: http://$PUBLIC_IP:3001"
+          echo "  Username: admin"
+          echo "  Password: rasp_vs_iast_2024"
           echo ""
-          echo "   Login: admin / rasp_vs_iast_2024"
+          echo "Prometheus: http://$PUBLIC_IP:9090"
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "📋 System Status:"
+          echo "════════════════════════════════════════"
+          echo "• Configurations rotate every 60 minutes"
+          echo "• Attacks run every 5 minutes"
+          echo "• Data retention: 30 days"
+          echo "• Current configuration: $(docker inspect juice-shop | grep DD_ENV | head -1 | cut -d'"' -f4)"
+          echo ""
+          echo "To check status: systemctl status continuous-benchmark"
+          echo "To view logs: journalctl -u continuous-benchmark -f"
+          echo "════════════════════════════════════════"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    - name: Create monitoring stop script
+    - name: Setup log rotation
       copy:
-        dest: /opt/monitoring/stop_monitoring.sh
+        dest: /etc/logrotate.d/benchmark
+        content: |
+          /var/log/continuous_benchmark*.log {
+              daily
+              missingok
+              rotate 30
+              compress
+              delaycompress
+              notifempty
+              create 644 ubuntu ubuntu
+              sharedscripts
+              postrotate
+                  systemctl reload continuous-benchmark > /dev/null 2>&1 || true
+              endscript
+          }
+        mode: '0644'
+
+    - name: Create status check script
+      copy:
+        dest: /opt/benchmark-tools/check_status.sh
         content: |
           #!/bin/bash
           
-          echo "🛑 Stopping Monitoring Stack..."
+          echo "═══════════════════════════════════════"
+          echo "📊 Benchmark System Status Check"
+          echo "═══════════════════════════════════════"
+          echo ""
           
-          # Stop exporter
-          if [ -f /tmp/exporter.pid ]; then
-            kill $(cat /tmp/exporter.pid) 2>/dev/null || true
-            rm /tmp/exporter.pid
+          # Check continuous benchmark
+          if systemctl is-active --quiet continuous-benchmark; then
+              echo "✅ Continuous Benchmark: ACTIVE"
+              echo "   $(systemctl status continuous-benchmark | grep Active | xargs)"
+          else
+              echo "❌ Continuous Benchmark: INACTIVE"
           fi
+          echo ""
           
-          # Stop Docker containers (use docker compose V2)
-          cd /opt/monitoring
-          docker compose down
+          # Check Docker containers
+          echo "🐳 Docker Containers:"
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "juice-shop|prometheus|grafana"
+          echo ""
           
-          echo "✅ Monitoring stopped"
+          # Check latest results
+          echo "📈 Latest Results:"
+          for config in baseline iast-only rasp-monitor rasp-block; do
+              latest="/var/lib/benchmark-results/$config/latest/summary.json"
+              if [ -f "$latest" ]; then
+                  timestamp=$(jq -r '.timestamp' "$latest")
+                  echo "  $config: $timestamp"
+              else
+                  echo "  $config: No results yet"
+              fi
+          done
+          echo ""
+          
+          # Check metrics
+          echo "📊 Prometheus Metrics:"
+          curl -s http://localhost:8000/metrics | grep -E "security_blocking_effectiveness|security_comparative_advantage" | head -5
+          echo ""
+          
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "═══════════════════════════════════════"
+          echo "🌐 Access URLs:"
+          echo "  Grafana: http://$PUBLIC_IP:3001"
+          echo "  Prometheus: http://$PUBLIC_IP:9090"
+          echo "═══════════════════════════════════════"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
+
+    - name: Start the complete benchmark system
+      shell: |
+        cd /opt/benchmark-tools
+        ./start_benchmark_system.sh
+      register: system_start
+      ignore_errors: true
+
+    - name: Display system status
+      debug:
+        var: system_start.stdout_lines
 
   handlers:
     - name: Restart DataDog Agent

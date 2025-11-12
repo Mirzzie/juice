@@ -870,3 +870,185 @@ jobs:
             echo "   To stop: /opt/monitoring/stop_monitoring.sh"
           ENDSSH
         continue-on-error: true
+        # Add this job to your workflow after the existing ones
+
+  deploy-continuous-benchmark:
+    name: 🚀 Deploy Continuous Benchmark System
+    runs-on: ubuntu-latest
+    needs: [check-prerequisites, configure-instance]
+    if: |
+      github.ref == 'refs/heads/main' &&
+      needs.check-prerequisites.outputs.can_proceed == 'true'
+    steps:
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy and Start Continuous System
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "═══════════════════════════════════════════"
+            echo "🚀 Deploying Continuous Benchmark System"
+            echo "═══════════════════════════════════════════"
+            
+            # Start the complete system
+            if [ -f /opt/benchmark-tools/start_benchmark_system.sh ]; then
+              /opt/benchmark-tools/start_benchmark_system.sh
+            else
+              echo "❌ Start script not found. Run Ansible first."
+              exit 1
+            fi
+            
+            # Wait for stabilization
+            sleep 30
+            
+            # Check status
+            /opt/benchmark-tools/check_status.sh
+          ENDSSH
+
+      - name: Create Summary Report
+        run: |
+          PUBLIC_IP="${{ env.EC2_INSTANCE_IP }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🚀 Continuous Benchmark System Deployed
+
+          ## 📊 Access Points
+
+          | Service | URL | Credentials |
+          |---------|-----|-------------|
+          | **Grafana Dashboard** | [http://${PUBLIC_IP}:3001](http://${PUBLIC_IP}:3001) | admin / rasp_vs_iast_2024 |
+          | **Prometheus** | [http://${PUBLIC_IP}:9090](http://${PUBLIC_IP}:9090) | None required |
+          | **Metrics Endpoint** | [http://${PUBLIC_IP}:8000/metrics](http://${PUBLIC_IP}:8000/metrics) | None required |
+
+          ## ⚙️ System Configuration
+
+          - **Rotation Interval**: Each configuration runs for 60 minutes
+          - **Attack Frequency**: Attacks execute every 5 minutes
+          - **Data Retention**: 30 days
+          - **Configurations Tested**:
+            1. Baseline (No Protection)
+            2. DataDog IAST Only
+            3. Aikido RASP (Monitoring)
+            4. Aikido RASP (Blocking)
+
+          ## 📈 Key Metrics Being Collected
+
+          - Blocking Effectiveness Rate
+          - Detection Effectiveness Rate
+          - Attack Success Rate
+          - Response Time Distribution
+          - False Positive Rate
+          - RASP vs IAST Comparative Advantage
+          - Security Score Trends
+
+          ## 🔧 Management Commands
+
+          \`\`\`bash
+          # Check system status
+          ssh ubuntu@${PUBLIC_IP} /opt/benchmark-tools/check_status.sh
+
+          # View live logs
+          ssh ubuntu@${PUBLIC_IP} journalctl -u continuous-benchmark -f
+
+          # Restart benchmark service
+          ssh ubuntu@${PUBLIC_IP} sudo systemctl restart continuous-benchmark
+
+          # Stop system (preserve data)
+          ssh ubuntu@${PUBLIC_IP} sudo systemctl stop continuous-benchmark
+          \`\`\`
+
+          ## 📊 Expected Results Timeline
+
+          - **15 minutes**: First attack results visible
+          - **1 hour**: First configuration rotation
+          - **4 hours**: Complete cycle through all configurations
+          - **24 hours**: Sufficient data for trend analysis
+          - **7 days**: Comprehensive comparative analysis ready
+
+          ---
+
+          ⏰ **Note**: System will run continuously. Monitor AWS costs and stop when sufficient data is collected.
+          EOF
+
+      - name: Setup Automatic Daily Report (Optional)
+        if: github.event.inputs.enable_daily_reports == 'true'
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            # Create daily report generator
+            cat > /opt/benchmark-tools/generate_daily_report.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import json
+          import pandas as pd
+          from pathlib import Path
+          from datetime import datetime, timedelta
+          import smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          def generate_report():
+              results_base = Path('/var/lib/benchmark-results')
+              report = []
+              
+              configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
+              
+              for config in configs:
+                  config_path = results_base / config
+                  if not config_path.exists():
+                      continue
+                  
+                  # Get last 24 hours of data
+                  cutoff = datetime.now() - timedelta(hours=24)
+                  total_attacks = 0
+                  total_blocked = 0
+                  total_detected = 0
+                  
+                  for result_dir in config_path.iterdir():
+                      if result_dir.name == 'latest':
+                          continue
+                      
+                      try:
+                          timestamp = datetime.strptime(result_dir.name, '%Y%m%d_%H%M%S')
+                          if timestamp > cutoff:
+                              summary_file = result_dir / 'summary.json'
+                              if summary_file.exists():
+                                  with open(summary_file) as f:
+                                      data = json.load(f)
+                                  
+                                  for attack_type, stats in data.get('attacks', {}).items():
+                                      total_attacks += stats.get('total', 0)
+                                      total_blocked += stats.get('blocked', 0)
+                                      total_detected += stats.get('detected', 0)
+                      except:
+                          continue
+                  
+                  if total_attacks > 0:
+                      report.append({
+                          'Configuration': config,
+                          'Total Attacks (24h)': total_attacks,
+                          'Blocked': total_blocked,
+                          'Detection Rate': f"{((total_detected + total_blocked) / total_attacks * 100):.1f}%",
+                          'Block Rate': f"{(total_blocked / total_attacks * 100):.1f}%"
+                      })
+              
+              return pd.DataFrame(report)
+
+          if __name__ == '__main__':
+              df = generate_report()
+              print("Daily Security Benchmark Report")
+              print("="*50)
+              print(df.to_string(index=False))
+              
+              # Save to file
+              df.to_csv('/tmp/daily_report.csv', index=False)
+              print(f"\nReport saved to /tmp/daily_report.csv")
+          PYEOF
+            
+            chmod +x /opt/benchmark-tools/generate_daily_report.py
+            
+            # Add to crontab for daily execution
+            (crontab -l 2>/dev/null; echo "0 0 * * * /opt/benchmark-tools/generate_daily_report.py > /var/log/daily_report.log 2>&1") | crontab -
+          ENDSSH
