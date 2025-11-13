@@ -1957,57 +1957,84 @@
           }
         mode: '0644'
 
-    - name: Create status check script
+    - name: Create automated startup script
       copy:
-        dest: /opt/benchmark-tools/check_status.sh
+        dest: /opt/benchmark-tools/start_benchmark_system.sh
         content: |
-          {% raw %}
           #!/bin/bash
+          set -e
           
-          echo "═══════════════════════════════════════"
-          echo "📊 Benchmark System Status Check"
-          echo "═══════════════════════════════════════"
-          echo ""
+          echo "════════════════════════════════════════"
+          echo "🚀 Starting Complete Benchmark System"
+          echo "════════════════════════════════════════"
           
-          # Check continuous benchmark
+          # Build Docker image if needed
+          echo "📦 Building Juice Shop image..."
+          cd /opt/juice-shop
+          docker compose build
+          
+          # Start monitoring stack
+          echo "📊 Starting monitoring stack..."
+          cd /opt/monitoring
+          docker compose down 2>/dev/null || true
+          docker compose up -d
+          
+          # Start enhanced Prometheus exporter
+          echo "📈 Starting enhanced exporter..."
+          pkill -f prometheus_exporter_enhanced.py 2>/dev/null || true
+          nohup python3 /opt/monitoring/prometheus_exporter_enhanced.py > /tmp/prometheus_exporter.log 2>&1 &
+          echo $! > /tmp/prometheus_exporter.pid
+          
+          # Enable and start continuous benchmark service
+          echo "⚔️ Starting continuous benchmark service..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable continuous-benchmark
+          sudo systemctl restart continuous-benchmark
+          
+          sleep 10
+          
+          # Verify everything is running
           if systemctl is-active --quiet continuous-benchmark; then
-              echo "✅ Continuous Benchmark: ACTIVE"
-              echo "   $(systemctl status continuous-benchmark | grep Active | xargs)"
+              echo "✅ Continuous benchmark: RUNNING"
           else
-              echo "❌ Continuous Benchmark: INACTIVE"
+              echo "❌ Continuous benchmark: FAILED"
           fi
-          echo ""
           
-          # Check Docker containers
-          echo "🐳 Docker Containers:"
-          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "juice-shop|prometheus|grafana"
-          echo ""
+          if docker ps | grep -q prometheus; then
+              echo "✅ Prometheus: RUNNING"
+          else
+              echo "❌ Prometheus: FAILED"
+          fi
           
-          # Check latest results
-          echo "📈 Latest Results:"
-          for config in baseline iast-only rasp-monitor rasp-block; do
-              latest="/var/lib/benchmark-results/$config/latest/summary.json"
-              if [ -f "$latest" ]; then
-                  timestamp=$(jq -r '.timestamp' "$latest")
-                  echo "  $config: $timestamp"
-              else
-                  echo "  $config: No results yet"
-              fi
-          done
-          echo ""
+          if docker ps | grep -q grafana; then
+              echo "✅ Grafana: RUNNING"
+          else
+              echo "❌ Grafana: FAILED"
+          fi
           
-          # Check metrics
-          echo "📊 Prometheus Metrics:"
-          curl -s http://localhost:8000/metrics | grep -E "security_blocking_effectiveness|security_comparative_advantage" | head -5
           echo ""
-          
+          echo "════════════════════════════════════════"
+          echo "📊 Access Points:"
+          echo "════════════════════════════════════════"
           PUBLIC_IP=$(curl -s ifconfig.me)
-          echo "═══════════════════════════════════════"
-          echo "🌐 Access URLs:"
-          echo "  Grafana: http://$PUBLIC_IP:3001"
-          echo "  Prometheus: http://$PUBLIC_IP:9090"
-          echo "═══════════════════════════════════════"
-          {% endraw %}
+          echo "Grafana Dashboard: http://$PUBLIC_IP:3001"
+          echo "  Username: admin"
+          echo "  Password: rasp_vs_iast_2024"
+          echo ""
+          echo "Prometheus: http://$PUBLIC_IP:9090"
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "📋 System Status:"
+          echo "════════════════════════════════════════"
+          echo "• Configurations rotate every 60 minutes"
+          echo "• Attacks run every 5 minutes"
+          echo "• Data retention: 30 days"
+          echo "• Current configuration: $(docker inspect juice-shop 2>/dev/null | grep DD_ENV | head -1 | cut -d'"' -f4 || echo 'Not running yet')"
+          echo ""
+          echo "To check status: systemctl status continuous-benchmark"
+          echo "To view logs: journalctl -u continuous-benchmark -f"
+          echo "To view exporter logs: tail -f /tmp/prometheus_exporter.log"
+          echo "════════════════════════════════════════"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
