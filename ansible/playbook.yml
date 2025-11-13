@@ -1985,19 +1985,29 @@
           nohup python3 /opt/monitoring/prometheus_exporter_enhanced.py > /tmp/prometheus_exporter.log 2>&1 &
           echo $! > /tmp/prometheus_exporter.pid
           
+          # Create log files with proper permissions
+          echo "📝 Setting up log files..."
+          sudo touch /var/log/continuous_benchmark.log
+          sudo touch /var/log/continuous_benchmark_error.log
+          sudo chown ubuntu:ubuntu /var/log/continuous_benchmark.log
+          sudo chown ubuntu:ubuntu /var/log/continuous_benchmark_error.log
+          
           # Enable and start continuous benchmark service
           echo "⚔️ Starting continuous benchmark service..."
           sudo systemctl daemon-reload
           sudo systemctl enable continuous-benchmark
           sudo systemctl restart continuous-benchmark
           
-          sleep 10
+          # Wait for service to start
+          sleep 5
           
           # Verify everything is running
           if systemctl is-active --quiet continuous-benchmark; then
               echo "✅ Continuous benchmark: RUNNING"
           else
               echo "❌ Continuous benchmark: FAILED"
+              echo "Checking logs..."
+              sudo journalctl -u continuous-benchmark -n 20 --no-pager
           fi
           
           if docker ps | grep -q prometheus; then
