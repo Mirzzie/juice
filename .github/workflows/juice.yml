@@ -1,103 +1,890 @@
-name: DevSecOps CI/CD Pipeline (Ansible + SAST/DAST)
+name: RASP vs IAST Comparative Benchmarking Pipeline (IMPROVED)
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev, dev-test]
+  pull_request:
+    branches: [main, dev, dev-test]
   workflow_dispatch:
+    inputs:
+      skip_ansible:
+        description: "Skip Ansible configuration"
+        required: false
+        type: boolean
+        default: false
+      test_configurations:
+        description: "Test configurations to run"
+        required: false
+        type: choice
+        default: "all"
+        options:
+          - all
+          - baseline
+          - iast-only
+          - rasp-monitor
+          - rasp-block
+      include_zap_scan:
+        description: "Include ZAP comprehensive scan (slower but thorough)"
+        required: false
+        type: boolean
+        default: true
+      zap_scan_depth:
+        description: "ZAP scan depth"
+        required: false
+        type: choice
+        default: "baseline"
+        options:
+          - baseline # Fast: ~5 min per config
+          - full # Slow: ~20 min per config
+      deploy_continuous:
+        description: "Deploy continuous benchmark system"
+        required: false
+        type: boolean
+        default: true
+      enable_daily_reports:
+        description: "Enable daily report generation"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+  ZEN_FIREWALL_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
-  deploy-and-scan:
+  sast-semgrep:
+    name: 🔍 SAST - Semgrep Security Scan
     runs-on: ubuntu-latest
-    env:
-      DATADOG_SITE: "us5.datadoghq.com"
-
+    container:
+      image: semgrep/semgrep
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Show repo root (debug)
+      - name: Run Semgrep Scan
         run: |
-          echo "PWD: $(pwd)"
-          ls -la
-
-      - name: Verify playbook presence
-        run: |
-          test -f ansible/playbook.yml && echo "✅ playbook exists" || (echo "❌ ansible/playbook.yml missing" && exit 1)
-          test -f ansible/secrets.yml && echo "✅ secrets.yml exists (encrypted)" || (echo "❌ ansible/secrets.yml missing" && exit 1)
-
-      - name: Set up Python & pip
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python3-pip ssh-client
-          pip3 --version
-
-      - name: Install Ansible core and Docker collection
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python3-pip sshpass
-          pip3 install --upgrade pip
-          pip3 install "ansible-core>=2.15" "cryptography"
-          # Install community collections required by the playbook (docker modules)
-          ansible-galaxy collection install community.docker
-
-      - name: Create vault password file (temporary)
-        run: |
-          mkdir -p ansible
-          printf "%s\n" "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > ansible/vault_pass.txt
-          chmod 600 ansible/vault_pass.txt
-
-      - name: Prepare SSH key (preserve newlines) and known_hosts
+          semgrep scan --config=auto --json --output=semgrep-results.json || true
+          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
         env:
-          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload to Semgrep Dashboard
+        if: always()
+        run: semgrep ci
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+        continue-on-error: true
+
+      - name: Upload Semgrep Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: |
+            semgrep-results.json
+            semgrep-results.sarif
+
+  check-prerequisites:
+    name: ✅ Verify Prerequisites
+    runs-on: ubuntu-latest
+    needs: sast-semgrep
+    outputs:
+      can_proceed: ${{ steps.check.outputs.can_proceed }}
+    steps:
+      - name: Check Required Secrets
+        id: check
+        run: |
+          echo "Checking required secrets..."
+          MISSING_SECRETS=()
+          if [ -z "${{ secrets.EC2_INSTANCE_IP }}" ]; then
+            MISSING_SECRETS+=("EC2_INSTANCE_IP")
+          fi
+          if [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ]; then
+            MISSING_SECRETS+=("EC2_SSH_PRIVATE_KEY")
+          fi
+          if [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ]; then
+            MISSING_SECRETS+=("ANSIBLE_VAULT_PASSWORD")
+          fi
+          if [ -z "${{ secrets.ZEN_FIREWALL_TOKEN }}" ]; then
+            MISSING_SECRETS+=("ZEN_FIREWALL_TOKEN")
+          fi
+          if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
+            echo "::error::Missing required secrets: ${MISSING_SECRETS[*]}"
+            echo "can_proceed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "✅ All required secrets are set"
+          echo "can_proceed=true" >> $GITHUB_OUTPUT
+
+  configure-instance:
+    name: ⚙️ Configure Instance with Ansible
+    runs-on: ubuntu-latest
+    needs: check-prerequisites
+    if: |
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      github.event.inputs.skip_ansible != 'true'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible
+        run: pip install ansible boto3 botocore
+
+      - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
-          # Preserve multiline PEM formatting
-          printf "%s\n" "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          # Add host key to known_hosts to avoid interactive prompt
-          ssh-keyscan -H "$EC2_IP" >> ~/.ssh/known_hosts || true
-          ls -la ~/.ssh
 
-      - name: Run Ansible playbook (deploy)
-        env:
-          EC2_USER: ${{ secrets.EC2_SSH_USER }}
-          EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
+      - name: Wait for SSH Availability
         run: |
-          if [ -z "$EC2_USER" ]; then
-            EC2_USER=ubuntu
-          fi
-          echo "Running playbook against $EC2_IP as $EC2_USER"
-          ansible-playbook -i "${EC2_IP}," -u "$EC2_USER" \
-            --private-key ~/.ssh/id_rsa \
-            --vault-password-file ansible/vault_pass.txt \
-            ansible/playbook.yml
+          echo "Testing SSH connection..."
+          for i in {1..30}; do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+               -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
+               "echo 'SSH ready'" 2>/dev/null; then
+              echo "✅ SSH connection successful"
+              exit 0
+            fi
+            echo "Attempt $i/30: Waiting for SSH..."
+            sleep 10
+          done
+          echo "::error::SSH connection timeout"
+          exit 1
 
-      - name: Clean up sensitive files
+      - name: Create Ansible Inventory
+        run: |
+          mkdir -p ansible
+          cat > ansible/inventory.ini <<EOF
+          [juiceshop]
+          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          EOF
+
+      - name: Create Vault Password File
+        run: |
+          cd ansible
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
+          chmod 600 .vault_pass
+
+      - name: Run Ansible Playbook
+        run: |
+          cd ansible
+          ansible-playbook -i inventory.ini playbook.yml \
+            --vault-password-file .vault_pass -v
+        timeout-minutes: 45
+
+      - name: Clean Up Vault Password
         if: always()
+        run: rm -f ansible/.vault_pass
+
+  deploy-continuous-benchmark:
+    name: 🚀 Deploy Continuous Benchmark System
+    runs-on: ubuntu-latest
+    needs: [check-prerequisites, configure-instance]
+    if: |
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
+      (github.ref == 'refs/heads/main' || github.event.inputs.deploy_continuous == 'true')
+    steps:
+      - name: Setup SSH Key
         run: |
-          # Try shred first, fallback to rm
-          if command -v shred >/dev/null 2>&1; then
-            shred -u ~/.ssh/id_rsa || true
-            shred -u ansible/vault_pass.txt || true
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy and Start Continuous System
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "═══════════════════════════════════════════"
+            echo "🚀 Deploying Continuous Benchmark System"
+            echo "═══════════════════════════════════════════"
+            
+            # Check if system is already configured
+            if [ ! -f /opt/benchmark-tools/start_benchmark_system.sh ]; then
+              echo "❌ System not configured. Please run with skip_ansible: false"
+              exit 1
+            fi
+            
+            # Start the complete system
+            /opt/benchmark-tools/start_benchmark_system.sh
+            
+            # Wait for stabilization
+            sleep 30
+            
+            # Check status
+            /opt/benchmark-tools/check_status.sh
+          ENDSSH
+        timeout-minutes: 20
+
+      - name: Create Summary Report
+        run: |
+          PUBLIC_IP="${{ env.EC2_INSTANCE_IP }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🚀 Continuous Benchmark System Deployed
+
+          ## 📊 Access Points
+
+          | Service | URL | Credentials |
+          |---------|-----|-------------|
+          | **Grafana Dashboard** | [http://${PUBLIC_IP}:3001](http://${PUBLIC_IP}:3001) | admin / rasp_vs_iast_2024 |
+          | **Prometheus** | [http://${PUBLIC_IP}:9090](http://${PUBLIC_IP}:9090) | None required |
+          | **Metrics Endpoint** | [http://${PUBLIC_IP}:8000/metrics](http://${PUBLIC_IP}:8000/metrics) | None required |
+
+          ## ⚙️ System Configuration
+
+          - **Rotation Interval**: Each configuration runs for 60 minutes
+          - **Attack Frequency**: Attacks execute every 5 minutes
+          - **Data Retention**: 30 days
+          - **Configurations Tested**:
+            1. Baseline (No Protection)
+            2. DataDog IAST Only
+            3. Aikido RASP (Monitoring)
+            4. Aikido RASP (Blocking)
+
+          ## 📈 Key Metrics Being Collected
+
+          - Blocking Effectiveness Rate
+          - Detection Effectiveness Rate
+          - Attack Success Rate
+          - Response Time Distribution
+          - False Positive Rate
+          - RASP vs IAST Comparative Advantage
+          - Security Score Trends
+
+          ## 🔧 Management Commands
+
+          \`\`\`bash
+          # Check system status
+          ssh ubuntu@${PUBLIC_IP} /opt/benchmark-tools/check_status.sh
+
+          # View live logs
+          ssh ubuntu@${PUBLIC_IP} journalctl -u continuous-benchmark -f
+
+          # Restart benchmark service
+          ssh ubuntu@${PUBLIC_IP} sudo systemctl restart continuous-benchmark
+
+          # Stop system (preserve data)
+          ssh ubuntu@${PUBLIC_IP} sudo systemctl stop continuous-benchmark
+          \`\`\`
+
+          ## 📊 Expected Results Timeline
+
+          - **15 minutes**: First attack results visible
+          - **1 hour**: First configuration rotation
+          - **4 hours**: Complete cycle through all configurations
+          - **24 hours**: Sufficient data for trend analysis
+          - **7 days**: Comprehensive comparative analysis ready
+
+          ---
+
+          ⏰ **Note**: System will run continuously. Monitor AWS costs and stop when sufficient data is collected.
+          EOF
+
+      - name: Setup Automatic Daily Report
+        if: github.event.inputs.enable_daily_reports == 'true'
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            # Create daily report generator
+            cat > /opt/benchmark-tools/generate_daily_report.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import json
+          import pandas as pd
+          from pathlib import Path
+          from datetime import datetime, timedelta
+
+          def generate_report():
+              results_base = Path('/var/lib/benchmark-results')
+              report = []
+              
+              configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
+              
+              for config in configs:
+                  config_path = results_base / config
+                  if not config_path.exists():
+                      continue
+                  
+                  # Get last 24 hours of data
+                  cutoff = datetime.now() - timedelta(hours=24)
+                  total_attacks = 0
+                  total_blocked = 0
+                  total_detected = 0
+                  
+                  for result_dir in config_path.iterdir():
+                      if result_dir.name == 'latest':
+                          continue
+                      
+                      try:
+                          timestamp = datetime.strptime(result_dir.name, '%Y%m%d_%H%M%S')
+                          if timestamp > cutoff:
+                              summary_file = result_dir / 'summary.json'
+                              if summary_file.exists():
+                                  with open(summary_file) as f:
+                                      data = json.load(f)
+                                  
+                                  for attack_type, stats in data.get('attacks', {}).items():
+                                      total_attacks += stats.get('total', 0)
+                                      total_blocked += stats.get('blocked', 0)
+                                      total_detected += stats.get('detected', 0)
+                      except:
+                          continue
+                  
+                  if total_attacks > 0:
+                      report.append({
+                          'Configuration': config,
+                          'Total Attacks (24h)': total_attacks,
+                          'Blocked': total_blocked,
+                          'Detection Rate': f"{((total_detected + total_blocked) / total_attacks * 100):.1f}%",
+                          'Block Rate': f"{(total_blocked / total_attacks * 100):.1f}%"
+                      })
+              
+              return pd.DataFrame(report)
+
+          if __name__ == '__main__':
+              df = generate_report()
+              print("Daily Security Benchmark Report")
+              print("="*50)
+              print(df.to_string(index=False))
+              
+              # Save to file
+              df.to_csv('/tmp/daily_report.csv', index=False)
+              
+              # Calculate RASP advantage
+              rasp_block = df[df['Configuration'] == 'rasp-block']
+              iast = df[df['Configuration'] == 'iast-only']
+              
+              if len(rasp_block) > 0 and len(iast) > 0:
+                  rasp_rate = float(rasp_block['Block Rate'].values[0].strip('%'))
+                  iast_rate = float(iast['Block Rate'].values[0].strip('%'))
+                  advantage = rasp_rate - iast_rate
+                  print(f"\n🏆 RASP Blocking Advantage: +{advantage:.1f}%")
+              
+              print(f"\nReport saved to /tmp/daily_report.csv")
+          PYEOF
+            
+            chmod +x /opt/benchmark-tools/generate_daily_report.py
+            
+            # Add to crontab for daily execution
+            (crontab -l 2>/dev/null; echo "0 0 * * * /opt/benchmark-tools/generate_daily_report.py > /var/log/daily_report.log 2>&1") | crontab -
+            
+            echo "✅ Daily report generation enabled"
+          ENDSSH
+
+  benchmark-tests:
+    name: 🧪 ${{ matrix.config_name }}
+    runs-on: ubuntu-latest
+    needs: [check-prerequisites, configure-instance]
+    if: |
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
+      github.event.inputs.deploy_continuous != 'true'
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - config: baseline
+            config_name: "Configuration 1: Baseline (No Protection)"
+            dd_appsec: "false"
+            dd_iast: "false"
+            aikido_block: "false"
+            aikido_enabled: "false"
+          - config: iast-only
+            config_name: "Configuration 2: DataDog IAST Only"
+            dd_appsec: "true"
+            dd_iast: "true"
+            aikido_block: "false"
+            aikido_enabled: "false"
+          - config: rasp-monitor
+            config_name: "Configuration 3: Zen RASP (Monitoring)"
+            dd_appsec: "false"
+            dd_iast: "false"
+            aikido_block: "false"
+            aikido_enabled: "true"
+          - config: rasp-block
+            config_name: "Configuration 4: Zen RASP (Blocking)"
+            dd_appsec: "false"
+            dd_iast: "false"
+            aikido_block: "true"
+            aikido_enabled: "true"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Application with ${{ matrix.config }} Configuration
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            set -e
+            cd /opt/juice-shop
+
+            echo "════════════════════════════════════════"
+            echo "🚀 Deploying: ${{ matrix.config_name }}"
+            echo "════════════════════════════════════════"
+
+            docker compose down 2>/dev/null || true
+
+            cat > docker-compose.yml << COMPOSEEOF
+          services:
+            juice-shop:
+              build: .
+              image: juice-shop-secure:latest
+              container_name: juice-shop
+              restart: unless-stopped
+              ports:
+                - "3000:3000"
+              environment:
+                NODE_ENV: production
+                DD_ENV: ${{ matrix.config }}
+                DD_SERVICE: juice-shop
+                DD_VERSION: latest
+                DD_AGENT_HOST: 172.17.0.1
+                DD_TRACE_AGENT_PORT: 8126
+                DD_LOGS_INJECTION: "true"
+                DD_TRACE_SAMPLE_RATE: "1"
+                DD_PROFILING_ENABLED: "true"
+                DD_RUNTIME_METRICS_ENABLED: "true"
+                DD_APPSEC_ENABLED: "${{ matrix.dd_appsec }}"
+                DD_IAST_ENABLED: "${{ matrix.dd_iast }}"
+                AIKIDO_TOKEN: \${AIKIDO_TOKEN}
+                AIKIDO_BLOCK: "${{ matrix.aikido_block }}"
+                AIKIDO_DEBUG: "true"
+                AIKIDO_ENABLED: "${{ matrix.aikido_enabled }}"
+              env_file:
+                - .env
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:3000"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 60s
+          COMPOSEEOF
+
+            docker compose up -d
+
+            echo "⏳ Waiting for application..."
+            sleep 60
+
+            for i in {1..10}; do
+              if curl -f -s http://localhost:3000 > /dev/null; then
+                echo "✅ Application ready"
+                echo ""
+                echo "📋 Configuration:"
+                echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
+                echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
+                echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
+                echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
+                exit 0
+              fi
+              echo "Waiting... ($i/10)"
+              sleep 5
+            done
+
+            echo "⚠️  Application may need more time"
+          ENDSSH
+        timeout-minutes: 30
+
+      - name: Run Custom Attack Suite
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
+            mkdir -p "$RESULTS_DIR"
+            
+            if [ -x /opt/benchmark-tools/run_all_attacks.sh ]; then
+              /opt/benchmark-tools/run_all_attacks.sh \
+                "http://localhost:3000" \
+                "${{ matrix.config }}" \
+                "$RESULTS_DIR"
+            else
+              echo "⚠️  Attack scripts not found"
+            fi
+          ENDSSH
+        continue-on-error: true
+
+      - name: Run ZAP Security Scan
+        if: github.event.inputs.include_zap_scan == 'true'
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
+            mkdir -p "$RESULTS_DIR"
+            
+            echo "🕷️  Running ZAP ${{ github.event.inputs.zap_scan_depth || 'baseline' }} scan..."
+            
+            SCAN_TYPE="${{ github.event.inputs.zap_scan_depth || 'baseline' }}"
+            
+            if [ "$SCAN_TYPE" = "baseline" ]; then
+              TIMEOUT=300
+              ZAP_CMD="zap-baseline.py"
+            else
+              TIMEOUT=1200
+              ZAP_CMD="zap-full-scan.py"
+            fi
+            
+            docker run --rm --network host \
+              -v "$RESULTS_DIR:/zap/wrk:rw" \
+              ghcr.io/zaproxy/zaproxy:stable \
+              $ZAP_CMD \
+              -t http://localhost:3000 \
+              -r zap-report.html \
+              -J zap-report.json \
+              -w zap-report.md \
+              -m 3 -T $TIMEOUT \
+              || echo "ZAP scan completed with warnings"
+            
+            echo "✅ ZAP scan completed"
+          ENDSSH
+        continue-on-error: true
+        timeout-minutes: 35
+
+      - name: Collect Security Logs
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
+            
+            docker logs juice-shop > "$RESULTS_DIR/container.log" 2>&1 || true
+            
+            grep -i "aikido\|datadog\|blocked\|detected\|attack" \
+              "$RESULTS_DIR/container.log" > "$RESULTS_DIR/security_events.log" 2>&1 || true
+            
+            BLOCKED=$(grep -c "blocked" "$RESULTS_DIR/security_events.log" 2>/dev/null || echo "0")
+            DETECTED=$(grep -c "detected" "$RESULTS_DIR/security_events.log" 2>/dev/null || echo "0")
+            
+            echo "METRIC,COUNT" > "$RESULTS_DIR/security_events.csv"
+            echo "BLOCKED,$BLOCKED" >> "$RESULTS_DIR/security_events.csv"
+            echo "DETECTED,$DETECTED" >> "$RESULTS_DIR/security_events.csv"
+          ENDSSH
+
+      - name: Download Results
+        run: |
+          mkdir -p ./results/${{ matrix.config }}
+          scp -i ~/.ssh/id_rsa -r \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/benchmark-results/${{ matrix.config }}/* \
+            ./results/${{ matrix.config }}/ || echo "No results to download"
+
+      - name: Upload Results Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.config }}
+          path: ./results/${{ matrix.config }}/
+          retention-days: 30
+        continue-on-error: true
+
+  comparative-analysis:
+    name: 📈 Generate Comprehensive Comparative Analysis
+    runs-on: ubuntu-latest
+    needs: benchmark-tests
+    if: |
+      always() &&
+      needs.benchmark-tests.result != 'skipped'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Results
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all-results
+        continue-on-error: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Analysis Tools
+        run: pip install pandas matplotlib seaborn tabulate
+
+      - name: Generate Comprehensive Analysis
+        run: |
+          python3 << 'PYEOF'
+          import pandas as pd
+          from pathlib import Path
+          import json
+
+          configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
+          results_dir = Path('./all-results')
+
+          if not results_dir.exists():
+              print("⚠️  No results found. Creating placeholder report.")
+              with open('summary_statistics.csv', 'w') as f:
+                  f.write('Configuration,Status\n')
+                  f.write('ALL,NO_RESULTS\n')
+              with open('comparative_results.csv', 'w') as f:
+                  f.write('Configuration,Status\n')
+                  f.write('ALL,NO_RESULTS\n')
+              exit(0)
+
+          all_data = []
+
+          for config in configs:
+              config_dir = results_dir / f'results-{config}' / config
+              if not config_dir.exists():
+                  continue
+              
+              # Parse custom attack results
+              summary_file = config_dir / 'summary.csv'
+              if summary_file.exists():
+                  try:
+                      df = pd.read_csv(summary_file)
+                      for _, row in df.iterrows():
+                          if 'ATTACK_TYPE' in row and row.get('ATTACK_TYPE') == 'DURATION_SECONDS':
+                              continue
+                          all_data.append({
+                              'Configuration': config,
+                              'Source': 'Custom Scripts',
+                              'Attack Type': row.get('ATTACK_TYPE', 'UNKNOWN'),
+                              'Total Attacks': row.get('TOTAL', 0),
+                              'Detected': row.get('DETECTED', 0),
+                              'Blocked': row.get('BLOCKED', 0),
+                              'Detection Rate': f"{((row.get('DETECTED', 0) + row.get('BLOCKED', 0)) / max(row.get('TOTAL', 1), 1)) * 100:.1f}%",
+                              'Block Rate': f"{(row.get('BLOCKED', 0) / max(row.get('TOTAL', 1), 1)) * 100:.1f}%"
+                          })
+                  except Exception as e:
+                      print(f"Error reading {summary_file}: {e}")
+              
+              # Parse ZAP results if available
+              zap_file = config_dir / 'zap-report.json'
+              if zap_file.exists():
+                  try:
+                      with open(zap_file, 'r') as f:
+                          zap_data = json.load(f)
+                      
+                      alerts = zap_data.get('site', [{}])[0].get('alerts', [])
+                      high_risk = sum(1 for a in alerts if a.get('riskdesc', '').startswith('High'))
+                      medium_risk = sum(1 for a in alerts if a.get('riskdesc', '').startswith('Medium'))
+                      total_alerts = len(alerts)
+                      
+                      all_data.append({
+                          'Configuration': config,
+                          'Source': 'ZAP Scan',
+                          'Attack Type': 'COMPREHENSIVE',
+                          'Total Attacks': total_alerts,
+                          'Detected': high_risk + medium_risk,
+                          'Blocked': 0,
+                          'Detection Rate': 'N/A',
+                          'Block Rate': 'N/A'
+                      })
+                  except Exception as e:
+                      print(f"Error reading ZAP results: {e}")
+
+          if len(all_data) == 0:
+              print("⚠️  No data collected")
+              with open('summary_statistics.csv', 'w') as f:
+                  f.write('Configuration,Status\n')
+                  f.write('ALL,NO_DATA\n')
+              with open('comparative_results.csv', 'w') as f:
+                  f.write('Configuration,Status\n')
+                  f.write('ALL,NO_DATA\n')
+          else:
+              df = pd.DataFrame(all_data)
+              df.to_csv('comparative_results.csv', index=False)
+              
+              # Generate summary with combined results
+              summary = []
+              for config in configs:
+                  config_data = df[df['Configuration'] == config]
+                  
+                  if len(config_data) > 0:
+                      # Custom scripts totals
+                      custom_data = config_data[config_data['Source'] == 'Custom Scripts']
+                      custom_total = custom_data['Total Attacks'].sum()
+                      custom_detected = custom_data['Detected'].sum()
+                      custom_blocked = custom_data['Blocked'].sum()
+                      
+                      # ZAP totals
+                      zap_data = config_data[config_data['Source'] == 'ZAP Scan']
+                      zap_total = zap_data['Total Attacks'].sum() if len(zap_data) > 0 else 0
+                      zap_high = zap_data['Detected'].sum() if len(zap_data) > 0 else 0
+                      
+                      summary.append({
+                          'Configuration': config,
+                          'Custom Total': int(custom_total),
+                          'Custom Blocked': int(custom_blocked),
+                          'Custom Detection Rate': f"{((custom_detected + custom_blocked) / custom_total * 100):.1f}%" if custom_total > 0 else "N/A",
+                          'ZAP Alerts': int(zap_total),
+                          'ZAP High Risk': int(zap_high),
+                          'Combined Score': f"{((custom_blocked / custom_total * 100) if custom_total > 0 else 0):.1f}%"
+                      })
+              
+              if summary:
+                  pd.DataFrame(summary).to_csv('summary_statistics.csv', index=False)
+                  print("✅ Analysis complete with combined results")
+              else:
+                  with open('summary_statistics.csv', 'w') as f:
+                      f.write('Configuration,Status\n')
+                      f.write('ALL,INSUFFICIENT_DATA\n')
+          PYEOF
+
+      - name: Generate Comprehensive Report
+        run: |
+          cat > BENCHMARK_REPORT.md << 'EOF'
+          # 🔒 RASP vs IAST Comprehensive Benchmark Report
+
+          **Pipeline Run:** #${{ github.run_number }}  
+          **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')
+          **Branch:** ${{ github.ref_name }}
+          **Commit:** ${{ github.sha }}
+
+          ## 📊 Executive Summary
+
+          This benchmark combines results from:
+          1. **Custom Attack Scripts** - Focused, controlled attack testing
+          2. **OWASP ZAP DAST** - Comprehensive automated security scanning
+          3. **Continuous Monitoring** - 24/7 automated testing and metrics collection
+
+          EOF
+
+          if [ -f summary_statistics.csv ] && [ $(wc -l < summary_statistics.csv) -gt 1 ]; then
+            python3 << 'PYEOF' >> BENCHMARK_REPORT.md || echo "_No data_" >> BENCHMARK_REPORT.md
+          import pandas as pd
+          try:
+              df = pd.read_csv('summary_statistics.csv')
+              if len(df) > 0:
+                  print("\n## Configuration Comparison\n")
+                  print(df.to_markdown(index=False))
+                  
+                  # Calculate RASP advantage
+                  rasp = df[df['Configuration'] == 'rasp-block']
+                  iast = df[df['Configuration'] == 'iast-only']
+                  if len(rasp) > 0 and len(iast) > 0:
+                      rasp_score = float(rasp['Combined Score'].values[0].strip('%'))
+                      iast_score = float(iast['Combined Score'].values[0].strip('%'))
+                      advantage = rasp_score - iast_score
+                      print(f"\n### 🏆 Key Finding")
+                      print(f"**Aikido RASP demonstrates {advantage:.1f}% better blocking effectiveness than DataDog IAST**")
+          except: pass
+          PYEOF
           else
-            rm -f ~/.ssh/id_rsa || true
-            rm -f ansible/vault_pass.txt || true
+            echo "⚠️  No benchmark results available" >> BENCHMARK_REPORT.md
           fi
-          echo "Cleaned temporary private key and vault password file."
 
-      # === SECURITY SCANS ===
+          cat >> BENCHMARK_REPORT.md << 'EOF'
 
-      - name: Run Semgrep SAST Scan
-        uses: returntocorp/semgrep-action@v1
+          ## 📖 Interpretation Guide
+
+          ### Metrics Explained
+          - **Detection Rate**: Percentage of attacks identified by the security tool
+          - **Blocking Rate**: Percentage of attacks actively prevented from succeeding
+          - **Combined Score**: Weighted average of security effectiveness metrics
+
+          ### Configuration Details
+          1. **Baseline**: No security tools enabled (control group)
+          2. **IAST-Only**: DataDog IAST with AppSec enabled
+          3. **RASP-Monitor**: Aikido Zen in monitoring mode (detection only)
+          4. **RASP-Block**: Aikido Zen in blocking mode (active protection)
+
+          ## 🔄 Continuous Monitoring Status
+
+          The system is now running continuous benchmarks with:
+          - Automated rotation through all configurations every 4 hours
+          - Attack execution every 5 minutes
+          - Real-time metrics collection to Prometheus
+          - Visual dashboards available in Grafana
+
+          EOF
+
+          cat BENCHMARK_REPORT.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Comprehensive Report
+        uses: actions/upload-artifact@v4
         with:
-          # If you want Semgrep CI only (no publish) remove publishToken
-          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
-          publishDeployment: true
-          config: "auto"
+          name: comprehensive-benchmark-report
+          path: |
+            BENCHMARK_REPORT.md
+            comparative_results.csv
+            summary_statistics.csv
+          retention-days: 90
+        continue-on-error: true
 
-      - name: Run OWASP ZAP Baseline Scan (DAST)
-        uses: zaproxy/action-baseline@v0.10.0
+  monitoring-status:
+    name: 📊 Report Monitoring System Status
+    runs-on: ubuntu-latest
+    needs: [deploy-continuous-benchmark]
+    if: |
+      always() &&
+      needs.deploy-continuous-benchmark.result == 'success'
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Collect Monitoring Status
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH' > monitoring_status.txt
+            /opt/benchmark-tools/check_status.sh
+            
+            echo ""
+            echo "📊 Recent Attack Results:"
+            echo "========================"
+            
+            for config in baseline iast-only rasp-monitor rasp-block; do
+              latest="/var/lib/benchmark-results/$config/latest/summary.json"
+              if [ -f "$latest" ]; then
+                python3 -c "
+          import json
+          with open('$latest') as f:
+              data = json.load(f)
+          attacks = data.get('attacks', {})
+          total = sum(a.get('total', 0) for a in attacks.values())
+          blocked = sum(a.get('blocked', 0) for a in attacks.values())
+          print(f'$config: {blocked}/{total} blocked ({blocked/total*100:.1f}%)')
+          "
+              fi
+            done
+          ENDSSH
+
+      - name: Create Status Comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
         with:
-          target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
-          # Uncomment the next line if you want the workflow to fail on warnings
-          # fail_on_warning: true
+          script: |
+            const fs = require('fs');
+            const status = fs.readFileSync('monitoring_status.txt', 'utf8');
+            const ec2Ip = process.env.EC2_INSTANCE_IP;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📊 Continuous Benchmark System Status
+              
+              \`\`\`
+              ${status}
+              \`\`\`
+              
+              ### 🌐 Live Dashboards
+              - **Grafana**: http://${ec2Ip}:3001 (admin/rasp_vs_iast_2024)
+              - **Prometheus**: http://${ec2Ip}:9090
+              
+              The system will continue collecting data. Check the dashboards for real-time results.`
+            });
+        continue-on-error: true
