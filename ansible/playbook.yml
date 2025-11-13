@@ -1200,9 +1200,9 @@
               def deploy_configuration(self, config):
                   """Deploy a specific configuration"""
                   logger.info(f"Deploying configuration: {config['display_name']}")
-                  
+
                   # Update docker-compose
-                  # Note: Using ${{AIKIDO_TOKEN}} to reference env var from .env file
+                  # Note: AIKIDO_TOKEN will be loaded from .env file
                   compose_content = f"""
           services:
             juice-shop:
