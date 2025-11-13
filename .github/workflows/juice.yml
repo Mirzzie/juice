@@ -486,29 +486,36 @@ jobs:
                 start_period: 60s
           COMPOSEEOF
 
-            docker compose up -d
+                      docker compose up -d
 
-            echo "⏳ Waiting for application..."
-            sleep 60
+                      echo "⏳ Waiting for application..."
+                      sleep 60
 
-            for i in {1..10}; do
-              if curl -f -s http://localhost:3000 > /dev/null; then
-                echo "✅ Application ready"
-                echo ""
-                echo "📋 Configuration:"
-                echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
-                echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
-                echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
-                echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
-                exit 0
-              fi
-              echo "Waiting... ($i/10)"
-              sleep 5
-            done
+                      APP_READY=false
+                      for i in {1..10}; do
+                        if curl -f -s http://localhost:3000 > /dev/null; then
+                          echo "✅ Application ready"
+                          echo ""
+                          echo "📋 Configuration:"
+                          echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
+                          echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
+                          echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
+                          echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
+                          APP_READY=true
+                          break
+                        fi
+                        echo "Waiting... ($i/10)"
+                        sleep 5
+                      done
 
-            echo "⚠️  Application may need more time"
-          ENDSSH
-        timeout-minutes: 30
+                      if [ "$APP_READY" = false ]; then
+                        echo "⚠️  Application may need more time, continuing anyway"
+                      fi
+                      
+                      # Ensure proper exit
+                      exit 0
+                    ENDSSH
+                  timeout-minutes: 30
 
       - name: Run Custom Attack Suite
         run: |
