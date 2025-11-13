@@ -1289,7 +1289,7 @@
                           try:
                               subprocess.run([attack_script, 'http://localhost:3000', 
                                             f'{results_dir}/{output_file}'], 
-                                          timeout=300, capture_output=True)
+                                           timeout=300, capture_output=True)
                               logger.info(f"Completed {attack_script}")
                           except subprocess.TimeoutExpired:
                               logger.warning(f"Attack {attack_script} timed out")
@@ -1303,7 +1303,7 @@
                   if os.path.exists('/opt/benchmark-tools/collect_metrics.sh'):
                       subprocess.run(['/opt/benchmark-tools/collect_metrics.sh', 
                                     config_name, results_dir], 
-                                  capture_output=True)
+                                   capture_output=True)
                   
                   # Create summary
                   self.create_summary(config_name, results_dir)
@@ -1326,8 +1326,8 @@
                   
                   # Parse attack results
                   for attack_type, filename in [('sqli', 'sqli_results.csv'), 
-                                              ('xss', 'xss_results.csv'),
-                                              ('path_traversal', 'path_results.csv')]:
+                                               ('xss', 'xss_results.csv'),
+                                               ('path_traversal', 'path_results.csv')]:
                       filepath = f"{results_dir}/{filename}"
                       if os.path.exists(filepath):
                           try:
