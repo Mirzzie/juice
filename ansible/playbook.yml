@@ -1645,7 +1645,7 @@
           scrape_configs:
             - job_name: 'benchmark-exporter'
               static_configs:
-                - targets: ['172.17.0.1:8000']
+                - targets: ['host.docker.internal:8000']
         owner: ubuntu
         group: ubuntu
         mode: '0644'
@@ -1839,14 +1839,15 @@
                 - '--config.file=/etc/prometheus/prometheus.yml'
                 - '--storage.tsdb.retention.time=30d'
                 - '--storage.tsdb.retention.size=10GB'
-              network_mode: host
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
             
             grafana:
               image: grafana/grafana:latest
               container_name: grafana
               restart: unless-stopped
               ports:
-                - "3001:3001"
+                - "3001:3000"
               environment:
                 - GF_SECURITY_ADMIN_USER=admin
                 - GF_SECURITY_ADMIN_PASSWORD=rasp_vs_iast_2024
@@ -1857,7 +1858,6 @@
                 - ./grafana-provisioning:/etc/grafana/provisioning
               depends_on:
                 - prometheus
-              network_mode: host
           
           volumes:
             prometheus-data:
