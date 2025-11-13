@@ -435,7 +435,6 @@ jobs:
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
       - name: Deploy Application with ${{ matrix.config }} Configuration
         run: |
           ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
@@ -448,7 +447,7 @@ jobs:
 
             docker compose down 2>/dev/null || true
 
-            cat > docker-compose.yml << COMPOSEEOF
+            cat > docker-compose.yml << 'COMPOSEEOF'
           services:
             juice-shop:
               build: .
@@ -470,7 +469,7 @@ jobs:
                 DD_RUNTIME_METRICS_ENABLED: "true"
                 DD_APPSEC_ENABLED: "${{ matrix.dd_appsec }}"
                 DD_IAST_ENABLED: "${{ matrix.dd_iast }}"
-                AIKIDO_TOKEN: \${AIKIDO_TOKEN}
+                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
                 AIKIDO_BLOCK: "${{ matrix.aikido_block }}"
                 AIKIDO_DEBUG: "true"
                 AIKIDO_ENABLED: "${{ matrix.aikido_enabled }}"
@@ -486,36 +485,35 @@ jobs:
                 start_period: 60s
           COMPOSEEOF
 
-                      docker compose up -d
+            docker compose up -d
 
-                      echo "⏳ Waiting for application..."
-                      sleep 60
+            echo "⏳ Waiting for application..."
+            sleep 60
 
-                      APP_READY=false
-                      for i in {1..10}; do
-                        if curl -f -s http://localhost:3000 > /dev/null; then
-                          echo "✅ Application ready"
-                          echo ""
-                          echo "📋 Configuration:"
-                          echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
-                          echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
-                          echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
-                          echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
-                          APP_READY=true
-                          break
-                        fi
-                        echo "Waiting... ($i/10)"
-                        sleep 5
-                      done
+            APP_READY=false
+            for i in {1..10}; do
+              if curl -f -s http://localhost:3000 > /dev/null; then
+                echo "✅ Application ready"
+                echo ""
+                echo "📋 Configuration:"
+                echo "  - DataDog AppSec: ${{ matrix.dd_appsec }}"
+                echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
+                echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
+                echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
+                APP_READY=true
+                break
+              fi
+              echo "Waiting... ($i/10)"
+              sleep 5
+            done
 
-                      if [ "$APP_READY" = false ]; then
-                        echo "⚠️  Application may need more time, continuing anyway"
-                      fi
-                      
-                      # Ensure proper exit
-                      exit 0
-                    ENDSSH
-                  timeout-minutes: 30
+            if [ "$APP_READY" = false ]; then
+              echo "⚠️  Application may need more time, continuing anyway"
+            fi
+            
+            exit 0
+          ENDSSH
+        timeout-minutes: 30
 
       - name: Run Custom Attack Suite
         run: |
