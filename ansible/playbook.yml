@@ -1653,6 +1653,7 @@
       copy:
         dest: /opt/monitoring/grafana-provisioning/dashboards/rasp-vs-iast.json
         content: |
+          {% raw %}
           {
             "dashboard": {
               "title": "RASP vs IAST - Comprehensive Security Benchmark",
@@ -1805,6 +1806,7 @@
               "time": {"from": "now-24h", "to": "now"}
             }
           }
+          {% endraw %}
         owner: ubuntu
         group: ubuntu
         mode: '0644'
