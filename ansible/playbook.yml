@@ -1112,6 +1112,15 @@
     # =======================================================================
     # CONTINUOUS ATTACK AUTOMATION SYSTEM
     # =======================================================================
+    - name: Create benchmark results directory
+      file:
+        path: /var/lib/benchmark-results
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      become: true
+
     - name: Create continuous benchmark orchestrator
       copy:
         dest: /opt/benchmark-tools/continuous_benchmark.py
