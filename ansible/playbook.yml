@@ -474,7 +474,7 @@
                 DD_DATA_STREAMS_ENABLED: "true"
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
-                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
+                AIKIDO_TOKEN: ${aikido_token}
                 AIKIDO_BLOCK: "false"
                 AIKIDO_DEBUG: "true"
               env_file:
