@@ -1961,6 +1961,7 @@
       copy:
         dest: /opt/benchmark-tools/check_status.sh
         content: |
+          {% raw %}
           #!/bin/bash
           
           echo "═══════════════════════════════════════"
@@ -2006,6 +2007,7 @@
           echo "  Grafana: http://$PUBLIC_IP:3001"
           echo "  Prometheus: http://$PUBLIC_IP:9090"
           echo "═══════════════════════════════════════"
+          {% endraw %}
         owner: ubuntu
         group: ubuntu
         mode: '0755'
