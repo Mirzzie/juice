@@ -474,7 +474,7 @@
                 DD_DATA_STREAMS_ENABLED: "true"
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
-                AIKIDO_TOKEN: ${aikido_token}
+                AIKIDO_TOKEN: "{{ aikido_token }}"
                 AIKIDO_BLOCK: "false"
                 AIKIDO_DEBUG: "true"
               env_file:
@@ -1225,7 +1225,7 @@
                 DD_RUNTIME_METRICS_ENABLED: "true"
                 DD_APPSEC_ENABLED: "{config['dd_appsec']}"
                 DD_IAST_ENABLED: "{config['dd_iast']}"
-                AIKIDO_TOKEN: "{{aikido_token}}"
+                AIKIDO_TOKEN = "{{ aikido_token }}"
                 AIKIDO_BLOCK: "{config['aikido_block']}"
                 AIKIDO_DEBUG: "true"
                 AIKIDO_ENABLED: "{config['aikido_enabled']}"
