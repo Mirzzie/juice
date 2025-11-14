@@ -200,7 +200,7 @@ jobs:
     if: |
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
       (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
-      (github.ref == 'refs/heads/main' || github.event.inputs.deploy_continuous == 'true')
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev-test' || github.event.inputs.deploy_continuous == 'true')
     steps:
       - name: Setup SSH Key
         run: |
@@ -435,6 +435,7 @@ jobs:
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
       - name: Deploy Application with ${{ matrix.config }} Configuration
         run: |
           ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
@@ -490,7 +491,6 @@ jobs:
             echo "⏳ Waiting for application..."
             sleep 60
 
-            APP_READY=false
             for i in {1..10}; do
               if curl -f -s http://localhost:3000 > /dev/null; then
                 echo "✅ Application ready"
@@ -500,17 +500,13 @@ jobs:
                 echo "  - DataDog IAST: ${{ matrix.dd_iast }}"
                 echo "  - Aikido Enabled: ${{ matrix.aikido_enabled }}"
                 echo "  - Aikido Blocking: ${{ matrix.aikido_block }}"
-                APP_READY=true
-                break
+                exit 0
               fi
               echo "Waiting... ($i/10)"
               sleep 5
             done
 
-            if [ "$APP_READY" = false ]; then
-              echo "⚠️  Application may need more time, continuing anyway"
-            fi
-            
+            echo "⚠️  Application may need more time, continuing anyway"
             exit 0
           ENDSSH
         timeout-minutes: 30
