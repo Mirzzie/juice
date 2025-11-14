@@ -458,14 +458,6 @@
       poll: 15
       register: docker_build
 
-    - name: Wait for Docker build to complete
-      async_status:
-        jid: "{{ docker_build.ansible_job_id }}"
-      register: build_result
-      until: build_result.finished
-      retries: 120
-      delay: 15
-
     - name: Verify Docker image exists
       command: docker images juice-shop-secure:latest -q
       register: image_check
@@ -473,7 +465,7 @@
 
     - name: Display Docker image info
       debug:
-        msg: "Docker image built successfully: {{ image_check.stdout }}"
+        msg: "✅ Docker image built successfully (ID: {{ image_check.stdout }})"
       when: image_check.stdout != ""
 
     # =======================================================================
