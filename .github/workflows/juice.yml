@@ -1,4 +1,4 @@
-name: RASP vs IAST Comparative Benchmarking Pipeline (IMPROVED)
+name: RASP vs IAST Comparative Benchmarking Pipeline (FIXED)
 
 on:
   push:
@@ -34,8 +34,8 @@ on:
         type: choice
         default: "baseline"
         options:
-          - baseline # Fast: ~5 min per config
-          - full # Slow: ~20 min per config
+          - baseline
+          - full
       deploy_continuous:
         description: "Deploy continuous benchmark system"
         required: false
@@ -152,6 +152,16 @@ jobs:
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
+      - name: Configure SSH Keep-Alive
+        run: |
+          cat >> ~/.ssh/config << 'EOF'
+          Host *
+            ServerAliveInterval 30
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            ConnectTimeout 10
+          EOF
+
       - name: Wait for SSH Availability
         run: |
           echo "Testing SSH connection..."
@@ -187,14 +197,11 @@ jobs:
           cd ansible
           ansible-playbook -i inventory.ini playbook.yml \
             --vault-password-file .vault_pass -v
-        timeout-minutes: 45
+        timeout-minutes: 60
 
       - name: Clean Up Vault Password
         if: always()
         run: rm -f ansible/.vault_pass
-
-  # GitHub Actions Workflow Fix
-  # Replace the "deploy-continuous-benchmark" job in your .github/workflows/benchmark.yml
 
   deploy-continuous-benchmark:
     name: 🚀 Deploy Continuous Benchmark System
@@ -212,85 +219,54 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
+      - name: Configure SSH Keep-Alive
+        run: |
+          cat >> ~/.ssh/config << 'EOF'
+          Host *
+            ServerAliveInterval 30
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+          EOF
+
       - name: Verify System Configuration
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "Checking if system is configured..."
-            if [ ! -f /opt/benchmark-tools/start_benchmark_system.sh ]; then
-              echo "❌ System not configured. Please run with skip_ansible: false"
-              exit 1
-            fi
-            echo "✅ System is configured and ready"
-          ENDSSH
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
+            'test -f /opt/benchmark-tools/start_benchmark_system.sh && echo "✅ System configured" || exit 1'
+        timeout-minutes: 1
 
-      - name: Deploy and Start Continuous System (Background)
+      - name: Launch Continuous System (Background)
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
+            'cd /opt/benchmark-tools && nohup ./start_benchmark_system.sh > /tmp/benchmark_startup.log 2>&1 & echo $! > /tmp/benchmark_startup.pid'
+
+          echo "✅ Startup script launched in background"
+        timeout-minutes: 2
+
+      - name: Wait for Initial Startup
+        run: sleep 45
+
+      - name: Check Deployment Status
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'EOF'
             echo "═══════════════════════════════════════════"
-            echo "🚀 Deploying Continuous Benchmark System"
+            echo "Deployment Status Check"
             echo "═══════════════════════════════════════════"
             
-            # Create log files with proper permissions
-            sudo touch /var/log/continuous_benchmark.log /var/log/continuous_benchmark_error.log
-            sudo chown ubuntu:ubuntu /var/log/continuous_benchmark*.log
-            
-            # Start the system in background
-            cd /opt/benchmark-tools
-            nohup ./start_benchmark_system.sh > /tmp/benchmark_startup.log 2>&1 &
-            
-            echo "✅ Startup script launched in background"
-            echo "📝 Logs: /tmp/benchmark_startup.log"
-          ENDSSH
-        timeout-minutes: 5
-
-      - name: Wait for Services to Initialize
-        run: |
-          echo "⏳ Waiting 45 seconds for services to initialize..."
-          sleep 45
-
-      - name: Verify Services Started
-        run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "════════════════════════════════════════"
-            echo "✅ Checking Service Status"
-            echo "════════════════════════════════════"
-            
-            # Check continuous benchmark service
-            if systemctl is-active --quiet continuous-benchmark; then
-                echo "✅ Continuous benchmark service: RUNNING"
-            else
-                echo "⚠️  Continuous benchmark service: NOT YET ACTIVE"
-                echo "Last 10 lines of service log:"
-                sudo journalctl -u continuous-benchmark -n 10 --no-pager || true
-            fi
-            
-            # Check Docker containers
-            if docker ps --filter "name=prometheus" --format "{{.Names}}" | grep -q "prometheus"; then
-                echo "✅ Prometheus: RUNNING"
-            else
-                echo "⚠️  Prometheus: NOT YET RUNNING"
-            fi
-            
-            if docker ps --filter "name=grafana" --format "{{.Names}}" | grep -q "grafana"; then
-                echo "✅ Grafana: RUNNING"
-            else
-                echo "⚠️  Grafana: NOT YET RUNNING"
-            fi
-            
-            # Check Prometheus exporter
-            if pgrep -f prometheus_exporter_enhanced.py > /dev/null; then
-                echo "✅ Prometheus Exporter: RUNNING"
-            else
-                echo "⚠️  Prometheus Exporter: NOT YET RUNNING"
-            fi
+            systemctl is-active continuous-benchmark && echo "✅ Service: ACTIVE" || echo "⏳ Service: Starting"
+            docker ps | grep -q prometheus && echo "✅ Prometheus: UP" || echo "⏳ Prometheus: Starting"
+            docker ps | grep -q grafana && echo "✅ Grafana: UP" || echo "⏳ Grafana: Starting"
             
             echo ""
-            echo "📋 Startup Log (last 20 lines):"
-            tail -20 /tmp/benchmark_startup.log 2>/dev/null || echo "Log not yet available"
-          ENDSSH
+            echo "Startup log (last 15 lines):"
+            tail -15 /tmp/benchmark_startup.log 2>/dev/null || echo "Log not yet available"
+            
+            echo ""
+            echo "Note: Full deployment continues in background"
+          EOF
+        timeout-minutes: 1
         continue-on-error: true
 
-      - name: Create Summary Report
+      - name: Create Deployment Summary
         if: always()
         run: |
           PUBLIC_IP="${{ env.EC2_INSTANCE_IP }}"
@@ -311,156 +287,23 @@ jobs:
           - **Rotation Interval**: Each configuration runs for 60 minutes
           - **Attack Frequency**: Attacks execute every 5 minutes
           - **Data Retention**: 30 days
-          - **Configurations Tested**:
-            1. Baseline (No Protection)
-            2. DataDog IAST Only
-            3. Aikido RASP (Monitoring)
-            4. Aikido RASP (Blocking)
-
-          ## 📈 Key Metrics Being Collected
-
-          - Blocking Effectiveness Rate
-          - Detection Effectiveness Rate
-          - Attack Success Rate
-          - Response Time Distribution
-          - False Positive Rate
-          - RASP vs IAST Comparative Advantage
-          - Security Score Trends
 
           ## 🔧 Management Commands
 
           \`\`\`bash
           # Check system status
-          ssh ubuntu@${PUBLIC_IP} << 'EOF'
-            systemctl status continuous-benchmark
-            docker ps
-            tail -20 /tmp/benchmark_startup.log
-          EOF
+          ssh ubuntu@${PUBLIC_IP} systemctl status continuous-benchmark
 
-          # View live logs
+          # View logs
           ssh ubuntu@${PUBLIC_IP} journalctl -u continuous-benchmark -f
 
-          # Restart benchmark service
-          ssh ubuntu@${PUBLIC_IP} sudo systemctl restart continuous-benchmark
-
-          # Stop system (preserve data)
-          ssh ubuntu@${PUBLIC_IP} << 'EOF'
-            sudo systemctl stop continuous-benchmark
-            cd /opt/monitoring && docker compose down
-          EOF
+          # Check startup log
+          ssh ubuntu@${PUBLIC_IP} tail -50 /tmp/benchmark_startup.log
           \`\`\`
 
-          ## 📊 Expected Results Timeline
-
-          - **15 minutes**: First attack results visible
-          - **1 hour**: First configuration rotation
-          - **4 hours**: Complete cycle through all configurations
-          - **24 hours**: Sufficient data for trend analysis
-          - **7 days**: Comprehensive comparative analysis ready
-
-          ## ⚠️ Note
-
-          Services are starting in the background. If Grafana/Prometheus are not immediately accessible:
-          1. Wait 2-3 minutes for Docker containers to fully start
-          2. Check logs: \`ssh ubuntu@${PUBLIC_IP} "tail -f /tmp/benchmark_startup.log"\`
-          3. Verify status: \`ssh ubuntu@${PUBLIC_IP} "systemctl status continuous-benchmark"\`
-
-          ---
-
-          ⏰ **System Status**: Deployed and initializing. Monitor AWS costs and stop when sufficient data is collected.
+          ⏰ **Status**: Deployed and initializing. Dashboards available in 5-10 minutes.
           EOF
 
-      - name: Setup Automatic Daily Report
-        if: github.event.inputs.enable_daily_reports == 'true'
-        run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            # Create daily report generator
-            cat > /opt/benchmark-tools/generate_daily_report.py << 'PYEOF'
-          #!/usr/bin/env python3
-          """Daily Benchmark Report Generator"""
-
-          import json
-          import pandas as pd
-          from pathlib import Path
-          from datetime import datetime, timedelta
-
-          def generate_report():
-              results_base = Path('/var/lib/benchmark-results')
-              report = []
-              
-              configs = ['baseline', 'iast-only', 'rasp-monitor', 'rasp-block']
-              
-              for config in configs:
-                  config_path = results_base / config
-                  if not config_path.exists():
-                      continue
-                  
-                  # Get last 24 hours of data
-                  cutoff = datetime.now() - timedelta(hours=24)
-                  total_attacks = 0
-                  total_blocked = 0
-                  total_detected = 0
-                  
-                  for result_dir in config_path.iterdir():
-                      if result_dir.name == 'latest':
-                          continue
-                      
-                      try:
-                          timestamp = datetime.strptime(result_dir.name, '%Y%m%d_%H%M%S')
-                          if timestamp > cutoff:
-                              summary_file = result_dir / 'summary.json'
-                              if summary_file.exists():
-                                  with open(summary_file) as f:
-                                      data = json.load(f)
-                                  
-                                  for attack_type, stats in data.get('attacks', {}).items():
-                                      total_attacks += stats.get('total', 0)
-                                      total_blocked += stats.get('blocked', 0)
-                                      total_detected += stats.get('detected', 0)
-                      except:
-                          continue
-                  
-                  if total_attacks > 0:
-                      report.append({
-                          'Configuration': config,
-                          'Total Attacks (24h)': total_attacks,
-                          'Blocked': total_blocked,
-                          'Detection Rate': f"{((total_detected + total_blocked) / total_attacks * 100):.1f}%",
-                          'Block Rate': f"{(total_blocked / total_attacks * 100):.1f}%"
-                      })
-              
-              return pd.DataFrame(report)
-
-          if __name__ == '__main__':
-              df = generate_report()
-              print("Daily Security Benchmark Report")
-              print("="*50)
-              print(df.to_string(index=False))
-              
-              # Save to file
-              df.to_csv('/tmp/daily_report.csv', index=False)
-              
-              # Calculate RASP advantage
-              rasp_block = df[df['Configuration'] == 'rasp-block']
-              iast = df[df['Configuration'] == 'iast-only']
-              
-              if len(rasp_block) > 0 and len(iast) > 0:
-                  rasp_rate = float(rasp_block['Block Rate'].values[0].strip('%'))
-                  iast_rate = float(iast['Block Rate'].values[0].strip('%'))
-                  advantage = rasp_rate - iast_rate
-                  print(f"\n🏆 RASP Blocking Advantage: +{advantage:.1f}%")
-              
-              print(f"\nReport saved to /tmp/daily_report.csv")
-          PYEOF
-            
-            chmod +x /opt/benchmark-tools/generate_daily_report.py
-            
-            # Add to crontab for daily execution at midnight
-            (crontab -l 2>/dev/null; echo "0 0 * * * /opt/benchmark-tools/generate_daily_report.py > /var/log/daily_report.log 2>&1") | crontab -
-            
-            echo "✅ Daily report generation enabled (runs at midnight UTC)"
-          ENDSSH
-        continue-on-error: true
   benchmark-tests:
     name: 🧪 ${{ matrix.config_name }}
     runs-on: ubuntu-latest
@@ -510,9 +353,18 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
+      - name: Configure SSH Keep-Alive
+        run: |
+          cat >> ~/.ssh/config << 'EOF'
+          Host *
+            ServerAliveInterval 30
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+          EOF
+
       - name: Deploy Application with ${{ matrix.config }} Configuration
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             set -e
             cd /opt/juice-shop
 
@@ -521,11 +373,11 @@ jobs:
             echo "════════════════════════════════════════"
 
             docker compose down 2>/dev/null || true
+            sleep 5
 
             cat > docker-compose.yml << 'COMPOSEEOF'
           services:
             juice-shop:
-              build: .
               image: juice-shop-secure:latest
               container_name: juice-shop
               restart: unless-stopped
@@ -583,11 +435,11 @@ jobs:
             echo "⚠️  Application may need more time, continuing anyway"
             exit 0
           ENDSSH
-        timeout-minutes: 30
+        timeout-minutes: 5
 
       - name: Run Custom Attack Suite
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             mkdir -p "$RESULTS_DIR"
             
@@ -601,11 +453,12 @@ jobs:
             fi
           ENDSSH
         continue-on-error: true
+        timeout-minutes: 10
 
       - name: Run ZAP Security Scan
         if: github.event.inputs.include_zap_scan == 'true'
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             mkdir -p "$RESULTS_DIR"
             
@@ -635,11 +488,11 @@ jobs:
             echo "✅ ZAP scan completed"
           ENDSSH
         continue-on-error: true
-        timeout-minutes: 35
+        timeout-minutes: 25
 
       - name: Collect Security Logs
         run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             
             docker logs juice-shop > "$RESULTS_DIR/container.log" 2>&1 || true
@@ -654,6 +507,7 @@ jobs:
             echo "BLOCKED,$BLOCKED" >> "$RESULTS_DIR/security_events.csv"
             echo "DETECTED,$DETECTED" >> "$RESULTS_DIR/security_events.csv"
           ENDSSH
+        timeout-minutes: 2
 
       - name: Download Results
         run: |
@@ -661,6 +515,7 @@ jobs:
           scp -i ~/.ssh/id_rsa -r \
             ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/benchmark-results/${{ matrix.config }}/* \
             ./results/${{ matrix.config }}/ || echo "No results to download"
+        timeout-minutes: 5
 
       - name: Upload Results Artifact
         uses: actions/upload-artifact@v4
@@ -722,7 +577,6 @@ jobs:
               if not config_dir.exists():
                   continue
               
-              # Parse custom attack results
               summary_file = config_dir / 'summary.csv'
               if summary_file.exists():
                   try:
@@ -743,7 +597,6 @@ jobs:
                   except Exception as e:
                       print(f"Error reading {summary_file}: {e}")
               
-              # Parse ZAP results if available
               zap_file = config_dir / 'zap-report.json'
               if zap_file.exists():
                   try:
@@ -780,19 +633,16 @@ jobs:
               df = pd.DataFrame(all_data)
               df.to_csv('comparative_results.csv', index=False)
               
-              # Generate summary with combined results
               summary = []
               for config in configs:
                   config_data = df[df['Configuration'] == config]
                   
                   if len(config_data) > 0:
-                      # Custom scripts totals
                       custom_data = config_data[config_data['Source'] == 'Custom Scripts']
                       custom_total = custom_data['Total Attacks'].sum()
                       custom_detected = custom_data['Detected'].sum()
                       custom_blocked = custom_data['Blocked'].sum()
                       
-                      # ZAP totals
                       zap_data = config_data[config_data['Source'] == 'ZAP Scan']
                       zap_total = zap_data['Total Attacks'].sum() if len(zap_data) > 0 else 0
                       zap_high = zap_data['Detected'].sum() if len(zap_data) > 0 else 0
@@ -809,7 +659,7 @@ jobs:
               
               if summary:
                   pd.DataFrame(summary).to_csv('summary_statistics.csv', index=False)
-                  print("✅ Analysis complete with combined results")
+                  print("✅ Analysis complete")
               else:
                   with open('summary_statistics.csv', 'w') as f:
                       f.write('Configuration,Status\n')
@@ -844,7 +694,6 @@ jobs:
                   print("\n## Configuration Comparison\n")
                   print(df.to_markdown(index=False))
                   
-                  # Calculate RASP advantage
                   rasp = df[df['Configuration'] == 'rasp-block']
                   iast = df[df['Configuration'] == 'iast-only']
                   if len(rasp) > 0 and len(iast) > 0:
@@ -859,31 +708,6 @@ jobs:
             echo "⚠️  No benchmark results available" >> BENCHMARK_REPORT.md
           fi
 
-          cat >> BENCHMARK_REPORT.md << 'EOF'
-
-          ## 📖 Interpretation Guide
-
-          ### Metrics Explained
-          - **Detection Rate**: Percentage of attacks identified by the security tool
-          - **Blocking Rate**: Percentage of attacks actively prevented from succeeding
-          - **Combined Score**: Weighted average of security effectiveness metrics
-
-          ### Configuration Details
-          1. **Baseline**: No security tools enabled (control group)
-          2. **IAST-Only**: DataDog IAST with AppSec enabled
-          3. **RASP-Monitor**: Aikido Zen in monitoring mode (detection only)
-          4. **RASP-Block**: Aikido Zen in blocking mode (active protection)
-
-          ## 🔄 Continuous Monitoring Status
-
-          The system is now running continuous benchmarks with:
-          - Automated rotation through all configurations every 4 hours
-          - Attack execution every 5 minutes
-          - Real-time metrics collection to Prometheus
-          - Visual dashboards available in Grafana
-
-          EOF
-
           cat BENCHMARK_REPORT.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Comprehensive Report
@@ -895,71 +719,4 @@ jobs:
             comparative_results.csv
             summary_statistics.csv
           retention-days: 90
-        continue-on-error: true
-
-  monitoring-status:
-    name: 📊 Report Monitoring System Status
-    runs-on: ubuntu-latest
-    needs: [deploy-continuous-benchmark]
-    if: |
-      always() &&
-      needs.deploy-continuous-benchmark.result == 'success'
-    steps:
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-      - name: Collect Monitoring Status
-        run: |
-          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH' > monitoring_status.txt
-            /opt/benchmark-tools/check_status.sh
-            
-            echo ""
-            echo "📊 Recent Attack Results:"
-            echo "========================"
-            
-            for config in baseline iast-only rasp-monitor rasp-block; do
-              latest="/var/lib/benchmark-results/$config/latest/summary.json"
-              if [ -f "$latest" ]; then
-                python3 -c "
-          import json
-          with open('$latest') as f:
-              data = json.load(f)
-          attacks = data.get('attacks', {})
-          total = sum(a.get('total', 0) for a in attacks.values())
-          blocked = sum(a.get('blocked', 0) for a in attacks.values())
-          print(f'$config: {blocked}/{total} blocked ({blocked/total*100:.1f}%)')
-          "
-              fi
-            done
-          ENDSSH
-
-      - name: Create Status Comment
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const status = fs.readFileSync('monitoring_status.txt', 'utf8');
-            const ec2Ip = process.env.EC2_INSTANCE_IP;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 📊 Continuous Benchmark System Status
-              
-              \`\`\`
-              ${status}
-              \`\`\`
-              
-              ### 🌐 Live Dashboards
-              - **Grafana**: http://${ec2Ip}:3001 (admin/rasp_vs_iast_2024)
-              - **Prometheus**: http://${ec2Ip}:9090
-              
-              The system will continue collecting data. Check the dashboards for real-time results.`
-            });
         continue-on-error: true

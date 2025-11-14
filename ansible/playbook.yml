@@ -446,6 +446,37 @@
         mode: '0644'
 
     # =======================================================================
+    # PRE-BUILD DOCKER IMAGE (Prevents GitHub Actions timeout)
+    # =======================================================================
+    - name: Pre-build Docker image to avoid timeout during tests
+      shell: |
+        cd /opt/juice-shop
+        docker compose build
+      become: true
+      become_user: ubuntu
+      async: 1800
+      poll: 15
+      register: docker_build
+
+    - name: Wait for Docker build to complete
+      async_status:
+        jid: "{{ docker_build.ansible_job_id }}"
+      register: build_result
+      until: build_result.finished
+      retries: 120
+      delay: 15
+
+    - name: Verify Docker image exists
+      command: docker images juice-shop-secure:latest -q
+      register: image_check
+      changed_when: false
+
+    - name: Display Docker image info
+      debug:
+        msg: "Docker image built successfully: {{ image_check.stdout }}"
+      when: image_check.stdout != ""
+
+    # =======================================================================
     # DOCKER COMPOSE
     # =======================================================================
     - name: Create docker-compose.yml template
@@ -2003,8 +2034,8 @@
         
         echo ""
         echo "=== Docker Containers ==="
-        docker ps --filter "name=prometheus" --format "✅ {{.Names}}: {{.Status}}" 2>/dev/null || echo "⚠️  Prometheus: NOT RUNNING"
-        docker ps --filter "name=grafana" --format "✅ {{.Names}}: {{.Status}}" 2>/dev/null || echo "⚠️  Grafana: NOT RUNNING"
+        docker ps --filter "name=prometheus" --format "✅ {{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}" 2>/dev/null || echo "⚠️  Prometheus: NOT RUNNING"
+        docker ps --filter "name=grafana" --format "✅ {{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}" 2>/dev/null || echo "⚠️  Grafana: NOT RUNNING"
         
         echo ""
         echo "=== Background Processes ==="
@@ -2023,6 +2054,9 @@
     - name: Display final system status
       debug:
         var: final_status.stdout_lines
+      when: 
+        - final_status is defined
+        - final_status.stdout_lines is defined
 
     - name: Display access information
       debug:
