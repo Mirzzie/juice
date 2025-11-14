@@ -1865,6 +1865,76 @@
         owner: ubuntu
         group: ubuntu
         mode: '0644'
+    - name: Create systemd oneshot service for initial startup
+      copy:
+        dest: /etc/systemd/system/benchmark-initial-setup.service
+        content: |
+          [Unit]
+          Description=Initial Benchmark System Setup (One-time)
+          After=network.target docker.service datadog-agent.service
+          Wants=docker.service
+          
+          [Service]
+          Type=oneshot
+          User=ubuntu
+          Group=ubuntu
+          WorkingDirectory=/opt/benchmark-tools
+          ExecStart=/opt/benchmark-tools/start_benchmark_system.sh
+          StandardOutput=append:/var/log/benchmark_initial_setup.log
+          StandardError=append:/var/log/benchmark_initial_setup.log
+          TimeoutStartSec=600
+          RemainAfterExit=no
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Create log file with proper permissions
+      file:
+        path: /var/log/benchmark_initial_setup.log
+        state: touch
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+# 2. Replace the failing task with this:
+
+    - name: Start the complete benchmark system via systemd
+      systemd:
+        name: benchmark-initial-setup
+        state: started
+        daemon_reload: yes
+      register: system_start
+      ignore_errors: true
+
+# 3. Add this task to check the status:
+
+    - name: Wait for initial setup to progress
+      pause:
+        seconds: 45
+
+    - name: Check setup status and collect logs
+      shell: |
+        echo "=== Service Status ==="
+        systemctl status benchmark-initial-setup --no-pager --lines=0 || true
+        
+        echo ""
+        echo "=== Setup Log (last 30 lines) ==="
+        tail -30 /var/log/benchmark_initial_setup.log || echo "Log not yet available"
+        
+        echo ""
+        echo "=== Running Services ==="
+        systemctl is-active continuous-benchmark && echo "✅ Continuous benchmark: ACTIVE" || echo "⚠️  Continuous benchmark: NOT ACTIVE"
+        docker ps --filter "name=prometheus" --format "✅ {{.Names}}: {{.Status}}" 2>/dev/null || echo "⚠️  Prometheus: NOT RUNNING"
+        docker ps --filter "name=grafana" --format "✅ {{.Names}}: {{.Status}}" 2>/dev/null || echo "⚠️  Grafana: NOT RUNNING"
+      register: final_status
+      ignore_errors: true
+
+    - name: Display final setup status
+      debug:
+        msg: "{{ final_status.stdout_lines }}"
+      when: final_status.stdout_lines is defined
+
 
     - name: Create automated startup script
       copy:

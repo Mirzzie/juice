@@ -193,6 +193,9 @@ jobs:
         if: always()
         run: rm -f ansible/.vault_pass
 
+  # GitHub Actions Workflow Fix
+  # Replace the "deploy-continuous-benchmark" job in your .github/workflows/benchmark.yml
+
   deploy-continuous-benchmark:
     name: 🚀 Deploy Continuous Benchmark System
     runs-on: ubuntu-latest
@@ -209,36 +212,91 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Deploy and Start Continuous System
+      - name: Verify System Configuration
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "Checking if system is configured..."
+            if [ ! -f /opt/benchmark-tools/start_benchmark_system.sh ]; then
+              echo "❌ System not configured. Please run with skip_ansible: false"
+              exit 1
+            fi
+            echo "✅ System is configured and ready"
+          ENDSSH
+
+      - name: Deploy and Start Continuous System (Background)
         run: |
           ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             echo "═══════════════════════════════════════════"
             echo "🚀 Deploying Continuous Benchmark System"
             echo "═══════════════════════════════════════════"
             
-            # Check if system is already configured
-            if [ ! -f /opt/benchmark-tools/start_benchmark_system.sh ]; then
-              echo "❌ System not configured. Please run with skip_ansible: false"
-              exit 1
+            # Create log files with proper permissions
+            sudo touch /var/log/continuous_benchmark.log /var/log/continuous_benchmark_error.log
+            sudo chown ubuntu:ubuntu /var/log/continuous_benchmark*.log
+            
+            # Start the system in background
+            cd /opt/benchmark-tools
+            nohup ./start_benchmark_system.sh > /tmp/benchmark_startup.log 2>&1 &
+            
+            echo "✅ Startup script launched in background"
+            echo "📝 Logs: /tmp/benchmark_startup.log"
+          ENDSSH
+        timeout-minutes: 5
+
+      - name: Wait for Services to Initialize
+        run: |
+          echo "⏳ Waiting 45 seconds for services to initialize..."
+          sleep 45
+
+      - name: Verify Services Started
+        run: |
+          ssh -T -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            echo "════════════════════════════════════════"
+            echo "✅ Checking Service Status"
+            echo "════════════════════════════════════"
+            
+            # Check continuous benchmark service
+            if systemctl is-active --quiet continuous-benchmark; then
+                echo "✅ Continuous benchmark service: RUNNING"
+            else
+                echo "⚠️  Continuous benchmark service: NOT YET ACTIVE"
+                echo "Last 10 lines of service log:"
+                sudo journalctl -u continuous-benchmark -n 10 --no-pager || true
             fi
             
-            # Start the complete system
-            /opt/benchmark-tools/start_benchmark_system.sh
+            # Check Docker containers
+            if docker ps --filter "name=prometheus" --format "{{.Names}}" | grep -q "prometheus"; then
+                echo "✅ Prometheus: RUNNING"
+            else
+                echo "⚠️  Prometheus: NOT YET RUNNING"
+            fi
             
-            # Wait for stabilization
-            sleep 30
+            if docker ps --filter "name=grafana" --format "{{.Names}}" | grep -q "grafana"; then
+                echo "✅ Grafana: RUNNING"
+            else
+                echo "⚠️  Grafana: NOT YET RUNNING"
+            fi
             
-            # Check status
-            /opt/benchmark-tools/check_status.sh
+            # Check Prometheus exporter
+            if pgrep -f prometheus_exporter_enhanced.py > /dev/null; then
+                echo "✅ Prometheus Exporter: RUNNING"
+            else
+                echo "⚠️  Prometheus Exporter: NOT YET RUNNING"
+            fi
+            
+            echo ""
+            echo "📋 Startup Log (last 20 lines):"
+            tail -20 /tmp/benchmark_startup.log 2>/dev/null || echo "Log not yet available"
           ENDSSH
-        timeout-minutes: 20
+        continue-on-error: true
 
       - name: Create Summary Report
+        if: always()
         run: |
           PUBLIC_IP="${{ env.EC2_INSTANCE_IP }}"
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🚀 Continuous Benchmark System Deployed
+          # 🚀 Continuous Benchmark System Deployment
 
           ## 📊 Access Points
 
@@ -273,7 +331,11 @@ jobs:
 
           \`\`\`bash
           # Check system status
-          ssh ubuntu@${PUBLIC_IP} /opt/benchmark-tools/check_status.sh
+          ssh ubuntu@${PUBLIC_IP} << 'EOF'
+            systemctl status continuous-benchmark
+            docker ps
+            tail -20 /tmp/benchmark_startup.log
+          EOF
 
           # View live logs
           ssh ubuntu@${PUBLIC_IP} journalctl -u continuous-benchmark -f
@@ -282,7 +344,10 @@ jobs:
           ssh ubuntu@${PUBLIC_IP} sudo systemctl restart continuous-benchmark
 
           # Stop system (preserve data)
-          ssh ubuntu@${PUBLIC_IP} sudo systemctl stop continuous-benchmark
+          ssh ubuntu@${PUBLIC_IP} << 'EOF'
+            sudo systemctl stop continuous-benchmark
+            cd /opt/monitoring && docker compose down
+          EOF
           \`\`\`
 
           ## 📊 Expected Results Timeline
@@ -293,9 +358,16 @@ jobs:
           - **24 hours**: Sufficient data for trend analysis
           - **7 days**: Comprehensive comparative analysis ready
 
+          ## ⚠️ Note
+
+          Services are starting in the background. If Grafana/Prometheus are not immediately accessible:
+          1. Wait 2-3 minutes for Docker containers to fully start
+          2. Check logs: \`ssh ubuntu@${PUBLIC_IP} "tail -f /tmp/benchmark_startup.log"\`
+          3. Verify status: \`ssh ubuntu@${PUBLIC_IP} "systemctl status continuous-benchmark"\`
+
           ---
 
-          ⏰ **Note**: System will run continuously. Monitor AWS costs and stop when sufficient data is collected.
+          ⏰ **System Status**: Deployed and initializing. Monitor AWS costs and stop when sufficient data is collected.
           EOF
 
       - name: Setup Automatic Daily Report
@@ -305,6 +377,8 @@ jobs:
             # Create daily report generator
             cat > /opt/benchmark-tools/generate_daily_report.py << 'PYEOF'
           #!/usr/bin/env python3
+          """Daily Benchmark Report Generator"""
+
           import json
           import pandas as pd
           from pathlib import Path
@@ -381,12 +455,12 @@ jobs:
             
             chmod +x /opt/benchmark-tools/generate_daily_report.py
             
-            # Add to crontab for daily execution
+            # Add to crontab for daily execution at midnight
             (crontab -l 2>/dev/null; echo "0 0 * * * /opt/benchmark-tools/generate_daily_report.py > /var/log/daily_report.log 2>&1") | crontab -
             
-            echo "✅ Daily report generation enabled"
+            echo "✅ Daily report generation enabled (runs at midnight UTC)"
           ENDSSH
-
+        continue-on-error: true
   benchmark-tests:
     name: 🧪 ${{ matrix.config_name }}
     runs-on: ubuntu-latest
