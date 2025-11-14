@@ -1880,8 +1880,8 @@
           # Start enhanced Prometheus exporter
           echo "📈 Starting enhanced exporter..."
           pkill -f prometheus_exporter_enhanced.py 2>/dev/null || true
-          nohup python3 /opt/monitoring/prometheus_exporter_enhanced.py > /var/log/prometheus_exporter.log 2>&1 &
-          echo $! > /var/run/prometheus_exporter.pid
+          nohup python3 /opt/monitoring/prometheus_exporter_enhanced.py > /tmp/prometheus_exporter.log 2>&1 &
+          echo $! > /tmp/prometheus_exporter.pid
           
           # Enable and start continuous benchmark service
           echo "⚔️ Starting continuous benchmark service..."

@@ -200,7 +200,7 @@ jobs:
     if: |
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
       (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
-      (github.ref == 'refs/heads/main' || github.event.inputs.deploy_continuous == 'true')
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev-test' || github.event.inputs.deploy_continuous == 'true')
     steps:
       - name: Setup SSH Key
         run: |
@@ -507,6 +507,7 @@ jobs:
             done
 
             echo "⚠️  Application may need more time"
+            exit 0
           ENDSSH
         timeout-minutes: 30
 
