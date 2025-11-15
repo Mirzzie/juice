@@ -285,11 +285,12 @@
     - name: Pre-build Docker image
       shell: |
         cd {{ juice_shop_dir }}
-        docker build -t juice-shop-secure:latest .
+        sg docker -c "docker build -t juice-shop-secure:latest ."
       become: true
       become_user: ubuntu
       async: 1800
       poll: 15
+      register: docker_build
 
     - name: Create docker-compose template
       copy:
@@ -916,6 +917,7 @@
           Type=simple
           User=ubuntu
           Group=ubuntu
+          SupplementaryGroups=docker
           WorkingDirectory=/opt/benchmark-tools
           ExecStart=/usr/bin/python3 /opt/benchmark-tools/continuous_iast_rasp_benchmark.py
           Restart=always
@@ -1226,8 +1228,8 @@
           # Start monitoring stack
           echo "📊 Starting Prometheus + Grafana..."
           cd /opt/monitoring
-          docker compose down 2>/dev/null || true
-          docker compose up -d
+          sg docker -c "docker compose down" 2>/dev/null || true
+          sg docker -c "docker compose up -d"
           
           # Start metrics exporter
           echo "📈 Starting metrics exporter..."
@@ -1238,8 +1240,8 @@
           sleep 10
           
           # Verify services
-          docker ps | grep -q prometheus && echo "✅ Prometheus: UP" || echo "❌ Prometheus: DOWN"
-          docker ps | grep -q grafana && echo "✅ Grafana: UP" || echo "❌ Grafana: DOWN"
+          sg docker -c "docker ps" | grep -q prometheus && echo "✅ Prometheus: UP" || echo "❌ Prometheus: DOWN"
+          sg docker -c "docker ps" | grep -q grafana && echo "✅ Grafana: UP" || echo "❌ Grafana: DOWN"
           pgrep -f prometheus_exporter.py > /dev/null && echo "✅ Exporter: UP" || echo "❌ Exporter: DOWN"
           
           PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "YOUR_IP")
