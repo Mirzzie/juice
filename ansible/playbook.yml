@@ -701,7 +701,7 @@
                   "title": "🛡️ Blocking Rate Comparison",
                   "type": "bargauge",
                   "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
-                  "targets": [{"expr": "security_blocking_rate_percent", "legendFormat": "{{config}}"}],
+                  "targets": [{"expr": "security_blocking_rate_percent", "legendFormat": "{{ '{{config}}' }}"}],
                   "fieldConfig": {"defaults": {"unit": "percent", "max": 100}}
                 },
                 {
