@@ -214,26 +214,45 @@
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
+          # Stage 1: Build environment
           FROM node:{{ node_version }}-bookworm-slim AS builder
+          # Install git in case some npm packages depend on it
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
-          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+
+          # Use the source code already cloned by Ansible
+          COPY . .
+
+          # Install ALL dependencies (including dev) for building the application
           RUN npm install
+          # Install security tool dependencies
           RUN npm install @aikidosec/firewall dd-trace
+
+          # Copy the tracer and inject it into the source code
           COPY tracer.ts ./tracer.ts
           RUN sed -i "1i import './tracer' // DataDog IAST" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
               sed -i "1i import './tracer' // DataDog IAST" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
+
+          # Build the TypeScript backend and Angular frontend
           RUN npx tsc || npm run build:server || echo "Build attempted"
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend built"
 
+          # --- FIX: Prune development dependencies to drastically reduce the size of node_modules ---
+          RUN npm prune --production
+
+          # Stage 2: Production environment
           FROM node:{{ node_version }}-bookworm-slim
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
+
+          # Copy the pruned application files from the builder stage. This is now much smaller.
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
+
+          # Create directories needed at runtime and set correct ownership
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
           USER juiceshop
