@@ -174,6 +174,25 @@
         enabled: yes
 
     # =======================================================================
+    # *** FIX ***: PRE-FLIGHT CHECKS & CLEANUP
+    # =======================================================================
+    - name: Clean up Docker system to reclaim disk space
+      shell: docker system prune -af || true
+      args:
+        warn: false
+      register: docker_prune
+      changed_when: "'Total reclaimed space' in docker_prune.stdout"
+
+    - name: Check for sufficient disk space before building
+      assert:
+        that:
+          - ansible_fs_avail.root.size_available > 5 * 1024 * 1024 * 1024 # Assert > 5GB free
+        fail_msg: "CRITICAL ERROR: Insufficient disk space. Only {{ (ansible_fs_avail.root.size_available / (1024*1024*1024)) | round(2) }}GB free. Please increase the EC2 volume size to at least 40GB."
+      vars:
+        ansible_fs_avail:
+          root: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | list | first }}"
+
+    # =======================================================================
     # APPLICATION SETUP
     # =======================================================================
     - name: Create application directory
@@ -210,49 +229,51 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile
+    # =======================================================================
+    # *** FIX ***: OPTIMIZED DOCKERFILE
+    # =======================================================================
+    - name: Create Optimized Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
           # Stage 1: Build environment
           FROM node:{{ node_version }}-bookworm-slim AS builder
-          # Install git in case some npm packages depend on it
-          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y --no-install-recommends git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
-          # Use the source code already cloned by Ansible
+          # Copy package files first to leverage Docker cache
+          COPY package.json package-lock.json ./
+          COPY frontend/package.json frontend/package-lock.json ./frontend/
+
+          # Install ALL dependencies first, including security tools, in a single layer
+          RUN npm install && \
+              npm install @aikidosec/firewall dd-trace
+
+          # Copy the rest of the source code
           COPY . .
 
-          # Install ALL dependencies (including dev) for building the application
-          RUN npm install
-          # Install security tool dependencies
-          RUN npm install @aikidosec/firewall dd-trace
-
-          # Copy the tracer and inject it into the source code
-          COPY tracer.ts ./tracer.ts
+          # Inject tracers now that dependencies are correctly installed
           RUN sed -i "1i import './tracer' // DataDog IAST" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
               sed -i "1i import './tracer' // DataDog IAST" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
-          # Build the TypeScript backend and Angular frontend
-          RUN npx tsc || npm run build:server || echo "Build attempted"
-          RUN cd frontend && npm install --legacy-peer-deps && \
-              node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend built"
+          # Build the TypeScript backend. The 'postinstall' script in package.json will build the frontend.
+          RUN npm run build:server
 
-          # --- FIX: Prune development dependencies to drastically reduce the size of node_modules ---
-          RUN npm prune --production
+          # Prune development dependencies and clean cache to drastically reduce image size
+          RUN npm prune --production && \
+              npm cache clean --force
 
           # Stage 2: Production environment
           FROM node:{{ node_version }}-bookworm-slim
-          RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y --no-install-recommends curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
 
-          # Copy the pruned application files from the builder stage. This is now much smaller.
+          # Copy only the pruned application files from the builder stage
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Create directories needed at runtime and set correct ownership
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
           USER juiceshop
@@ -319,9 +340,6 @@
         mode: '0600'
       no_log: true
 
-    # =======================================================================
-    # INSTALL PYTHON PACKAGES FOR METRICS
-    # =======================================================================
     - name: Install Python packages
       pip:
         name:
@@ -330,9 +348,6 @@
         break_system_packages: yes
       ignore_errors: true
 
-    # =======================================================================
-    # RESULTS DIRECTORY
-    # =======================================================================
     - name: Create results directory
       file:
         path: /var/lib/benchmark-results
@@ -341,9 +356,6 @@
         group: ubuntu
         mode: '0755'
 
-    # =======================================================================
-    # CONTINUOUS DAST SCANNER (ZAP ONLY)
-    # =======================================================================
     - name: Create continuous DAST benchmark script
       copy:
         dest: /opt/continuous_dast_benchmark.py
@@ -598,9 +610,6 @@
           WantedBy=multi-user.target
         mode: '0644'
 
-    # =======================================================================
-    # PROMETHEUS + GRAFANA
-    # =======================================================================
     - name: Create monitoring directory
       file:
         path: /opt/monitoring
