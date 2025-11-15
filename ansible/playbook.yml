@@ -228,7 +228,7 @@
         mode: '0644'
 
     # =======================================================================
-    # *** FINAL FIX ***: DOCKERFILE CORRECTED FOR package-lock.json
+    # *** FINAL FIX ***: DOCKERFILE CORRECTED FOR SSH DEPENDENCY
     # =======================================================================
     - name: Create Final Optimized Dockerfile
       copy:
@@ -236,7 +236,13 @@
         content: |
           # Stage 1: Build environment
           FROM node:{{ node_version }}-bookworm-slim AS builder
-          RUN apt-get update && apt-get install -y --no-install-recommends git python3 make g++ && rm -rf /var/lib/apt/lists/*
+
+          # FIX: Install all build dependencies, including git AND the openssh-client
+          RUN apt-get update && apt-get install -y --no-install-recommends git python3 make g++ openssh-client && rm -rf /var/lib/apt/lists/*
+          
+          # FIX: Force git to use https instead of ssh for github dependencies (Best Practice for CI)
+          RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          
           WORKDIR /juice-shop
 
           # Copy ONLY package.json files to leverage Docker layer caching
