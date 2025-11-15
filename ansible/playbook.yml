@@ -174,12 +174,10 @@
         enabled: yes
 
     # =======================================================================
-    # *** FIX ***: PRE-FLIGHT CHECKS & CLEANUP
+    # PRE-FLIGHT CHECKS & CLEANUP
     # =======================================================================
     - name: Clean up Docker system to reclaim disk space
-      shell: docker system prune -af || true
-      args:
-        warn: false
+      ansible.builtin.shell: docker system prune -af || true
       register: docker_prune
       changed_when: "'Total reclaimed space' in docker_prune.stdout"
 
@@ -229,9 +227,6 @@
         group: ubuntu
         mode: '0644'
 
-    # =======================================================================
-    # *** FIX ***: OPTIMIZED DOCKERFILE
-    # =======================================================================
     - name: Create Optimized Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
@@ -361,11 +356,6 @@
         dest: /opt/continuous_dast_benchmark.py
         content: |
           #!/usr/bin/env python3
-          """
-          Continuous DAST Benchmark using OWASP ZAP
-          Rotates between IAST and RASP configurations
-          """
-          
           import subprocess
           import time
           import json
@@ -402,8 +392,8 @@
                   self.current_config_index = 0
                   self.running = True
                   self.results_base = '/var/lib/benchmark-results'
-                  self.rotation_interval = 3600  # 1 hour
-                  self.scan_interval = 600  # 10 minutes between scans
+                  self.rotation_interval = 3600
+                  self.scan_interval = 600
                   
                   os.makedirs(self.results_base, exist_ok=True)
                   signal.signal(signal.SIGTERM, self.handle_shutdown)
@@ -415,22 +405,18 @@
                   sys.exit(0)
               
               def deploy_configuration(self, config):
-                  """Deploy configuration"""
                   logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                   logger.info(f"🔄 Deploying: {config['display_name']}")
                   logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                   
-                  # Update .env
                   with open('/opt/juice-shop/.env', 'w') as f:
                       f.write(config['env_content'])
                   
-                  # Restart application with build
                   logger.info("📦 Building and starting application (this takes 15-20 minutes)...")
                   subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], 
                                 capture_output=True)
                   time.sleep(5)
                   
-                  # Build and start
                   result = subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d', '--build'], 
                                         capture_output=True, text=True, timeout=1800)
                   
@@ -438,7 +424,6 @@
                       logger.error(f"Build failed: {result.stderr}")
                       return False
                   
-                  # Wait for readiness
                   logger.info("⏳ Waiting for application...")
                   for i in range(60):
                       try:
@@ -455,7 +440,6 @@
                   return False
               
               def run_zap_scan(self, config_name):
-                  """Run OWASP ZAP DAST scan"""
                   timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                   results_dir = f"{self.results_base}/{config_name}/{timestamp}"
                   os.makedirs(results_dir, exist_ok=True)
@@ -463,7 +447,6 @@
                   logger.info(f"🕷️  Running OWASP ZAP scan for {config_name}")
                   
                   try:
-                      # Run ZAP baseline scan
                       subprocess.run([
                           'docker', 'run', '--rm', '--network', 'host',
                           '-v', f'{results_dir}:/zap/wrk:rw',
@@ -483,10 +466,8 @@
                   except Exception as e:
                       logger.error(f"❌ ZAP scan error: {e}")
                   
-                  # Extract metrics from ZAP report
                   self.extract_metrics(config_name, results_dir)
                   
-                  # Extract container logs
                   try:
                       result = subprocess.run(['docker', 'logs', 'juice-shop'],
                                             capture_output=True, text=True, timeout=30)
@@ -508,7 +489,6 @@
                   except Exception as e:
                       logger.error(f"Error extracting logs: {e}")
                   
-                  # Update latest symlink
                   latest_link = f"{self.results_base}/{config_name}/latest"
                   if os.path.lexists(latest_link):
                       os.remove(latest_link)
@@ -517,7 +497,6 @@
                   return results_dir
               
               def extract_metrics(self, config_name, results_dir):
-                  """Extract metrics from ZAP JSON report"""
                   zap_file = f"{results_dir}/zap-report.json"
                   if not os.path.exists(zap_file):
                       return
@@ -534,7 +513,6 @@
                       medium_risk = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
                       low_risk = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
                       
-                      # Count attack types
                       sqli = sum(1 for a in alerts if 'SQL' in a.get('name', '').upper())
                       xss = sum(1 for a in alerts if 'XSS' in a.get('name', '').upper() or 'SCRIPT' in a.get('name', '').upper())
                       path = sum(1 for a in alerts if 'PATH' in a.get('name', '').upper() or 'TRAVERSAL' in a.get('name', '').upper())
@@ -554,7 +532,6 @@
                       logger.error(f"Error extracting ZAP metrics: {e}")
               
               def run_continuous_benchmark(self):
-                  """Main loop"""
                   logger.info("🚀 Starting Continuous DAST Benchmark")
                   
                   while self.running:
@@ -564,7 +541,6 @@
                           config_start_time = time.time()
                           scan_count = 0
                           
-                          # Run scans during this window
                           while (time.time() - config_start_time) < self.rotation_interval and self.running:
                               scan_count += 1
                               self.run_zap_scan(config['name'])
@@ -573,7 +549,6 @@
                               if self.running:
                                   time.sleep(self.scan_interval)
                       
-                      # Rotate
                       self.current_config_index = (self.current_config_index + 1) % len(self.configurations)
                       next_config = self.configurations[self.current_config_index]
                       logger.info(f"🔄 Next: {next_config['display_name']}")
@@ -650,7 +625,6 @@
                       if not latest_path.exists():
                           continue
                       
-                      # Read ZAP metrics
                       zap_file = latest_path / 'zap_metrics.csv'
                       if zap_file.exists():
                           try:
@@ -666,7 +640,6 @@
                           except Exception as e:
                               logger.error(f"Error reading ZAP metrics: {e}")
                       
-                      # Read security events
                       events_file = latest_path / 'security_events.csv'
                       if events_file.exists():
                           try:
