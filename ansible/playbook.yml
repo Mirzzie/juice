@@ -227,7 +227,10 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Optimized Dockerfile
+    # =======================================================================
+    # *** FINAL FIX ***: DOCKERFILE CORRECTED FOR package-lock.json
+    # =======================================================================
+    - name: Create Final Optimized Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
@@ -236,29 +239,31 @@
           RUN apt-get update && apt-get install -y --no-install-recommends git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
 
-          # Copy package files first to leverage Docker cache
-          COPY package.json package-lock.json ./
-          COPY frontend/package.json frontend/package-lock.json ./frontend/
+          # Copy ONLY package.json files to leverage Docker layer caching
+          COPY package.json ./
+          COPY frontend/package.json ./frontend/
 
-          # Install ALL dependencies first, including security tools, in a single layer
-          RUN npm install && \
-              npm install @aikidosec/firewall dd-trace
+          # Run npm install. This creates package-lock.json and installs all dependencies,
+          # including triggering the frontend install via the postinstall script.
+          RUN npm install --legacy-peer-deps
 
-          # Copy the rest of the source code
+          # Now, copy the rest of the application source code
           COPY . .
 
-          # Inject tracers now that dependencies are correctly installed
+          # Install our security tools
+          RUN npm install @aikidosec/firewall dd-trace
+
+          # Inject tracers into the source code
           RUN sed -i "1i import './tracer' // DataDog IAST" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
               sed -i "1i import './tracer' // DataDog IAST" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
-          # Build the TypeScript backend. The 'postinstall' script in package.json will build the frontend.
+          # Build the TypeScript backend. Frontend was built by the 'npm install' step.
           RUN npm run build:server
 
           # Prune development dependencies and clean cache to drastically reduce image size
-          RUN npm prune --production && \
-              npm cache clean --force
+          RUN npm prune --production && npm cache clean --force
 
           # Stage 2: Production environment
           FROM node:{{ node_version }}-bookworm-slim
