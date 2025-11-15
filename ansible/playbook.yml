@@ -1,12 +1,11 @@
 ---
-- name: IAST vs RASP Comparative Benchmark - Simplified Setup
+- name: IAST vs RASP - DAST-Only Comparison
   hosts: juiceshop
   become: true
   gather_facts: true
 
   vars:
     juice_shop_dir: /opt/juice-shop
-    benchmark_tools_dir: /opt/benchmark-tools
     node_version: "22"
 
   vars_files:
@@ -28,12 +27,10 @@
           - wget
           - git
           - unzip
-          - software-properties-common
           - apt-transport-https
           - ca-certificates
           - gnupg
           - jq
-          - bc
           - python3
           - python3-pip
         state: present
@@ -155,10 +152,7 @@
             enabled: true
             apm_non_local_traffic: true
             receiver_port: 8126
-            receiver_timeout: 10
-            max_traces_per_second: 100
 
-          # IAST (Interactive Application Security Testing)
           appsec_config:
             enabled: true
 
@@ -180,7 +174,7 @@
         enabled: yes
 
     # =======================================================================
-    # APPLICATION SETUP (JUICE SHOP WITH IAST & RASP)
+    # APPLICATION SETUP
     # =======================================================================
     - name: Create application directory
       file:
@@ -216,81 +210,41 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile with IAST and RASP instrumentation
+    - name: Create Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
           FROM node:{{ node_version }}-bookworm-slim AS builder
-
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
-
-          # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
-          # Install base dependencies
           RUN npm install
-          
-          # Install security tools: DataDog (IAST) and Aikido (RASP)
           RUN npm install @aikidosec/firewall dd-trace
-
-          # Copy tracer configuration
           COPY tracer.ts ./tracer.ts
-
-          # Instrument application with DataDog (IAST) and Aikido (RASP)
           RUN sed -i "1i import './tracer' // DataDog IAST" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
               sed -i "1i import './tracer' // DataDog IAST" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
-
-          # Build TypeScript
-          RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
-          
-          # Verify instrumentation
-          RUN echo "=== Verifying Instrumentation ===" && \
-              grep -E "tracer|aikido" build/app.js | head -5 || echo "Instrumentation check skipped"
-
-          # Build frontend
+          RUN npx tsc || npm run build:server || echo "Build attempted"
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend built"
 
-          # Production image
           FROM node:{{ node_version }}-bookworm-slim
-          
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
-          
           WORKDIR /juice-shop
-
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
-
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
-
           USER juiceshop
           EXPOSE 3000
-
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
-
-          ENV NODE_ENV=production \
-              PORT=3000 \
-              NODE_OPTIONS="--max-old-space-size=3072"
-          
+          ENV NODE_ENV=production PORT=3000 NODE_OPTIONS="--max-old-space-size=3072"
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
-
-    - name: Pre-build Docker image
-      shell: |
-        cd {{ juice_shop_dir }}
-        sg docker -c "docker build -t juice-shop-secure:latest ."
-      become: true
-      become_user: ubuntu
-      async: 1800
-      poll: 15
-      register: docker_build
 
     - name: Create docker-compose template
       copy:
@@ -298,6 +252,7 @@
         content: |
           services:
             juice-shop:
+              build: .
               image: juice-shop-secure:latest
               container_name: juice-shop
               restart: unless-stopped
@@ -312,13 +267,8 @@
                 DD_TRACE_AGENT_PORT: 8126
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
-                DD_PROFILING_ENABLED: "true"
-                DD_RUNTIME_METRICS_ENABLED: "true"
-                DD_DATA_STREAMS_ENABLED: "true"
-                # IAST Configuration (DataDog)
                 DD_APPSEC_ENABLED: "${DD_APPSEC_ENABLED:-false}"
                 DD_IAST_ENABLED: "${DD_IAST_ENABLED:-false}"
-                # RASP Configuration (Aikido Zen)
                 AIKIDO_TOKEN: "${AIKIDO_TOKEN}"
                 AIKIDO_BLOCK: "${AIKIDO_BLOCK:-false}"
                 AIKIDO_DEBUG: "true"
@@ -332,11 +282,6 @@
                 timeout: 10s
                 retries: 3
                 start_period: 60s
-              logging:
-                driver: "json-file"
-                options:
-                  max-size: "10m"
-                  max-file: "3"
         owner: ubuntu
         group: ubuntu
         mode: '0644'
@@ -356,17 +301,9 @@
       no_log: true
 
     # =======================================================================
-    # DAST ATTACK SCRIPTS (Attack Traffic Generator)
+    # INSTALL PYTHON PACKAGES FOR METRICS
     # =======================================================================
-    - name: Create benchmark tools directory
-      file:
-        path: "{{ benchmark_tools_dir }}"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0750'
-
-    - name: Install Python packages for metrics
+    - name: Install Python packages
       pip:
         name:
           - prometheus-client
@@ -374,343 +311,10 @@
         break_system_packages: yes
       ignore_errors: true
 
-    - name: Create SQL Injection DAST script
-      copy:
-        dest: "{{ benchmark_tools_dir }}/sqli_attacks.sh"
-        content: |
-          #!/bin/bash
-          # DAST: SQL Injection Attack Generator
-          
-          TARGET=$1
-          OUTPUT_FILE=$2
-          
-          echo "🎯 Running SQL Injection attacks (DAST) against $TARGET"
-          
-          ATTACK_COUNT=0
-          DETECTED_COUNT=0
-          BLOCKED_COUNT=0
-          
-          # Wait for application
-          for i in {1..10}; do
-            if curl -f -s "$TARGET" > /dev/null 2>&1; then
-              echo "✅ Target ready"
-              break
-            fi
-            sleep 3
-          done
-          
-          # SQLi Payload 1: Classic OR bypass
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'1'"'"'='"'"'1","password":"test"}' 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: ' OR '1'='1"
-          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: ' OR '1'='1"
-          else
-            echo "  ❌ BYPASSED: ' OR '1'='1 (HTTP $HTTP_CODE)"
-          fi
-          sleep 1
-          
-          # SQLi Payload 2: Comment bypass
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"admin@juice-sh.op'"'"' OR 1=1--","password":"test"}' 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: ' OR 1=1--"
-          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: ' OR 1=1--"
-          else
-            echo "  ❌ BYPASSED: ' OR 1=1--"
-          fi
-          sleep 1
-          
-          # SQLi Payload 3: UNION SELECT
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"1'"'"' UNION SELECT NULL--","password":"test"}' 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: UNION SELECT"
-          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: UNION SELECT"
-          else
-            echo "  ❌ BYPASSED: UNION SELECT"
-          fi
-          sleep 1
-          
-          # SQLi Payload 4: Tautology
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"admin@juice-sh.op'"'"' OR '"'"'a'"'"'='"'"'a","password":"test"}' 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: ' OR 'a'='a"
-          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: ' OR 'a'='a"
-          else
-            echo "  ❌ BYPASSED: ' OR 'a'='a"
-          fi
-          sleep 1
-          
-          # SQLi Payload 5: Inline comment
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$TARGET/rest/user/login" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"admin@juice-sh.op'"'"'/*","password":"test"}' 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: admin'/*"
-          elif [[ "$HTTP_CODE" == "401" ]] || [[ "$HTTP_CODE" == "400" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: admin'/*"
-          else
-            echo "  ❌ BYPASSED: admin'/*"
-          fi
-          
-          echo ""
-          echo "📊 SQL Injection DAST Results: $ATTACK_COUNT attacks | $DETECTED_COUNT detected | $BLOCKED_COUNT blocked"
-          echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0750'
-
-    - name: Create XSS DAST script
-      copy:
-        dest: "{{ benchmark_tools_dir }}/xss_attacks.sh"
-        content: |
-          #!/bin/bash
-          # DAST: XSS Attack Generator
-          
-          TARGET=$1
-          OUTPUT_FILE=$2
-          
-          echo "🎯 Running XSS attacks (DAST) against $TARGET"
-          
-          ATTACK_COUNT=0
-          DETECTED_COUNT=0
-          BLOCKED_COUNT=0
-          
-          # XSS Payload 1: Script tag
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/rest/products/search?q=%3Cscript%3Ealert%28%27XSS%27%29%3C%2Fscript%3E" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: <script> tag"
-          elif [[ "$BODY" != *"<script>"* ]] && [[ "$HTTP_CODE" == "200" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: <script> sanitized"
-          else
-            echo "  ❌ BYPASSED: <script> tag"
-          fi
-          sleep 1
-          
-          # XSS Payload 2: Image onerror
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/rest/products/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: <img> onerror"
-          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onerror") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: <img> sanitized"
-          else
-            echo "  ❌ BYPASSED: <img> onerror"
-          fi
-          sleep 1
-          
-          # XSS Payload 3: SVG onload
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/rest/products/search?q=%3Csvg%2Fonload%3Dalert%28%27XSS%27%29%3E" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: <svg> onload"
-          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "onload") -eq 0 ]] && [[ "$HTTP_CODE" == "200" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: <svg> sanitized"
-          else
-            echo "  ❌ BYPASSED: <svg> onload"
-          fi
-          sleep 1
-          
-          # XSS Payload 4: JavaScript protocol
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/rest/products/search?q=javascript%3Aalert%28%27XSS%27%29" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: javascript: protocol"
-          else
-            echo "  ❌ BYPASSED: javascript: protocol"
-          fi
-          sleep 1
-          
-          # XSS Payload 5: Iframe injection
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/rest/products/search?q=%3Ciframe%20src%3D%27javascript%3Aalert%281%29%27%3E" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: <iframe> javascript"
-          elif [[ $(echo "$RESPONSE" | head -n -1 | grep -c "<iframe") -eq 0 ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: <iframe> sanitized"
-          else
-            echo "  ❌ BYPASSED: <iframe>"
-          fi
-          
-          echo ""
-          echo "📊 XSS DAST Results: $ATTACK_COUNT attacks | $DETECTED_COUNT detected | $BLOCKED_COUNT blocked"
-          echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0750'
-
-    - name: Create Path Traversal DAST script
-      copy:
-        dest: "{{ benchmark_tools_dir }}/path_traversal.sh"
-        content: |
-          #!/bin/bash
-          # DAST: Path Traversal Attack Generator
-          
-          TARGET=$1
-          OUTPUT_FILE=$2
-          
-          echo "🎯 Running Path Traversal attacks (DAST) against $TARGET"
-          
-          ATTACK_COUNT=0
-          DETECTED_COUNT=0
-          BLOCKED_COUNT=0
-          
-          # Path Traversal 1: Classic
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/ftp/..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          if [[ "$HTTP_CODE" == "403" ]] || [[ "$BODY" == *"blocked"* ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: ../../../etc/passwd"
-          elif [[ "$HTTP_CODE" == "404" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: Path blocked"
-          elif [[ "$BODY" == *"root:"* ]]; then
-            echo "  ❌ BYPASSED: /etc/passwd accessed!"
-          else
-            echo "  ⚠️  INCONCLUSIVE"
-          fi
-          sleep 1
-          
-          # Path Traversal 2: Double encoded
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/ftp/..%252f..%252f..%252fetc%252fpasswd" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: double encoded"
-          elif [[ "$HTTP_CODE" == "404" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: Path blocked"
-          else
-            echo "  ❌ BYPASSED: double encoded"
-          fi
-          sleep 1
-          
-          # Path Traversal 3: Many levels
-          ATTACK_COUNT=$((ATTACK_COUNT + 1))
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            "$TARGET/ftp/..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd" 2>&1 || echo "000")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          if [[ "$HTTP_CODE" == "403" ]]; then
-            BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-            echo "  ✅ BLOCKED: many levels"
-          elif [[ "$HTTP_CODE" == "404" ]]; then
-            DETECTED_COUNT=$((DETECTED_COUNT + 1))
-            echo "  ⚠️  DETECTED: Path blocked"
-          else
-            echo "  ❌ BYPASSED: many levels"
-          fi
-          
-          echo ""
-          echo "📊 Path Traversal DAST Results: $ATTACK_COUNT attacks | $DETECTED_COUNT detected | $BLOCKED_COUNT blocked"
-          echo "$ATTACK_COUNT,$DETECTED_COUNT,$BLOCKED_COUNT" > "$OUTPUT_FILE"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0750'
-
-    - name: Create master DAST orchestrator
-      copy:
-        dest: "{{ benchmark_tools_dir }}/run_all_attacks.sh"
-        content: |
-          #!/bin/bash
-          # Master DAST Attack Orchestrator
-          
-          TARGET=$1
-          CONFIG_NAME=$2
-          RESULTS_DIR=$3
-          
-          echo "════════════════════════════════════════"
-          echo "🚀 DAST Attack Suite"
-          echo "════════════════════════════════════════"
-          echo "Target: $TARGET"
-          echo "Security Mode: $CONFIG_NAME"
-          echo "Results: $RESULTS_DIR"
-          echo "════════════════════════════════════════"
-          
-          mkdir -p "$RESULTS_DIR"
-          START_TIME=$(date +%s)
-          
-          # Run all DAST attacks
-          {{ benchmark_tools_dir }}/sqli_attacks.sh "$TARGET" "$RESULTS_DIR/sqli_results.csv"
-          {{ benchmark_tools_dir }}/xss_attacks.sh "$TARGET" "$RESULTS_DIR/xss_results.csv"
-          {{ benchmark_tools_dir }}/path_traversal.sh "$TARGET" "$RESULTS_DIR/path_results.csv"
-          
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-          
-          # Create summary
-          echo "ATTACK_TYPE,TOTAL,DETECTED,BLOCKED" > "$RESULTS_DIR/summary.csv"
-          [ -f "$RESULTS_DIR/sqli_results.csv" ] && echo -n "SQL_INJECTION," >> "$RESULTS_DIR/summary.csv" && cat "$RESULTS_DIR/sqli_results.csv" >> "$RESULTS_DIR/summary.csv"
-          [ -f "$RESULTS_DIR/xss_results.csv" ] && echo -n "XSS," >> "$RESULTS_DIR/summary.csv" && cat "$RESULTS_DIR/xss_results.csv" >> "$RESULTS_DIR/summary.csv"
-          [ -f "$RESULTS_DIR/path_results.csv" ] && echo -n "PATH_TRAVERSAL," >> "$RESULTS_DIR/summary.csv" && cat "$RESULTS_DIR/path_results.csv" >> "$RESULTS_DIR/summary.csv"
-          echo "DURATION_SECONDS,$DURATION" >> "$RESULTS_DIR/summary.csv"
-          
-          echo ""
-          echo "✅ DAST suite completed in ${DURATION}s"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0750'
-
     # =======================================================================
-    # CONTINUOUS BENCHMARK SYSTEM (Daily Rotation)
+    # RESULTS DIRECTORY
     # =======================================================================
-    - name: Create benchmark results directory
+    - name: Create results directory
       file:
         path: /var/lib/benchmark-results
         state: directory
@@ -718,15 +322,17 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create continuous benchmark orchestrator
+    # =======================================================================
+    # CONTINUOUS DAST SCANNER (ZAP ONLY)
+    # =======================================================================
+    - name: Create continuous DAST benchmark script
       copy:
-        dest: /opt/benchmark-tools/continuous_iast_rasp_benchmark.py
+        dest: /opt/continuous_dast_benchmark.py
         content: |
           #!/usr/bin/env python3
           """
-          Continuous IAST vs RASP Benchmark
-          Rotates between IAST-only and RASP configurations
-          Runs DAST attacks continuously
+          Continuous DAST Benchmark using OWASP ZAP
+          Rotates between IAST and RASP configurations
           """
           
           import subprocess
@@ -742,68 +348,68 @@
               level=logging.INFO,
               format='%(asctime)s - %(levelname)s - %(message)s',
               handlers=[
-                  logging.FileHandler('/var/log/iast_rasp_benchmark.log'),
+                  logging.FileHandler('/var/log/dast_benchmark.log'),
                   logging.StreamHandler()
               ]
           )
           logger = logging.getLogger(__name__)
           
-          class IASTvsRASPBenchmark:
+          class DASTBenchmark:
               def __init__(self):
-                  # Only two configurations to compare
                   self.configurations = [
                       {
                           'name': 'iast-detection',
                           'display_name': 'DataDog IAST (Detection Only)',
-                          'dd_appsec': 'true',
-                          'dd_iast': 'true',
-                          'aikido_block': 'false',
-                          'env_file_content': 'SECURITY_MODE=iast-detection\nDD_APPSEC_ENABLED=true\nDD_IAST_ENABLED=true\nAIKIDO_BLOCK=false'
+                          'env_content': 'SECURITY_MODE=iast-detection\nDD_APPSEC_ENABLED=true\nDD_IAST_ENABLED=true\nAIKIDO_BLOCK=false'
                       },
                       {
                           'name': 'rasp-protection',
                           'display_name': 'Aikido RASP (Detection + Blocking)',
-                          'dd_appsec': 'false',
-                          'dd_iast': 'false',
-                          'aikido_block': 'true',
-                          'env_file_content': 'SECURITY_MODE=rasp-protection\nDD_APPSEC_ENABLED=false\nDD_IAST_ENABLED=false\nAIKIDO_BLOCK=true'
+                          'env_content': 'SECURITY_MODE=rasp-protection\nDD_APPSEC_ENABLED=false\nDD_IAST_ENABLED=false\nAIKIDO_BLOCK=true'
                       }
                   ]
                   self.current_config_index = 0
                   self.running = True
                   self.results_base = '/var/lib/benchmark-results'
-                  self.rotation_interval = 3600  # 1 hour per config
-                  self.attack_interval = 300  # 5 minutes between attacks
+                  self.rotation_interval = 3600  # 1 hour
+                  self.scan_interval = 600  # 10 minutes between scans
                   
                   os.makedirs(self.results_base, exist_ok=True)
                   signal.signal(signal.SIGTERM, self.handle_shutdown)
                   signal.signal(signal.SIGINT, self.handle_shutdown)
               
               def handle_shutdown(self, signum, frame):
-                  logger.info("Shutting down gracefully...")
+                  logger.info("Shutting down...")
                   self.running = False
                   sys.exit(0)
               
               def deploy_configuration(self, config):
-                  """Deploy IAST or RASP configuration"""
+                  """Deploy configuration"""
                   logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                   logger.info(f"🔄 Deploying: {config['display_name']}")
                   logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                   
-                  # Update .env file
+                  # Update .env
                   with open('/opt/juice-shop/.env', 'w') as f:
-                      f.write(config['env_file_content'])
+                      f.write(config['env_content'])
                   
-                  # Restart application
+                  # Restart application with build
+                  logger.info("📦 Building and starting application (this takes 15-20 minutes)...")
                   subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], 
                                 capture_output=True)
                   time.sleep(5)
-                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d'], 
-                                capture_output=True)
+                  
+                  # Build and start
+                  result = subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d', '--build'], 
+                                        capture_output=True, text=True, timeout=1800)
+                  
+                  if result.returncode != 0:
+                      logger.error(f"Build failed: {result.stderr}")
+                      return False
                   
                   # Wait for readiness
-                  logger.info("⏳ Waiting for application startup...")
-                  for i in range(30):
+                  logger.info("⏳ Waiting for application...")
+                  for i in range(60):
                       try:
                           result = subprocess.run(['curl', '-f', '-s', 'http://localhost:3000'], 
                                                 capture_output=True, timeout=5)
@@ -814,43 +420,50 @@
                           pass
                       time.sleep(5)
                   
-                  logger.warning("⚠️  Application startup delayed")
+                  logger.warning("⚠️  Application delayed")
                   return False
               
-              def run_dast_attacks(self, config_name):
-                  """Run DAST attack suite"""
+              def run_zap_scan(self, config_name):
+                  """Run OWASP ZAP DAST scan"""
                   timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                   results_dir = f"{self.results_base}/{config_name}/{timestamp}"
                   os.makedirs(results_dir, exist_ok=True)
                   
-                  logger.info(f"🎯 Running DAST attacks against {config_name}")
+                  logger.info(f"🕷️  Running OWASP ZAP scan for {config_name}")
                   
-                  # Run master attack script
                   try:
-                      subprocess.run(['/opt/benchmark-tools/run_all_attacks.sh',
-                                    'http://localhost:3000',
-                                    config_name,
-                                    results_dir],
-                                   timeout=600,
-                                   capture_output=True)
-                      logger.info(f"✅ DAST attacks completed")
+                      # Run ZAP baseline scan
+                      subprocess.run([
+                          'docker', 'run', '--rm', '--network', 'host',
+                          '-v', f'{results_dir}:/zap/wrk:rw',
+                          'ghcr.io/zaproxy/zaproxy:stable',
+                          'zap-baseline.py',
+                          '-t', 'http://localhost:3000',
+                          '-r', 'zap-report.html',
+                          '-J', 'zap-report.json',
+                          '-w', 'zap-report.md',
+                          '-m', '3',
+                          '-T', '300'
+                      ], timeout=600, capture_output=True)
+                      
+                      logger.info(f"✅ ZAP scan completed")
                   except subprocess.TimeoutExpired:
-                      logger.warning("⚠️  DAST attacks timed out")
+                      logger.warning("⚠️  ZAP scan timed out")
                   except Exception as e:
-                      logger.error(f"❌ Error running DAST: {e}")
+                      logger.error(f"❌ ZAP scan error: {e}")
                   
-                  # Extract container logs for detection analysis
+                  # Extract metrics from ZAP report
+                  self.extract_metrics(config_name, results_dir)
+                  
+                  # Extract container logs
                   try:
                       result = subprocess.run(['docker', 'logs', 'juice-shop'],
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=30)
+                                            capture_output=True, text=True, timeout=30)
                       
                       with open(f"{results_dir}/container.log", 'w') as f:
                           f.write(result.stdout)
                           f.write(result.stderr)
                       
-                      # Count security events
                       log_text = result.stdout + result.stderr
                       blocked = log_text.lower().count('blocked')
                       detected = log_text.lower().count('detected') + log_text.lower().count('vulnerability')
@@ -860,7 +473,7 @@
                           f.write(f"BLOCKED,{blocked}\n")
                           f.write(f"DETECTED,{detected}\n")
                       
-                      logger.info(f"📊 Security Events: {detected} detected, {blocked} blocked")
+                      logger.info(f"📊 Events: {detected} detected, {blocked} blocked")
                   except Exception as e:
                       logger.error(f"Error extracting logs: {e}")
                   
@@ -872,44 +485,81 @@
                   
                   return results_dir
               
+              def extract_metrics(self, config_name, results_dir):
+                  """Extract metrics from ZAP JSON report"""
+                  zap_file = f"{results_dir}/zap-report.json"
+                  if not os.path.exists(zap_file):
+                      return
+                  
+                  try:
+                      with open(zap_file, 'r') as f:
+                          zap_data = json.load(f)
+                      
+                      site = zap_data.get('site', [{}])[0]
+                      alerts = site.get('alerts', [])
+                      
+                      total_alerts = len(alerts)
+                      high_risk = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
+                      medium_risk = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
+                      low_risk = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
+                      
+                      # Count attack types
+                      sqli = sum(1 for a in alerts if 'SQL' in a.get('name', '').upper())
+                      xss = sum(1 for a in alerts if 'XSS' in a.get('name', '').upper() or 'SCRIPT' in a.get('name', '').upper())
+                      path = sum(1 for a in alerts if 'PATH' in a.get('name', '').upper() or 'TRAVERSAL' in a.get('name', '').upper())
+                      
+                      with open(f"{results_dir}/zap_metrics.csv", 'w') as f:
+                          f.write("METRIC,COUNT\n")
+                          f.write(f"TOTAL_ALERTS,{total_alerts}\n")
+                          f.write(f"HIGH_RISK,{high_risk}\n")
+                          f.write(f"MEDIUM_RISK,{medium_risk}\n")
+                          f.write(f"LOW_RISK,{low_risk}\n")
+                          f.write(f"SQL_INJECTION,{sqli}\n")
+                          f.write(f"XSS,{xss}\n")
+                          f.write(f"PATH_TRAVERSAL,{path}\n")
+                      
+                      logger.info(f"📊 ZAP Metrics: {total_alerts} alerts ({high_risk} high, {medium_risk} medium)")
+                  except Exception as e:
+                      logger.error(f"Error extracting ZAP metrics: {e}")
+              
               def run_continuous_benchmark(self):
-                  """Main continuous loop"""
-                  logger.info("🚀 Starting IAST vs RASP Continuous Benchmark")
+                  """Main loop"""
+                  logger.info("🚀 Starting Continuous DAST Benchmark")
                   
                   while self.running:
                       config = self.configurations[self.current_config_index]
                       
                       if self.deploy_configuration(config):
                           config_start_time = time.time()
-                          attack_count = 0
+                          scan_count = 0
                           
-                          # Run attacks during this configuration window
+                          # Run scans during this window
                           while (time.time() - config_start_time) < self.rotation_interval and self.running:
-                              attack_count += 1
-                              self.run_dast_attacks(config['name'])
-                              logger.info(f"✅ Attack round {attack_count} completed")
+                              scan_count += 1
+                              self.run_zap_scan(config['name'])
+                              logger.info(f"✅ Scan {scan_count} completed")
                               
                               if self.running:
-                                  time.sleep(self.attack_interval)
+                                  time.sleep(self.scan_interval)
                       
-                      # Rotate to next configuration
+                      # Rotate
                       self.current_config_index = (self.current_config_index + 1) % len(self.configurations)
                       next_config = self.configurations[self.current_config_index]
-                      logger.info(f"🔄 Next up: {next_config['display_name']}")
+                      logger.info(f"🔄 Next: {next_config['display_name']}")
           
           if __name__ == '__main__':
-              benchmark = IASTvsRASPBenchmark()
+              benchmark = DASTBenchmark()
               benchmark.run_continuous_benchmark()
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    - name: Create systemd service for continuous benchmark
+    - name: Create systemd service
       copy:
-        dest: /etc/systemd/system/iast-rasp-benchmark.service
+        dest: /etc/systemd/system/dast-benchmark.service
         content: |
           [Unit]
-          Description=IAST vs RASP Continuous Benchmark
+          Description=DAST Continuous Benchmark
           After=network.target docker.service datadog-agent.service
           Wants=docker.service
           
@@ -918,19 +568,19 @@
           User=ubuntu
           Group=ubuntu
           SupplementaryGroups=docker
-          WorkingDirectory=/opt/benchmark-tools
-          ExecStart=/usr/bin/python3 /opt/benchmark-tools/continuous_iast_rasp_benchmark.py
+          WorkingDirectory=/opt
+          ExecStart=/usr/bin/python3 /opt/continuous_dast_benchmark.py
           Restart=always
           RestartSec=30
-          StandardOutput=append:/var/log/iast_rasp_benchmark.log
-          StandardError=append:/var/log/iast_rasp_benchmark_error.log
+          StandardOutput=append:/var/log/dast_benchmark.log
+          StandardError=append:/var/log/dast_benchmark_error.log
           
           [Install]
           WantedBy=multi-user.target
         mode: '0644'
 
     # =======================================================================
-    # PROMETHEUS + GRAFANA MONITORING
+    # PROMETHEUS + GRAFANA
     # =======================================================================
     - name: Create monitoring directory
       file:
@@ -940,131 +590,98 @@
         group: ubuntu
         mode: '0755'
 
-    - name: Create Prometheus metrics exporter
+    - name: Create Prometheus exporter
       copy:
         dest: /opt/monitoring/prometheus_exporter.py
         content: |
           #!/usr/bin/env python3
-          """Prometheus Exporter for IAST vs RASP Metrics"""
-          
-          from prometheus_client import start_http_server, Gauge, Counter
+          from prometheus_client import start_http_server, Gauge
           import time
           import json
           import os
           from pathlib import Path
-          from datetime import datetime
           import logging
           
           logging.basicConfig(level=logging.INFO)
           logger = logging.getLogger(__name__)
           
-          # Metrics
-          attack_total = Gauge('security_attack_total', 'Total attacks executed', ['config', 'attack_type'])
-          attack_detected = Gauge('security_attack_detected', 'Attacks detected', ['config', 'attack_type'])
-          attack_blocked = Gauge('security_attack_blocked', 'Attacks blocked', ['config', 'attack_type'])
-          detection_rate = Gauge('security_detection_rate_percent', 'Detection rate percentage', ['config'])
-          blocking_rate = Gauge('security_blocking_rate_percent', 'Blocking rate percentage', ['config'])
-          iast_vs_rasp_advantage = Gauge('security_rasp_advantage_percent', 'RASP advantage over IAST')
+          zap_alerts_total = Gauge('zap_alerts_total', 'Total ZAP alerts', ['config'])
+          zap_high_risk = Gauge('zap_high_risk_alerts', 'High risk alerts', ['config'])
+          zap_medium_risk = Gauge('zap_medium_risk_alerts', 'Medium risk alerts', ['config'])
+          attacks_blocked = Gauge('security_attacks_blocked', 'Attacks blocked', ['config'])
+          attacks_detected = Gauge('security_attacks_detected', 'Attacks detected', ['config'])
+          blocking_rate = Gauge('security_blocking_rate_percent', 'Blocking rate', ['config'])
           
           class MetricsExporter:
               def __init__(self):
                   self.results_base = Path('/var/lib/benchmark-results')
               
               def process_results(self):
-                  """Process latest results and update metrics"""
                   for config in ['iast-detection', 'rasp-protection']:
                       latest_path = self.results_base / config / 'latest'
-                      
                       if not latest_path.exists():
                           continue
                       
-                      # Read summary CSV
-                      summary_file = latest_path / 'summary.csv'
-                      if summary_file.exists():
+                      # Read ZAP metrics
+                      zap_file = latest_path / 'zap_metrics.csv'
+                      if zap_file.exists():
                           try:
-                              with open(summary_file, 'r') as f:
-                                  lines = f.readlines()[1:]  # Skip header
+                              metrics = {}
+                              with open(zap_file, 'r') as f:
+                                  for line in f.readlines()[1:]:
+                                      metric, value = line.strip().split(',')
+                                      metrics[metric] = int(value)
                               
-                              total_attacks = 0
-                              total_detected = 0
-                              total_blocked = 0
-                              
-                              for line in lines:
-                                  if 'DURATION' in line:
-                                      continue
-                                  
-                                  parts = line.strip().split(',')
-                                  if len(parts) >= 4:
-                                      attack_type = parts[0]
-                                      total = int(parts[1])
-                                      detected = int(parts[2])
-                                      blocked = int(parts[3])
-                                      
-                                      attack_total.labels(config=config, attack_type=attack_type).set(total)
-                                      attack_detected.labels(config=config, attack_type=attack_type).set(detected)
-                                      attack_blocked.labels(config=config, attack_type=attack_type).set(blocked)
-                                      
-                                      total_attacks += total
-                                      total_detected += detected
-                                      total_blocked += blocked
-                              
-                              # Calculate rates
-                              if total_attacks > 0:
-                                  detect_rate = ((total_detected + total_blocked) / total_attacks) * 100
-                                  block_rate = (total_blocked / total_attacks) * 100
-                                  
-                                  detection_rate.labels(config=config).set(detect_rate)
-                                  blocking_rate.labels(config=config).set(block_rate)
-                                  
-                                  logger.info(f"{config}: {detect_rate:.1f}% detection, {block_rate:.1f}% blocking")
-                          
+                              zap_alerts_total.labels(config=config).set(metrics.get('TOTAL_ALERTS', 0))
+                              zap_high_risk.labels(config=config).set(metrics.get('HIGH_RISK', 0))
+                              zap_medium_risk.labels(config=config).set(metrics.get('MEDIUM_RISK', 0))
                           except Exception as e:
-                              logger.error(f"Error processing {config}: {e}")
-                  
-                  # Calculate RASP advantage
-                  try:
-                      rasp_block = blocking_rate._metrics.get(('rasp-protection',), {}).get('value', 0)
-                      iast_block = blocking_rate._metrics.get(('iast-detection',), {}).get('value', 0)
+                              logger.error(f"Error reading ZAP metrics: {e}")
                       
-                      if iast_block > 0:
-                          advantage = ((rasp_block - iast_block) / iast_block) * 100
-                      else:
-                          advantage = 100 if rasp_block > 0 else 0
-                      
-                      iast_vs_rasp_advantage.set(advantage)
-                      logger.info(f"RASP Advantage: {advantage:.1f}%")
-                  except Exception as e:
-                      logger.error(f"Error calculating advantage: {e}")
+                      # Read security events
+                      events_file = latest_path / 'security_events.csv'
+                      if events_file.exists():
+                          try:
+                              with open(events_file, 'r') as f:
+                                  lines = f.readlines()[1:]
+                              
+                              blocked = int(lines[0].split(',')[1]) if len(lines) > 0 else 0
+                              detected = int(lines[1].split(',')[1]) if len(lines) > 1 else 0
+                              
+                              attacks_blocked.labels(config=config).set(blocked)
+                              attacks_detected.labels(config=config).set(detected)
+                              
+                              total = max(zap_alerts_total._metrics.get((config,), {}).get('value', 1), 1)
+                              block_pct = (blocked / total) * 100
+                              blocking_rate.labels(config=config).set(block_pct)
+                          except Exception as e:
+                              logger.error(f"Error reading events: {e}")
               
-              def run(self, port=8000, interval=10):
-                  """Run exporter"""
-                  logger.info(f"Starting Prometheus exporter on port {port}")
+              def run(self, port=8000):
+                  logger.info(f"Starting exporter on port {port}")
                   start_http_server(port)
-                  
                   while True:
                       try:
                           self.process_results()
                       except Exception as e:
                           logger.error(f"Error: {e}")
-                      time.sleep(interval)
+                      time.sleep(10)
           
           if __name__ == '__main__':
               exporter = MetricsExporter()
-              exporter.run(port=8000, interval=5)
+              exporter.run()
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    - name: Create Prometheus configuration
+    - name: Create Prometheus config
       copy:
         dest: /opt/monitoring/prometheus.yml
         content: |
           global:
-            scrape_interval: 5s
-            evaluation_interval: 5s
-          
+            scrape_interval: 10s
           scrape_configs:
-            - job_name: 'iast-rasp-metrics'
+            - job_name: 'dast-metrics'
               static_configs:
                 - targets: ['host.docker.internal:8000']
         owner: ubuntu
@@ -1077,91 +694,32 @@
         content: |
           {
             "dashboard": {
-              "title": "IAST vs RASP - Security Comparison",
-              "tags": ["security", "iast", "rasp"],
-              "timezone": "browser",
+              "title": "IAST vs RASP - DAST Results",
               "panels": [
                 {
                   "id": 1,
-                  "title": "🛡️ Blocking Effectiveness",
+                  "title": "🛡️ Blocking Rate Comparison",
                   "type": "bargauge",
                   "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
-                  "targets": [{
-                    "expr": "security_blocking_rate_percent",
-                    "legendFormat": "{{config}}"
-                  }],
-                  "fieldConfig": {
-                    "defaults": {
-                      "thresholds": {
-                        "steps": [
-                          {"value": 0, "color": "red"},
-                          {"value": 50, "color": "yellow"},
-                          {"value": 80, "color": "green"}
-                        ]
-                      },
-                      "unit": "percent",
-                      "max": 100
-                    }
-                  }
+                  "targets": [{"expr": "security_blocking_rate_percent", "legendFormat": "{{config}}"}],
+                  "fieldConfig": {"defaults": {"unit": "percent", "max": 100}}
                 },
                 {
                   "id": 2,
-                  "title": "🎯 Detection Rate Over Time",
-                  "type": "timeseries",
-                  "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
-                  "targets": [{
-                    "expr": "security_detection_rate_percent",
-                    "legendFormat": "{{config}}"
-                  }],
-                  "fieldConfig": {
-                    "defaults": {
-                      "unit": "percent",
-                      "max": 100
-                    }
-                  }
+                  "title": "🎯 ZAP Alerts Detected",
+                  "type": "stat",
+                  "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+                  "targets": [{"expr": "zap_alerts_total"}]
                 },
                 {
                   "id": 3,
-                  "title": "🏆 RASP Advantage Over IAST",
+                  "title": "🚨 High Risk Vulnerabilities",
                   "type": "stat",
-                  "gridPos": {"x": 0, "y": 8, "w": 8, "h": 6},
-                  "targets": [{
-                    "expr": "security_rasp_advantage_percent"
-                  }],
-                  "fieldConfig": {
-                    "defaults": {
-                      "unit": "percent",
-                      "thresholds": {
-                        "steps": [
-                          {"value": 0, "color": "yellow"},
-                          {"value": 25, "color": "green"},
-                          {"value": 50, "color": "dark-green"}
-                        ]
-                      }
-                    }
-                  }
-                },
-                {
-                  "id": 4,
-                  "title": "📊 Attack Results by Type",
-                  "type": "table",
-                  "gridPos": {"x": 8, "y": 8, "w": 16, "h": 6},
-                  "targets": [
-                    {
-                      "expr": "security_attack_total",
-                      "format": "table",
-                      "legendFormat": "Total"
-                    },
-                    {
-                      "expr": "security_attack_blocked",
-                      "format": "table",
-                      "legendFormat": "Blocked"
-                    }
-                  ]
+                  "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+                  "targets": [{"expr": "zap_high_risk_alerts"}],
+                  "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 5, "color": "red"}]}}}
                 }
-              ],
-              "refresh": "10s",
-              "time": {"from": "now-1h", "to": "now"}
+              ]
             }
           }
         owner: ubuntu
@@ -1172,7 +730,6 @@
       copy:
         dest: /opt/monitoring/docker-compose.yml
         content: |
-          version: '3.8'
           services:
             prometheus:
               image: prom/prometheus:latest
@@ -1185,10 +742,8 @@
                 - prometheus-data:/prometheus
               command:
                 - '--config.file=/etc/prometheus/prometheus.yml'
-                - '--storage.tsdb.retention.time=30d'
               extra_hosts:
                 - "host.docker.internal:host-gateway"
-            
             grafana:
               image: grafana/grafana:latest
               container_name: grafana
@@ -1198,12 +753,10 @@
               environment:
                 - GF_SECURITY_ADMIN_USER=admin
                 - GF_SECURITY_ADMIN_PASSWORD=iast_rasp_2024
-                - GF_USERS_ALLOW_SIGN_UP=false
               volumes:
                 - grafana-data:/var/lib/grafana
               depends_on:
                 - prometheus
-          
           volumes:
             prometheus-data:
             grafana-data:
@@ -1211,100 +764,57 @@
         group: ubuntu
         mode: '0644'
 
-    # =======================================================================
-    # STARTUP SCRIPT
-    # =======================================================================
     - name: Create startup script
       copy:
-        dest: /opt/benchmark-tools/start_iast_rasp_system.sh
+        dest: /opt/start_monitoring.sh
         content: |
           #!/bin/bash
-          set -e
-          
-          echo "════════════════════════════════════════"
-          echo "🚀 Starting IAST vs RASP Benchmark System"
-          echo "════════════════════════════════════════"
-          
-          # Start monitoring stack
-          echo "📊 Starting Prometheus + Grafana..."
+          echo "🚀 Starting Monitoring Stack"
           cd /opt/monitoring
-          sg docker -c "docker compose down" 2>/dev/null || true
           sg docker -c "docker compose up -d"
-          
-          # Start metrics exporter
-          echo "📈 Starting metrics exporter..."
-          pkill -f prometheus_exporter.py 2>/dev/null || true
-          nohup python3 /opt/monitoring/prometheus_exporter.py > /tmp/prometheus_exporter.log 2>&1 &
-          echo $! > /tmp/prometheus_exporter.pid
-          
           sleep 10
-          
-          # Verify services
-          sg docker -c "docker ps" | grep -q prometheus && echo "✅ Prometheus: UP" || echo "❌ Prometheus: DOWN"
-          sg docker -c "docker ps" | grep -q grafana && echo "✅ Grafana: UP" || echo "❌ Grafana: DOWN"
-          pgrep -f prometheus_exporter.py > /dev/null && echo "✅ Exporter: UP" || echo "❌ Exporter: DOWN"
-          
-          PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "YOUR_IP")
-          
-          echo ""
-          echo "════════════════════════════════════════"
-          echo "📊 Access Your Dashboards:"
-          echo "════════════════════════════════════════"
-          echo "Grafana: http://$PUBLIC_IP:3001"
-          echo "  Username: admin"
-          echo "  Password: iast_rasp_2024"
-          echo ""
-          echo "Prometheus: http://$PUBLIC_IP:9090"
-          echo "Metrics: http://$PUBLIC_IP:8000/metrics"
-          echo ""
-          echo "✅ System Ready!"
-          echo "════════════════════════════════════════"
+          pkill -f prometheus_exporter.py || true
+          nohup python3 /opt/monitoring/prometheus_exporter.py > /tmp/exporter.log 2>&1 &
+          echo "✅ Monitoring ready"
+          echo "Grafana: http://$(curl -s ifconfig.me):3001 (admin/iast_rasp_2024)"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    - name: Start monitoring stack
+    - name: Start monitoring
       shell: |
-        cd /opt/benchmark-tools
-        nohup ./start_iast_rasp_system.sh > /tmp/monitoring_startup.log 2>&1 &
+        cd /opt
+        nohup ./start_monitoring.sh > /tmp/monitoring.log 2>&1 &
       become: true
       become_user: ubuntu
       async: 300
       poll: 0
 
-    - name: Wait for monitoring initialization
+    - name: Wait for monitoring
       pause:
         seconds: 30
 
-    - name: Enable and start continuous benchmark service
+    - name: Enable DAST benchmark service
       systemd:
-        name: iast-rasp-benchmark
-        state: started
+        name: dast-benchmark
         enabled: yes
         daemon_reload: yes
 
-    - name: Display access information
+    - name: Display information
       debug:
         msg: |
-          ════════════════════════════════════════
-          ✅ IAST vs RASP Benchmark System Deployed!
-          ════════════════════════════════════════
+          ✅ IAST vs RASP System Ready!
           
           📊 Grafana: http://{{ ansible_default_ipv4.address }}:3001
-             Username: admin
-             Password: iast_rasp_2024
+             Username: admin / Password: iast_rasp_2024
           
-          📈 Prometheus: http://{{ ansible_default_ipv4.address }}:9090
-          📊 Metrics: http://{{ ansible_default_ipv4.address }}:8000/metrics
+          🔄 System will:
+             1. Build Juice Shop (20 min first time)
+             2. Run ZAP DAST scans every 10 minutes
+             3. Rotate IAST/RASP every hour
           
-          🔄 System automatically rotates between:
-             1. DataDog IAST (Detection Only)
-             2. Aikido RASP (Detection + Blocking)
-          
-          ⏱️  Rotation: Every 60 minutes
-          🎯 DAST Attacks: Every 5 minutes
-          
-          ════════════════════════════════════════
+          📝 Start benchmark: sudo systemctl start dast-benchmark
+          📖 View logs: journalctl -u dast-benchmark -f
 
   handlers:
     - name: Restart DataDog Agent

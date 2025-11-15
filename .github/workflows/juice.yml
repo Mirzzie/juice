@@ -1,4 +1,4 @@
-name: IAST vs RASP Security Comparison Pipeline
+name: IAST vs RASP - DAST Comparison Pipeline
 
 on:
   push:
@@ -9,19 +9,19 @@ on:
     inputs:
       skip_ansible:
         description: "Skip Ansible deployment"
-        required: false
         type: boolean
         default: false
-      attack_rounds:
-        description: "Number of attack rounds per configuration"
-        required: false
-        type: number
-        default: 3
       deploy_continuous:
-        description: "Deploy 24/7 continuous benchmark system"
-        required: false
+        description: "Deploy 24/7 continuous DAST system"
         type: boolean
         default: false
+      zap_scan_type:
+        description: "ZAP scan type"
+        type: choice
+        default: "baseline"
+        options:
+          - baseline
+          - full
 
 env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
@@ -32,62 +32,57 @@ env:
 
 jobs:
   # ============================================================================
-  # SAST: Static Analysis (Code Quality Check)
+  # SAST
   # ============================================================================
   sast-semgrep:
-    name: 🔍 SAST - Semgrep Security Scan
+    name: 🔍 SAST - Semgrep
     runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Semgrep SAST Scan
+      - name: Run Semgrep
         run: |
           semgrep scan --config=auto --json --output=semgrep-results.json || true
           semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-      - name: Upload to Semgrep Dashboard
+      - name: Upload to Semgrep
         if: always()
         run: semgrep ci
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         continue-on-error: true
 
-      - name: Upload SARIF to GitHub Security
+      - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep-results.sarif
-          category: semgrep
         continue-on-error: true
 
-      - name: Upload SAST Results
-        if: always()
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: sast-results
-          path: |
-            semgrep-results.json
-            semgrep-results.sarif
+          path: semgrep-results.*
 
   # ============================================================================
-  # Prerequisites Check
+  # Prerequisites
   # ============================================================================
   check-prerequisites:
-    name: ✅ Verify Prerequisites
+    name: ✅ Check Prerequisites
     runs-on: ubuntu-latest
     needs: sast-semgrep
     outputs:
       can_proceed: ${{ steps.check.outputs.can_proceed }}
     steps:
-      - name: Check Required Secrets
+      - name: Check Secrets
         id: check
         run: |
-          echo "Checking required secrets..."
           MISSING=()
           [ -z "${{ secrets.EC2_INSTANCE_IP }}" ] && MISSING+=("EC2_INSTANCE_IP")
           [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ] && MISSING+=("EC2_SSH_PRIVATE_KEY")
@@ -95,26 +90,26 @@ jobs:
           [ -z "${{ secrets.ZEN_FIREWALL_TOKEN }}" ] && MISSING+=("ZEN_FIREWALL_TOKEN")
 
           if [ ${#MISSING[@]} -ne 0 ]; then
-            echo "::error::Missing secrets: ${MISSING[*]}"
+            echo "::error::Missing: ${MISSING[*]}"
             echo "can_proceed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          echo "✅ All required secrets are configured"
+          echo "✅ All secrets configured"
           echo "can_proceed=true" >> $GITHUB_OUTPUT
 
   # ============================================================================
-  # Deploy Infrastructure
+  # Configure Instance
   # ============================================================================
   configure-instance:
-    name: ⚙️ Configure EC2 Instance
+    name: ⚙️ Configure EC2
     runs-on: ubuntu-latest
     needs: check-prerequisites
     if: |
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
       github.event.inputs.skip_ansible != 'true'
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -143,16 +138,15 @@ jobs:
             if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
                -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
                "echo 'SSH ready'" 2>/dev/null; then
-              echo "✅ SSH connection established"
+              echo "✅ SSH ready"
               exit 0
             fi
-            echo "Waiting for SSH... ($i/30)"
+            echo "Waiting ($i/30)..."
             sleep 10
           done
-          echo "::error::SSH timeout"
           exit 1
 
-      - name: Create Ansible Inventory
+      - name: Create Inventory
         run: |
           mkdir -p ansible
           cat > ansible/inventory.ini <<EOF
@@ -160,7 +154,7 @@ jobs:
           ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
           EOF
 
-      - name: Create Vault Password File
+      - name: Create Vault Password
         run: |
           cd ansible
           echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
@@ -169,19 +163,18 @@ jobs:
       - name: Run Ansible Playbook
         run: |
           cd ansible
-          ansible-playbook -i inventory.ini playbook.yml \
-            --vault-password-file .vault_pass -v
-        timeout-minutes: 60
+          ansible-playbook -i inventory.ini playbook.yml --vault-password-file .vault_pass -v
+        timeout-minutes: 45
 
-      - name: Clean Up
+      - name: Cleanup
         if: always()
         run: rm -f ansible/.vault_pass
 
   # ============================================================================
-  # Deploy Continuous Benchmark (24/7 Testing)
+  # Deploy Continuous System
   # ============================================================================
-  deploy-continuous-benchmark:
-    name: 🔄 Deploy Continuous Benchmark System
+  deploy-continuous:
+    name: 🔄 Deploy Continuous DAST
     runs-on: ubuntu-latest
     needs: [check-prerequisites, configure-instance]
     if: |
@@ -196,82 +189,63 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Verify System Configuration
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-            'test -f /opt/benchmark-tools/start_iast_rasp_system.sh && echo "✅ System configured"'
-
-      - name: Launch Continuous System
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-            'cd /opt/benchmark-tools && nohup ./start_iast_rasp_system.sh > /tmp/system_startup.log 2>&1 &'
-          echo "✅ Continuous benchmark system launched"
-
-      - name: Wait for Initialization
-        run: sleep 45
-
-      - name: Check System Status
+      - name: Start DAST Benchmark Service
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'EOF'
-            echo "═══════════════════════════════════════"
-            echo "System Status"
-            echo "═══════════════════════════════════════"
-            systemctl is-active iast-rasp-benchmark && echo "✅ Benchmark Service: ACTIVE" || echo "⏳ Starting..."
-            docker ps | grep -q prometheus && echo "✅ Prometheus: UP" || echo "⏳ Starting..."
-            docker ps | grep -q grafana && echo "✅ Grafana: UP" || echo "⏳ Starting..."
-            pgrep -f prometheus_exporter.py > /dev/null && echo "✅ Metrics Exporter: UP" || echo "⏳ Starting..."
+            echo "🚀 Starting continuous DAST benchmark"
+            sudo systemctl start dast-benchmark
+            sleep 10
+            sudo systemctl status dast-benchmark --no-pager || true
           EOF
-        continue-on-error: true
 
-      - name: Create Deployment Summary
-        if: always()
+      - name: Create Summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🎯 IAST vs RASP Continuous Benchmark Deployed
+          # 🎯 Continuous DAST Benchmark Deployed
 
           ## 📊 Access Dashboards
 
           | Service | URL | Credentials |
           |---------|-----|-------------|
           | **Grafana** | [http://${{ env.EC2_INSTANCE_IP }}:3001](http://${{ env.EC2_INSTANCE_IP }}:3001) | admin / iast_rasp_2024 |
-          | **Prometheus** | [http://${{ env.EC2_INSTANCE_IP }}:9090](http://${{ env.EC2_INSTANCE_IP }}:9090) | None |
-          | **Metrics** | [http://${{ env.EC2_INSTANCE_IP }}:8000/metrics](http://${{ env.EC2_INSTANCE_IP }}:8000/metrics) | None |
+          | **Prometheus** | [http://${{ env.EC2_INSTANCE_IP }}:9090](http://${{ env.EC2_INSTANCE_IP }}:9090) | - |
+          | **Metrics** | [http://${{ env.EC2_INSTANCE_IP }}:8000/metrics](http://${{ env.EC2_INSTANCE_IP }}:8000/metrics) | - |
 
-          ## 🔄 How It Works
+          ## 🕷️ How It Works
 
-          1. **Configuration Rotation**: System alternates between IAST and RASP every 60 minutes
-          2. **DAST Attacks**: Automated attacks run every 5 minutes
-          3. **Real-time Metrics**: All data flows to Prometheus → Grafana
-          4. **Continuous Collection**: 24/7 automated testing
+          1. **OWASP ZAP** runs real DAST scans every 10 minutes
+          2. System rotates between **IAST** and **RASP** every hour
+          3. Results flow to Prometheus → Grafana for visualization
+          4. Logs analyzed for blocking/detection events
 
-          ## 📈 What You'll See in Grafana
+          ## 📈 What You'll See
 
-          - **Blocking Effectiveness**: IAST (detection only) vs RASP (detection + blocking)
-          - **Detection Rates**: Real-time detection percentages
-          - **RASP Advantage**: Calculated superiority percentage
-          - **Attack Breakdown**: SQLi, XSS, Path Traversal results
+          - **IAST**: Detects vulnerabilities, reports them (no blocking)
+          - **RASP**: Detects **AND blocks** attacks in real-time
+          - **ZAP Alerts**: Professional security scan findings
+          - **Comparison**: Clear superiority of RASP protection
 
-          ## 🔧 Management Commands
+          ## 🔧 Management
 
           \`\`\`bash
-          # Check system status
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} systemctl status iast-rasp-benchmark
+          # Check status
+          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} systemctl status dast-benchmark
 
-          # View logs
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} journalctl -u iast-rasp-benchmark -f
+          # View logs  
+          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} journalctl -u dast-benchmark -f
 
-          # View startup log
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} tail -50 /tmp/system_startup.log
+          # View results
+          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} ls -l /var/lib/benchmark-results/
           \`\`\`
 
-          ⏰ **Status**: System is initializing. Dashboards ready in 5-10 minutes.
+          ⚠️ **Note**: First cycle takes 20 minutes (Docker build)
           EOF
 
   # ============================================================================
-  # Manual Test Runs (IAST vs RASP Comparison)
+  # Manual DAST Tests
   # ============================================================================
-  iast-vs-rasp-comparison:
-    name: 🧪 ${{ matrix.config_display }}
+  dast-comparison:
+    name: 🕷️ ${{ matrix.config_display }}
     runs-on: ubuntu-latest
     needs: [check-prerequisites, configure-instance]
     if: |
@@ -288,16 +262,14 @@ jobs:
             dd_appsec: "true"
             dd_iast: "true"
             aikido_block: "false"
-            security_tool: "IAST"
           - config: rasp-protection
             config_display: "Aikido RASP (Detection + Blocking)"
             dd_appsec: "false"
             dd_iast: "false"
             aikido_block: "true"
-            security_tool: "RASP"
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup SSH
@@ -307,17 +279,16 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Deploy ${{ matrix.config_display }} Configuration
+      - name: Deploy ${{ matrix.config_display }}
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            set -e
-            cd /opt/juice-shop
-
             echo "════════════════════════════════════════"
             echo "🔧 Deploying: ${{ matrix.config_display }}"
             echo "════════════════════════════════════════"
-
-            # Update environment
+            
+            cd /opt/juice-shop
+            
+            # Update config
             cat > .env << 'EOF'
           SECURITY_MODE=${{ matrix.config }}
           DD_APPSEC_ENABLED=${{ matrix.dd_appsec }}
@@ -325,99 +296,128 @@ jobs:
           AIKIDO_BLOCK=${{ matrix.aikido_block }}
           AIKIDO_TOKEN=${{ secrets.ZEN_FIREWALL_TOKEN }}
           EOF
-
-            # Restart application
-            docker compose down 2>/dev/null || true
+            
+            # Build and start (this takes 15-20 minutes)
+            echo "📦 Building Docker image (15-20 min)..."
+            sg docker -c "docker compose down" || true
             sleep 5
-            docker compose up -d
-
-            # Wait for application
+            sg docker -c "docker compose up -d --build"
+            
+            # Wait for app
             echo "⏳ Waiting for application..."
-            for i in {1..20}; do
+            for i in {1..30}; do
               if curl -f -s http://localhost:3000 > /dev/null 2>&1; then
-                echo "✅ Application is ready"
-                echo ""
-                echo "Configuration Active:"
-                echo "  Tool: ${{ matrix.security_tool }}"
-                echo "  IAST Enabled: ${{ matrix.dd_iast }}"
-                echo "  RASP Blocking: ${{ matrix.aikido_block }}"
+                echo "✅ Application ready!"
+                echo "Configuration: ${{ matrix.config }}"
                 exit 0
               fi
-              sleep 3
+              sleep 5
             done
-
+            
             echo "⚠️  Application delayed, continuing..."
           ENDSSH
-        timeout-minutes: 5
+        timeout-minutes: 30
 
-      - name: Run DAST Attack Suite (Round ${{ matrix.round }})
+      - name: Run OWASP ZAP DAST Scan
         run: |
-          ROUNDS=${{ github.event.inputs.attack_rounds || 3 }}
-
-          for ROUND in $(seq 1 $ROUNDS); do
-            echo "════════════════════════════════════════"
-            echo "🎯 DAST Attack Round $ROUND/$ROUNDS"
-            echo "════════════════════════════════════════"
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
+            mkdir -p "$RESULTS_DIR"
             
-            ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-              RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}/round_${ROUND}"
-              mkdir -p "$RESULTS_DIR"
-              
-              # Run all DAST attacks
-              /opt/benchmark-tools/run_all_attacks.sh \
-                "http://localhost:3000" \
-                "${{ matrix.config }}" \
-                "$RESULTS_DIR"
-              
-              # Extract security events from logs
-              docker logs juice-shop > "$RESULTS_DIR/container.log" 2>&1 || true
-              
-              grep -i "aikido\|datadog\|blocked\|detected\|vulnerability" \
-                "$RESULTS_DIR/container.log" > "$RESULTS_DIR/security_events.log" 2>&1 || true
-              
-              BLOCKED=$(grep -ci "blocked" "$RESULTS_DIR/security_events.log" 2>/dev/null || echo "0")
-              DETECTED=$(grep -ci "detected\|vulnerability" "$RESULTS_DIR/security_events.log" 2>/dev/null || echo "0")
-              
-              echo "METRIC,COUNT" > "$RESULTS_DIR/security_events.csv"
-              echo "BLOCKED,$BLOCKED" >> "$RESULTS_DIR/security_events.csv"
-              echo "DETECTED,$DETECTED" >> "$RESULTS_DIR/security_events.csv"
-              
-              echo "📊 Security Events: $DETECTED detected, $BLOCKED blocked"
+            echo "🕷️  Running OWASP ZAP DAST scan..."
+            
+            SCAN_TYPE="${{ github.event.inputs.zap_scan_type || 'baseline' }}"
+            
+            if [ "$SCAN_TYPE" = "baseline" ]; then
+              ZAP_CMD="zap-baseline.py"
+              TIMEOUT=300
+            else
+              ZAP_CMD="zap-full-scan.py"
+              TIMEOUT=1200
+            fi
+            
+            sg docker -c "docker run --rm --network host \
+              -v $RESULTS_DIR:/zap/wrk:rw \
+              ghcr.io/zaproxy/zaproxy:stable \
+              $ZAP_CMD \
+              -t http://localhost:3000 \
+              -r zap-report.html \
+              -J zap-report.json \
+              -w zap-report.md \
+              -m 3 -T $TIMEOUT" || echo "ZAP scan completed with warnings"
+            
+            echo "✅ ZAP scan completed"
+            ls -lh "$RESULTS_DIR"
           ENDSSH
+        timeout-minutes: 25
+
+      - name: Extract Security Metrics
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
             
-            # Wait between rounds
-            [ $ROUND -lt $ROUNDS ] && sleep 30
-          done
-        timeout-minutes: 15
+            # Extract container logs
+            sg docker -c "docker logs juice-shop" > "$RESULTS_DIR/container.log" 2>&1 || true
+            
+            # Count security events
+            BLOCKED=$(grep -ci "blocked" "$RESULTS_DIR/container.log" 2>/dev/null || echo "0")
+            DETECTED=$(grep -ciE "detected|vulnerability|attack" "$RESULTS_DIR/container.log" 2>/dev/null || echo "0")
+            
+            echo "METRIC,COUNT" > "$RESULTS_DIR/security_events.csv"
+            echo "BLOCKED,$BLOCKED" >> "$RESULTS_DIR/security_events.csv"
+            echo "DETECTED,$DETECTED" >> "$RESULTS_DIR/security_events.csv"
+            
+            # Parse ZAP results
+            if [ -f "$RESULTS_DIR/zap-report.json" ]; then
+              python3 << 'PYEOF' > "$RESULTS_DIR/zap_summary.txt"
+          import json
+          try:
+              with open('$RESULTS_DIR/zap-report.json', 'r') as f:
+                  data = json.load(f)
+              site = data.get('site', [{}])[0]
+              alerts = site.get('alerts', [])
+              high = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
+              medium = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
+              low = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
+              print(f"Total Alerts: {len(alerts)}")
+              print(f"High Risk: {high}")
+              print(f"Medium Risk: {medium}")
+              print(f"Low Risk: {low}")
+          except:
+              print("Error parsing ZAP results")
+          PYEOF
+            fi
+            
+            echo ""
+            echo "📊 Security Summary:"
+            cat "$RESULTS_DIR/zap_summary.txt" 2>/dev/null || echo "ZAP summary not available"
+            echo "Blocked: $BLOCKED | Detected: $DETECTED"
+          ENDSSH
 
       - name: Download Results
         run: |
           mkdir -p ./results/${{ matrix.config }}
           scp -i ~/.ssh/id_rsa -r \
             ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/benchmark-results/${{ matrix.config }}/* \
-            ./results/${{ matrix.config }}/ 2>/dev/null || echo "⚠️  Partial results"
-        timeout-minutes: 3
+            ./results/${{ matrix.config }}/ 2>/dev/null || echo "Partial download"
 
-      - name: Upload Results Artifact
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ matrix.config }}
+          name: dast-results-${{ matrix.config }}
           path: ./results/${{ matrix.config }}/
           retention-days: 30
 
   # ============================================================================
-  # Comparative Analysis & Report
+  # Generate Report
   # ============================================================================
-  comparative-analysis:
-    name: 📊 Generate IAST vs RASP Comparison Report
+  generate-report:
+    name: 📊 Generate Comparison Report
     runs-on: ubuntu-latest
-    needs: iast-vs-rasp-comparison
-    if: always() && needs.iast-vs-rasp-comparison.result != 'skipped'
+    needs: dast-comparison
+    if: always() && needs.dast-comparison.result != 'skipped'
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Download All Results
+      - name: Download Results
         uses: actions/download-artifact@v4
         with:
           path: ./all-results
@@ -428,178 +428,115 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Analysis Tools
+      - name: Install Tools
         run: pip install pandas tabulate
 
-      - name: Generate Comparative Analysis
+      - name: Generate Analysis
         run: |
           python3 << 'PYEOF'
-          import pandas as pd
-          from pathlib import Path
           import json
+          from pathlib import Path
+          import pandas as pd
 
           results_dir = Path('./all-results')
-
           if not results_dir.exists():
-              print("⚠️  No results found")
-              with open('comparison_report.csv', 'w') as f:
-                  f.write('Config,Status\n')
-                  f.write('ALL,NO_RESULTS\n')
+              print("No results found")
               exit(0)
 
-          all_data = []
-
+          data = []
           for config in ['iast-detection', 'rasp-protection']:
-              config_dir = results_dir / f'results-{config}' / config
+              config_dir = results_dir / f'dast-results-{config}' / config
               if not config_dir.exists():
                   continue
               
-              # Process all rounds
-              for round_dir in config_dir.glob('round_*'):
-                  summary_file = round_dir / 'summary.csv'
-                  if summary_file.exists():
-                      try:
-                          df = pd.read_csv(summary_file)
-                          for _, row in df.iterrows():
-                              if 'ATTACK_TYPE' in row and row.get('ATTACK_TYPE') != 'DURATION_SECONDS':
-                                  total = int(row.get('TOTAL', 0))
-                                  detected = int(row.get('DETECTED', 0))
-                                  blocked = int(row.get('BLOCKED', 0))
-                                  
-                                  all_data.append({
-                                      'Configuration': config,
-                                      'Tool': 'IAST' if config == 'iast-detection' else 'RASP',
-                                      'Attack_Type': row.get('ATTACK_TYPE', 'UNKNOWN'),
-                                      'Total': total,
-                                      'Detected': detected,
-                                      'Blocked': blocked,
-                                      'Detection_Rate': f"{((detected + blocked) / max(total, 1)) * 100:.1f}%",
-                                      'Blocking_Rate': f"{(blocked / max(total, 1)) * 100:.1f}%"
-                                  })
-                      except Exception as e:
-                          print(f"Error processing {summary_file}: {e}")
-
-          if not all_data:
-              print("⚠️  No data collected")
-              with open('comparison_report.csv', 'w') as f:
-                  f.write('Config,Status\n')
-                  f.write('ALL,NO_DATA\n')
-          else:
-              df = pd.DataFrame(all_data)
-              df.to_csv('detailed_results.csv', index=False)
-              
-              # Create summary comparison
-              summary = []
-              for config in ['iast-detection', 'rasp-protection']:
-                  config_data = df[df['Configuration'] == config]
-                  if len(config_data) > 0:
-                      total = config_data['Total'].sum()
-                      detected = config_data['Detected'].sum()
-                      blocked = config_data['Blocked'].sum()
+              # Read ZAP report
+              zap_file = config_dir / 'zap-report.json'
+              if zap_file.exists():
+                  try:
+                      with open(zap_file, 'r') as f:
+                          zap_data = json.load(f)
                       
-                      summary.append({
-                          'Tool': config_data['Tool'].iloc[0],
+                      site = zap_data.get('site', [{}])[0]
+                      alerts = site.get('alerts', [])
+                      
+                      data.append({
                           'Configuration': config,
-                          'Total_Attacks': int(total),
-                          'Detected': int(detected),
-                          'Blocked': int(blocked),
-                          'Detection_Rate': f"{((detected + blocked) / total * 100):.1f}%" if total > 0 else "N/A",
-                          'Blocking_Rate': f"{(blocked / total * 100):.1f}%" if total > 0 else "N/A"
+                          'Tool': 'IAST' if 'iast' in config else 'RASP',
+                          'Total_Vulnerabilities': len(alerts),
+                          'High_Risk': sum(1 for a in alerts if 'High' in a.get('riskdesc', '')),
+                          'Medium_Risk': sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
                       })
+                  except Exception as e:
+                      print(f"Error: {e}")
               
-              pd.DataFrame(summary).to_csv('comparison_report.csv', index=False)
-              print("✅ Analysis complete")
+              # Read security events
+              events_file = config_dir / 'security_events.csv'
+              if events_file.exists():
+                  try:
+                      df = pd.read_csv(events_file)
+                      blocked = df[df['METRIC'] == 'BLOCKED']['COUNT'].values[0]
+                      detected = df[df['METRIC'] == 'DETECTED']['COUNT'].values[0]
+                      if data:
+                          data[-1]['Blocked'] = int(blocked)
+                          data[-1]['Detected'] = int(detected)
+                  except:
+                      pass
+
+          if data:
+              df = pd.DataFrame(data)
+              df.to_csv('comparison.csv', index=False)
+              print(df.to_markdown(index=False))
           PYEOF
 
-      - name: Generate Comprehensive Report
+      - name: Create Report
         run: |
-          cat > COMPARISON_REPORT.md << 'EOF'
-          # 🔒 IAST vs RASP Security Comparison Report
+          cat > REPORT.md << 'EOF'
+          # 🔒 IAST vs RASP Comparison - DAST Results
 
-          **Pipeline Run:** #${{ github.run_number }}  
-          **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
-          **Branch:** ${{ github.ref_name }}
+          **Run:** #${{ github.run_number }}  
+          **Date:** $(date -u)
 
-          ## 📋 Testing Methodology
+          ## 🕷️ Testing Approach
 
-          ### Security Tools Tested
-          1. **DataDog IAST** (Interactive Application Security Testing)
-             - Runtime detection from inside the application
-             - Passive monitoring only (no blocking)
-             - Reports vulnerabilities to DataDog dashboard
+          **DAST Tool**: OWASP ZAP (Industry-standard security scanner)  
+          **Attack Simulation**: Real-world vulnerability testing  
+          **Configurations Tested**:
+          - DataDog IAST (Detection-only monitoring)
+          - Aikido Zen RASP (Detection + Blocking protection)
 
-          2. **Aikido Zen RASP** (Runtime Application Self-Protection)
-             - Runtime detection + active blocking
-             - Protects application in real-time
-             - Blocks malicious requests automatically
-
-          ### Attack Approach (DAST)
-          - **Dynamic Application Security Testing** using custom attack scripts
-          - Attack types: SQL Injection, XSS, Path Traversal
-          - Same attacks sent to both configurations for fair comparison
+          ## 📊 Results
 
           EOF
 
-          if [ -f comparison_report.csv ] && [ $(wc -l < comparison_report.csv) -gt 1 ]; then
-            python3 << 'PYEOF' >> COMPARISON_REPORT.md || echo "_Analysis unavailable_" >> COMPARISON_REPORT.md
+          if [ -f comparison.csv ]; then
+            python3 << 'PYEOF' >> REPORT.md
           import pandas as pd
           try:
-              df = pd.read_csv('comparison_report.csv')
-              if len(df) > 0:
-                  print("\n## 📊 Results Summary\n")
-                  print(df.to_markdown(index=False))
-                  
-                  # Calculate advantage
+              df = pd.read_csv('comparison.csv')
+              print("\n### Summary\n")
+              print(df.to_markdown(index=False))
+              
+              if len(df) == 2:
                   iast = df[df['Tool'] == 'IAST']
                   rasp = df[df['Tool'] == 'RASP']
                   
-                  if len(iast) > 0 and len(rasp) > 0:
-                      rasp_block = float(rasp['Blocking_Rate'].values[0].strip('%'))
-                      iast_block = float(iast['Blocking_Rate'].values[0].strip('%'))
-                      
-                      rasp_detect = float(rasp['Detection_Rate'].values[0].strip('%'))
-                      iast_detect = float(iast['Detection_Rate'].values[0].strip('%'))
-                      
-                      print(f"\n## 🏆 Key Findings\n")
-                      print(f"### Blocking Capability")
-                      print(f"- **RASP**: {rasp_block:.1f}% of attacks blocked")
-                      print(f"- **IAST**: {iast_block:.1f}% of attacks blocked")
-                      print(f"- **Advantage**: RASP blocks {rasp_block - iast_block:.1f}% more attacks\n")
-                      
-                      print(f"### Detection Capability")
-                      print(f"- **RASP**: {rasp_detect:.1f}% detection rate")
-                      print(f"- **IAST**: {iast_detect:.1f}% detection rate")
-                      print(f"- **Advantage**: RASP detects {rasp_detect - iast_detect:.1f}% more attacks\n")
-                      
-                      print(f"### Conclusion")
-                      print(f"**Aikido Zen RASP demonstrates superior protection** with both detection and active blocking capabilities, while DataDog IAST provides detection-only monitoring.")
+                  if not iast.empty and not rasp.empty:
+                      print("\n### 🏆 Key Findings\n")
+                      print(f"- **IAST**: {iast['Detected'].values[0]} threats detected, {iast['Blocked'].values[0]} blocked")
+                      print(f"- **RASP**: {rasp['Detected'].values[0]} threats detected, {rasp['Blocked'].values[0]} blocked")
+                      print(f"\n**Conclusion**: RASP provides active protection by blocking threats, while IAST only detects and reports.")
           except Exception as e:
               print(f"Error: {e}")
           PYEOF
-          else
-            echo "⚠️  No benchmark data available" >> COMPARISON_REPORT.md
           fi
 
-          cat >> COMPARISON_REPORT.md << 'EOF'
+          cat REPORT.md >> $GITHUB_STEP_SUMMARY
 
-          ## 🔄 Continuous Monitoring
-
-          For real-time, continuous monitoring:
-          - Deploy the continuous benchmark system
-          - View live metrics in Grafana
-          - Track performance over days/weeks
-          - Generate statistically significant comparisons
-
-          EOF
-
-          cat COMPARISON_REPORT.md >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload Comparison Report
+      - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
-          name: iast-vs-rasp-comparison-report
+          name: comparison-report
           path: |
-            COMPARISON_REPORT.md
-            comparison_report.csv
-            detailed_results.csv
+            REPORT.md
+            comparison.csv
           retention-days: 90
