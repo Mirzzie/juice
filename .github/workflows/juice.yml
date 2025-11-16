@@ -203,7 +203,11 @@ jobs:
 
       - name: Deploy Application
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'DEPLOY'
+          ssh -i ~/.ssh/id_rsa \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -o TCPKeepAlive=yes \
+            ubuntu@${{ env.EC2_INSTANCE_IP }} << 'DEPLOY'
             set -e
             cd /opt/juice-shop
             
@@ -211,8 +215,32 @@ jobs:
             docker compose down || true
             docker image prune -f || true
             
-            echo "📦 Building with security instrumentation..."
-            docker compose build --no-cache
+            echo "📦 Building Docker image (this may take 5-10 minutes)..."
+            echo "⏰ Build started at: $(date)"
+            
+            # Run build in background to prevent SSH timeout
+            docker compose build --no-cache > /tmp/build.log 2>&1 &
+            BUILD_PID=$!
+            
+            # Monitor build progress with periodic output to keep SSH alive
+            while kill -0 $BUILD_PID 2>/dev/null; do
+              echo "⏳ Still building... ($(date +%H:%M:%S))"
+              tail -5 /tmp/build.log | grep -E "Step|RUN|COPY|FROM" || true
+              sleep 20
+            done
+            
+            # Check build result
+            wait $BUILD_PID
+            BUILD_EXIT=$?
+            
+            if [ $BUILD_EXIT -ne 0 ]; then
+              echo "❌ Build failed with exit code $BUILD_EXIT"
+              echo "Last 50 lines of build log:"
+              tail -50 /tmp/build.log
+              exit 1
+            fi
+            
+            echo "✅ Build completed successfully at: $(date)"
             
             echo "▶️  Starting application..."
             docker compose up -d
