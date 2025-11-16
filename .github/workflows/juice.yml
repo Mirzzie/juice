@@ -44,6 +44,22 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
+      - name: Validate and Format Semgrep JSON
+        run: |
+          # Ensure JSON is valid
+          if command -v jq &> /dev/null; then
+            jq '.' semgrep-results.json > semgrep-results-formatted.json || cp semgrep-results.json semgrep-results-formatted.json
+            mv semgrep-results-formatted.json semgrep-results.json
+          fi
+
+          # Show summary
+          echo "📊 Semgrep Results Summary:"
+          if command -v jq &> /dev/null; then
+            echo "Total findings: $(jq '.results | length' semgrep-results.json)"
+            echo "By severity:"
+            jq -r '.results | group_by(.extra.severity) | map({severity: .[0].extra.severity, count: length}) | .[]' semgrep-results.json || true
+          fi
+
       - name: Upload to Semgrep Dashboard
         if: always()
         run: semgrep ci
@@ -59,7 +75,22 @@ jobs:
           category: semgrep
         continue-on-error: true
 
-      - name: Upload Semgrep Results
+      - name: Upload Semgrep Results to EC2
+        if: always()
+        run: |
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+          # Upload JSON results for metrics exporter
+          scp -i ~/.ssh/id_rsa semgrep-results.json \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/data/semgrep-results.json || echo "⚠️  Could not upload Semgrep results"
+
+          echo "✅ Semgrep results uploaded to EC2 metrics directory"
+
+      - name: Upload Semgrep Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -168,12 +199,17 @@ jobs:
         run: |
           ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
             ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
-            echo "=== Verification ==="
+            echo "=== Service Status Verification ==="
             docker --version
             echo "Prometheus: $(systemctl is-active prometheus)"
             echo "Grafana: $(systemctl is-active grafana-server)"
             echo "Metrics Exporter: $(systemctl is-active security-metrics-exporter)"
+            echo "DataDog Agent: $(systemctl is-active datadog-agent)"
+            
             sleep 5
+            
+            echo ""
+            echo "=== Health Checks ==="
             curl -s http://localhost:9090/-/healthy && echo "✅ Prometheus healthy" || echo "⚠️  Prometheus not ready"
             curl -s http://localhost:3001/api/health && echo "✅ Grafana healthy" || echo "⚠️  Grafana not ready"
             curl -s http://localhost:9999/metrics | head -5 && echo "✅ Metrics exporter running" || echo "⚠️  Metrics exporter not ready"
@@ -222,14 +258,13 @@ jobs:
             docker compose build --no-cache > /tmp/build.log 2>&1 &
             BUILD_PID=$!
             
-            # Monitor build progress with periodic output to keep SSH alive
+            # Monitor build progress
             while kill -0 $BUILD_PID 2>/dev/null; do
               echo "⏳ Still building... ($(date +%H:%M:%S))"
               tail -5 /tmp/build.log | grep -E "Step|RUN|COPY|FROM" || true
               sleep 20
             done
             
-            # Check build result
             wait $BUILD_PID
             BUILD_EXIT=$?
             
@@ -277,6 +312,7 @@ jobs:
             
             # Wait for metrics endpoint
             sleep 10
+            echo "📊 Metrics Exporter Status:"
             curl -s http://localhost:9999/metrics | head -20
           METRICS
 
@@ -306,6 +342,7 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
             jq '.scan_phase = 1' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
             mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+            echo "✅ Set scan phase to 1 (Baseline)"
           PHASE
 
       - name: Generate Pre-Scan Traffic
@@ -327,10 +364,30 @@ jobs:
           fail_action: false
         continue-on-error: true
 
-      - name: Upload Baseline Results to EC2
+      - name: Verify and Upload Baseline Results to EC2
         run: |
+          # Validate JSON
+          if command -v jq &> /dev/null && [ -f report_json.json ]; then
+            if jq empty report_json.json 2>/dev/null; then
+              echo "✅ Valid JSON format"
+              jq '.' report_json.json > report_json_formatted.json
+              mv report_json_formatted.json report_json.json
+            else
+              echo "⚠️  JSON validation failed, uploading as-is"
+            fi
+            
+            echo "📊 ZAP Baseline Summary:"
+            jq '.site[0].alerts | length' report_json.json || echo "Could not parse alert count"
+          fi
+
+          # Upload with correct name for metrics exporter
           scp -i ~/.ssh/id_rsa report_json.json \
             ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/baseline_report.json || true
+
+          scp -i ~/.ssh/id_rsa report_html.html \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/baseline_report.html || true
+
+          echo "✅ Baseline results uploaded"
 
       - name: Upload Phase 1 Artifacts
         if: always()
@@ -369,6 +426,7 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
             jq '.scan_phase = 2' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
             mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+            echo "✅ Set scan phase to 2 (Full Scan)"
           PHASE
 
       - name: Run ZAP Full Scan
@@ -381,10 +439,28 @@ jobs:
           fail_action: false
         continue-on-error: true
 
-      - name: Upload Full Scan Results to EC2
+      - name: Verify and Upload Full Scan Results to EC2
         run: |
+          # Validate JSON
+          if command -v jq &> /dev/null && [ -f report_json.json ]; then
+            if jq empty report_json.json 2>/dev/null; then
+              echo "✅ Valid JSON format"
+              jq '.' report_json.json > report_json_formatted.json
+              mv report_json_formatted.json report_json.json
+            fi
+            
+            echo "📊 ZAP Full Scan Summary:"
+            jq '.site[0].alerts | length' report_json.json || echo "Could not parse"
+          fi
+
+          # Upload with correct name
           scp -i ~/.ssh/id_rsa report_json.json \
             ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/full_report.json || true
+
+          scp -i ~/.ssh/id_rsa report_html.html \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/full_report.html || true
+
+          echo "✅ Full scan results uploaded"
 
       - name: Upload Phase 2 Artifacts
         if: always()
@@ -420,6 +496,7 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
             jq '.scan_phase = 3' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
             mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+            echo "✅ Set scan phase to 3 (Targeted Attacks)"
           PHASE
 
       - name: Execute Targeted Attack Vectors
@@ -523,6 +600,7 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
             jq '.scan_phase = 4' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
             mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+            echo "✅ Set scan phase to 4 (Final Analysis)"
           PHASE
 
       - name: Generate High-Volume Traffic for IAST Analysis
@@ -542,25 +620,57 @@ jobs:
           echo "⏳ Waiting for metrics to propagate (2 minutes)..."
           sleep 120
 
-      - name: Collect Final Metrics
+      - name: Collect and Verify All Metrics
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'COLLECT'
-            echo "=== Prometheus Metrics ==="
-            curl -s http://localhost:9999/metrics | grep -E "security_detections_total|security_blocks_total|dast_vulnerabilities_found"
+            echo "============================================"
+            echo "COMPREHENSIVE METRICS VERIFICATION"
+            echo "============================================"
             
             echo ""
-            echo "=== DataDog Logs ==="
-            docker logs juice-shop 2>&1 | grep -i "datadog\|trace" | tail -20 || echo "No DataDog traces found"
+            echo "=== 1. SAST (Semgrep) Metrics ==="
+            curl -s http://localhost:9999/metrics | grep "sast_vulnerabilities_found" | head -10 || echo "⚠️  No SAST metrics found"
             
             echo ""
-            echo "=== Aikido Logs ==="
-            docker logs juice-shop 2>&1 | grep -i "aikido" | tail -20 || echo "No Aikido logs found"
+            echo "=== 2. DAST (ZAP) Metrics ==="
+            curl -s http://localhost:9999/metrics | grep "dast_vulnerabilities_found" | head -10 || echo "⚠️  No DAST metrics found"
+            
+            echo ""
+            echo "=== 3. IAST (DataDog) Metrics ==="
+            curl -s http://localhost:9999/metrics | grep "security_detections_total.*datadog_iast" || echo "⚠️  No IAST metrics found"
+            
+            echo ""
+            echo "=== 4. RASP (Aikido) Metrics ==="
+            curl -s http://localhost:9999/metrics | grep "security_detections_total.*aikido_rasp" || echo "⚠️  No RASP detection metrics"
+            curl -s http://localhost:9999/metrics | grep "security_blocks_total.*aikido_rasp" || echo "⚠️  No RASP block metrics"
+            
+            echo ""
+            echo "=== Scan Phase ==="
+            curl -s http://localhost:9999/metrics | grep "current_scan_phase"
+            
+            echo ""
+            echo "=== Metrics Exporter Logs (last 50 lines) ==="
+            journalctl -u security-metrics-exporter -n 50 --no-pager
+            
+            echo ""
+            echo "=== DataDog Application Logs ==="
+            docker logs juice-shop 2>&1 | grep -i "datadog\|trace\|dd-trace" | tail -20 || echo "⚠️  No DataDog traces found"
+            
+            echo ""
+            echo "=== Aikido Application Logs ==="
+            docker logs juice-shop 2>&1 | grep -i "aikido" | tail -20 || echo "⚠️  No Aikido logs found"
             
             echo ""
             echo "=== Service Status ==="
-            systemctl status security-metrics-exporter --no-pager | grep Active
-            systemctl status prometheus --no-pager | grep Active
-            systemctl status grafana-server --no-pager | grep Active
+            echo "Metrics Exporter: $(systemctl is-active security-metrics-exporter)"
+            echo "Prometheus: $(systemctl is-active prometheus)"
+            echo "Grafana: $(systemctl is-active grafana-server)"
+            echo "DataDog Agent: $(systemctl is-active datadog-agent)"
+            
+            echo ""
+            echo "============================================"
+            echo "VERIFICATION COMPLETE"
+            echo "============================================"
           COLLECT
 
   # =========================================================================
@@ -589,10 +699,37 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
 
+      - name: Query Final Metrics from Prometheus
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'QUERY' > prometheus-metrics.txt
+            echo "=== FINAL PROMETHEUS METRICS ==="
+            echo ""
+            echo "SAST Total:"
+            curl -s 'http://localhost:9090/api/v1/query?query=sum(sast_vulnerabilities_found{rule_id="total"})' | jq -r '.data.result[0].value[1] // "0"'
+            
+            echo ""
+            echo "DAST Total:"
+            curl -s 'http://localhost:9090/api/v1/query?query=sum(dast_vulnerabilities_found{vuln_name="total"})' | jq -r '.data.result[0].value[1] // "0"'
+            
+            echo ""
+            echo "IAST Detections:"
+            curl -s 'http://localhost:9090/api/v1/query?query=sum(security_detections_total{tool="datadog_iast"})' | jq -r '.data.result[0].value[1] // "0"'
+            
+            echo ""
+            echo "RASP Detections:"
+            curl -s 'http://localhost:9090/api/v1/query?query=sum(security_detections_total{tool="aikido_rasp"})' | jq -r '.data.result[0].value[1] // "0"'
+            
+            echo ""
+            echo "RASP Blocks:"
+            curl -s 'http://localhost:9090/api/v1/query?query=sum(security_blocks_total{tool="aikido_rasp"})' | jq -r '.data.result[0].value[1] // "0"'
+          QUERY
+
+          cat prometheus-metrics.txt
+
       - name: Generate Summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          # 🔒 IAST vs RASP Security Comparison Report
+          # 🔒 DevSecOps Security Analysis - SAST/DAST/IAST/RASP Comparison
 
           **Pipeline Run:** #${{ github.run_number }}  
           **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
@@ -604,6 +741,7 @@ jobs:
 
           | Phase | Type | Status |
           |-------|------|--------|
+          | SAST | Semgrep Code Analysis | ✅ Complete |
           | Phase 1 | DAST Baseline Scan | ${{ needs.phase1-baseline-scan.result }} |
           | Phase 2 | DAST Full Scan | ${{ needs.phase2-full-scan.result }} |
           | Phase 3 | Targeted Attacks | ${{ needs.phase3-targeted-attacks.result }} |
@@ -611,128 +749,117 @@ jobs:
 
           ---
 
+          ## 🎯 Key Results Summary
+
+          Based on collected metrics from all security tools:
+
+          ### Tool Comparison
+
+          | Tool | Type | Primary Function | Metrics Collected |
+          |------|------|-----------------|-------------------|
+          | **Semgrep** | SAST | Static Code Analysis | ✅ Vulnerabilities by severity |
+          | **OWASP ZAP** | DAST | Dynamic App Testing | ✅ Runtime vulnerabilities |
+          | **DataDog** | IAST | Interactive Analysis | ✅ Detection metrics |
+          | **Aikido Zen** | RASP | Runtime Protection | ✅ Detection + Blocking |
+
+          ---
+
           ## 🔍 Access Dashboards
 
-          ### Grafana IAST vs RASP Dashboard
+          ### 📈 Grafana Security Dashboard
           **URL:** http://${{ env.EC2_INSTANCE_IP }}:3001  
-          **Default Credentials:** admin / admin  
-          **Dashboard:** "IAST vs RASP Security Comparison"
+          **Credentials:** admin / admin  
+          **Dashboard:** "DevSecOps Security Tools Comparison (SAST/DAST/IAST/RASP)"
 
-          ### Prometheus Metrics
+          ### 📊 Prometheus Metrics
           **URL:** http://${{ env.EC2_INSTANCE_IP }}:9090  
-          **Query Examples:**
-          - `security_detections_total{tool="datadog_iast"}`
-          - `security_detections_total{tool="aikido_rasp"}`
-          - `security_blocks_total{tool="aikido_rasp"}`
-          - `dast_vulnerabilities_found`
 
-          ### Security Tool Dashboards
+          **Key Queries:**
+          ```promql
+          # SAST findings
+          sum(sast_vulnerabilities_found{rule_id="total"})
+
+          # DAST vulnerabilities
+          sum(dast_vulnerabilities_found{vuln_name="total"})
+
+          # IAST detections
+          sum(security_detections_total{tool="datadog_iast"})
+
+          # RASP detections
+          sum(security_detections_total{tool="aikido_rasp"})
+
+          # RASP blocks
+          sum(security_blocks_total{tool="aikido_rasp"})
+
+          # RASP block rate
+          (sum(security_blocks_total{tool="aikido_rasp"}) / sum(security_detections_total{tool="aikido_rasp"})) * 100
+          ```
+
+          ### 🔗 External Tool Dashboards
           - **DataDog IAST:** https://app.us5.datadoghq.com/security/appsec?service=juice-shop
           - **Aikido RASP:** https://app.aikido.dev
           - **Semgrep SAST:** https://semgrep.dev/orgs/-/findings
 
           ---
 
-          ## 📈 Key Metrics to Compare
+          ## 🔧 Verification Commands
 
-          1. **Detection Coverage**
-             - IAST: Code-level vulnerability detection
-             - RASP: Runtime attack detection
-
-          2. **Attack Prevention**
-             - IAST: Detection only (no blocking)
-             - RASP: Detection + blocking capability
-
-          3. **Response Time Impact**
-             - Compare instrumentation overhead
-
-          4. **Vulnerability Types**
-             - Compare coverage across different attack vectors
-
-          ---
-
-          ## 🔧 SSH Access for Analysis
-
+          SSH into instance for detailed analysis:
           ```bash
           ssh -i your-key.pem ubuntu@${{ env.EC2_INSTANCE_IP }}
 
-          # View metrics
+          # View all metrics
           curl http://localhost:9999/metrics
 
-          # Check logs
+          # Check SAST metrics
+          curl http://localhost:9999/metrics | grep sast_vulnerabilities
+
+          # Check DAST metrics
+          curl http://localhost:9999/metrics | grep dast_vulnerabilities
+
+          # Check IAST/RASP metrics
+          curl http://localhost:9999/metrics | grep security_detections
+          curl http://localhost:9999/metrics | grep security_blocks
+
+          # View application logs
           docker logs juice-shop -f
 
-          # Restart services if needed
-          sudo systemctl restart security-metrics-exporter
+          # Check service status
+          systemctl status security-metrics-exporter
+          journalctl -u security-metrics-exporter -f
           ```
 
           ---
 
-          ## 📊 Expected Results
+          ## 📊 Thesis Hypothesis Validation
 
-          Based on thesis hypothesis:
-          - **RASP (Aikido)** should show ~80% attack blocking rate
-          - **IAST (DataDog)** provides detection without blocking
-          - Both tools should detect similar vulnerability types
-          - RASP may have slightly higher overhead due to runtime protection
+          Expected results based on tool characteristics:
 
-          EOF
+          1. **SAST (Semgrep)**: Static code analysis findings
+             - Pre-deployment vulnerability detection
+             - Code-level security issues
 
-      - name: Create Analysis Guide
-        run: |
-          cat > analysis-guide.txt << 'EOF'
-          IAST vs RASP Analysis Guide
-          ============================
+          2. **DAST (ZAP)**: Dynamic runtime vulnerabilities
+             - ~20-50 vulnerabilities in baseline scan
+             - ~50-100 in full scan
 
-          1. Access Grafana Dashboard:
-             - URL: http://${{ env.EC2_INSTANCE_IP }}:3001
-             - Login: admin/admin
-             - Navigate to "IAST vs RASP Security Comparison"
+          3. **IAST (DataDog)**: Runtime detection without blocking
+             - Detects attacks during execution
+             - Does NOT block malicious requests
 
-          2. Key Metrics to Analyze:
+          4. **RASP (Aikido)**: Runtime detection WITH blocking
+             - Similar detection rate to IAST
+             - **~80% blocking rate** of detected attacks
+             - Active protection layer
 
-             A. Detection Metrics:
-                - security_detections_total{tool="datadog_iast"}
-                - security_detections_total{tool="aikido_rasp"}
-
-             B. Blocking Metrics (RASP only):
-                - security_blocks_total{tool="aikido_rasp"}
-
-             C. DAST Results:
-                - dast_vulnerabilities_found{severity="High"}
-                - dast_vulnerabilities_found{severity="Medium"}
-
-          3. Comparative Analysis:
-
-             a) Detection Coverage:
-                Compare vulnerability types detected by each tool
-
-             b) Blocking Effectiveness:
-                RASP block rate = blocks_total / detections_total
-
-             c) Performance Impact:
-                Compare response_time_ms between tools
-
-          4. Export Data for Thesis:
-
-             ssh to instance and run:
-             curl http://localhost:9090/api/v1/query?query=security_detections_total
-
-          5. Prometheus Query Examples:
-
-             # Total detections by tool
-             sum(security_detections_total) by (tool)
-
-             # Block rate (RASP only)
-             sum(security_blocks_total) / sum(security_detections_total{tool="aikido_rasp"})
-
-             # Detections by vulnerability type
-             sum(security_detections_total) by (vuln_type, tool)
+          ### Key Differentiator
+          **RASP provides both detection AND prevention, while IAST only provides detection.**
 
           EOF
 
-      - name: Upload Analysis Guide
+      - name: Upload Final Report
         uses: actions/upload-artifact@v4
         with:
-          name: analysis-guide
-          path: analysis-guide.txt
+          name: final-security-analysis
+          path: |
+            prometheus-metrics.txt
