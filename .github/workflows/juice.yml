@@ -249,19 +249,33 @@ jobs:
             
             echo "🛑 Stopping containers..."
             docker compose down || true
-            docker image prune -f || true
+            docker system prune -f || true
             
-            echo "📦 Building Docker image (this may take 5-10 minutes)..."
+            echo "📦 Building Docker image (this may take 10-15 minutes)..."
             echo "⏰ Build started at: $(date)"
             
-            # Run build in background to prevent SSH timeout
-            docker compose build --no-cache > /tmp/build.log 2>&1 &
+            # Set Docker build timeout and add progress
+            export DOCKER_BUILDKIT=1
+            export BUILDKIT_PROGRESS=plain
+            
+            # Run build with timeout (20 minutes max)
+            timeout 1200 docker compose build --no-cache --progress=plain > /tmp/build.log 2>&1 &
             BUILD_PID=$!
             
-            # Monitor build progress
+            # Monitor build progress with keep-alive
+            COUNTER=0
             while kill -0 $BUILD_PID 2>/dev/null; do
-              echo "⏳ Still building... ($(date +%H:%M:%S))"
-              tail -5 /tmp/build.log | grep -E "Step|RUN|COPY|FROM" || true
+              COUNTER=$((COUNTER + 1))
+              echo "⏳ Still building... ($(date +%H:%M:%S)) - Elapsed: $((COUNTER * 20))s"
+              
+              # Show meaningful progress
+              tail -20 /tmp/build.log | grep -E "Step [0-9]+/[0-9]+|RUN|COPY|FROM|npm install|tsc|TypeScript" | tail -3 || true
+              
+              # Check if stuck
+              if [ $COUNTER -gt 60 ]; then
+                echo "⚠️  Build taking longer than expected (20+ minutes)"
+              fi
+              
               sleep 20
             done
             
@@ -270,8 +284,12 @@ jobs:
             
             if [ $BUILD_EXIT -ne 0 ]; then
               echo "❌ Build failed with exit code $BUILD_EXIT"
-              echo "Last 50 lines of build log:"
-              tail -50 /tmp/build.log
+              echo ""
+              echo "=== LAST 100 LINES OF BUILD LOG ==="
+              tail -100 /tmp/build.log
+              echo ""
+              echo "=== SEARCHING FOR ERRORS ==="
+              grep -i "error\|failed\|fatal" /tmp/build.log | tail -20 || echo "No specific errors found"
               exit 1
             fi
             
