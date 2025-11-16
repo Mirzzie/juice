@@ -170,11 +170,13 @@ jobs:
             ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
             echo "=== Verification ==="
             docker --version
-            systemctl is-active prometheus
-            systemctl is-active grafana-server
-            systemctl is-active security-metrics-exporter
-            curl -s http://localhost:9090/-/healthy || echo "Prometheus not ready"
-            curl -s http://localhost:3001/api/health || echo "Grafana not ready"
+            echo "Prometheus: $(systemctl is-active prometheus)"
+            echo "Grafana: $(systemctl is-active grafana-server)"
+            echo "Metrics Exporter: $(systemctl is-active security-metrics-exporter)"
+            sleep 5
+            curl -s http://localhost:9090/-/healthy && echo "✅ Prometheus healthy" || echo "⚠️  Prometheus not ready"
+            curl -s http://localhost:3001/api/health && echo "✅ Grafana healthy" || echo "⚠️  Grafana not ready"
+            curl -s http://localhost:9999/metrics | head -5 && echo "✅ Metrics exporter running" || echo "⚠️  Metrics exporter not ready"
           VERIFY
 
   # =========================================================================

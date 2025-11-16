@@ -306,10 +306,19 @@
         group: grafana
         mode: '0755'
 
+    - name: Configure Grafana to run on port 3001
+      lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: '^;?http_port ='
+        line: 'http_port = 3001'
+        state: present
+      notify: Restart Grafana
+
     - name: Create IAST vs RASP Comparison Dashboard
       copy:
         dest: /var/lib/grafana/dashboards/iast-rasp-comparison.json
         content: |
+          {% raw %}
           {
             "dashboard": {
               "title": "IAST vs RASP Security Comparison",
@@ -425,6 +434,7 @@
               "version": 1
             }
           }
+          {% endraw %}
         owner: grafana
         group: grafana
         mode: '0644'
