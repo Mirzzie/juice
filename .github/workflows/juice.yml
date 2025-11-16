@@ -237,77 +237,72 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Application
+      - name: Deploy Application (Build on EC2)
         run: |
           ssh -i ~/.ssh/id_rsa \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
+            -o ServerAliveInterval=60 \
+            -o ServerAliveCountMax=120 \
             -o TCPKeepAlive=yes \
             ubuntu@${{ env.EC2_INSTANCE_IP }} << 'DEPLOY'
             set -e
             cd /opt/juice-shop
             
-            echo "🛑 Stopping containers..."
-            docker compose down || true
-            docker system prune -f || true
+            echo "🛑 Stopping existing containers..."
+            docker compose down 2>/dev/null || true
             
-            echo "📦 Building Docker image (this may take 10-15 minutes)..."
+            echo "🧹 Cleaning up Docker resources..."
+            docker system prune -f
+            
+            echo ""
+            echo "📦 Building Docker image directly on EC2..."
             echo "⏰ Build started at: $(date)"
+            echo "ℹ️  Building on EC2 (no timeout limits, better resources)"
+            echo ""
             
-            # Set Docker build timeout and add progress
-            export DOCKER_BUILDKIT=1
-            export BUILDKIT_PROGRESS=plain
-            
-            # Run build with timeout (20 minutes max)
-            timeout 1200 docker compose build --no-cache --progress=plain > /tmp/build.log 2>&1 &
-            BUILD_PID=$!
-            
-            # Monitor build progress with keep-alive
-            COUNTER=0
-            while kill -0 $BUILD_PID 2>/dev/null; do
-              COUNTER=$((COUNTER + 1))
-              echo "⏳ Still building... ($(date +%H:%M:%S)) - Elapsed: $((COUNTER * 20))s"
-              
-              # Show meaningful progress
-              tail -20 /tmp/build.log | grep -E "Step [0-9]+/[0-9]+|RUN|COPY|FROM|npm install|tsc|TypeScript" | tail -3 || true
-              
-              # Check if stuck
-              if [ $COUNTER -gt 60 ]; then
-                echo "⚠️  Build taking longer than expected (20+ minutes)"
-              fi
-              
-              sleep 20
-            done
-            
-            wait $BUILD_PID
-            BUILD_EXIT=$?
-            
-            if [ $BUILD_EXIT -ne 0 ]; then
-              echo "❌ Build failed with exit code $BUILD_EXIT"
+            # Build on EC2 with full output (no background process needed)
+            # EC2 has more resources and no GitHub Actions timeout
+            if docker compose build --no-cache 2>&1 | tee /tmp/build.log; then
               echo ""
-              echo "=== LAST 100 LINES OF BUILD LOG ==="
+              echo "✅ Build completed successfully at: $(date)"
+            else
+              echo ""
+              echo "❌ Build failed!"
+              echo "Last 100 lines:"
               tail -100 /tmp/build.log
-              echo ""
-              echo "=== SEARCHING FOR ERRORS ==="
-              grep -i "error\|failed\|fatal" /tmp/build.log | tail -20 || echo "No specific errors found"
               exit 1
             fi
             
-            echo "✅ Build completed successfully at: $(date)"
-            
+            echo ""
             echo "▶️  Starting application..."
             docker compose up -d
             
-            echo "⏳ Waiting for startup (60s)..."
+            echo "⏳ Waiting for application to start (60s)..."
             sleep 60
             
-            if docker ps | grep -q juice-shop && curl -f -s http://localhost:3000 >/dev/null; then
-              echo "✅ Deployment successful"
+            # Verify deployment
+            echo ""
+            if docker ps | grep -q juice-shop; then
+              echo "✅ Container is running"
+              
+              # Quick health check
+              if curl -f -s http://localhost:3000 >/dev/null; then
+                echo "✅ Application is responding"
+                echo ""
+                echo "📊 Checking instrumentation..."
+                docker logs juice-shop 2>&1 | grep -i -E "datadog|aikido" | head -5 || echo "⚠️  Check logs manually"
+              else
+                echo "⚠️  Application not responding yet (container may still be starting)"
+                echo "    Check with: docker logs juice-shop"
+              fi
             else
-              echo "❌ Deployment failed"
+              echo "❌ Container failed to start"
               docker compose logs --tail=50
               exit 1
             fi
+            
+            echo ""
+            echo "✅ Deployment complete!"
+            echo "   Application: http://$(curl -s ifconfig.me):3000"
           DEPLOY
 
       - name: Initialize Metrics Collection
