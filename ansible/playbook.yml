@@ -1389,8 +1389,31 @@
           echo "========================================"
           
           echo ""
+          echo "ℹ️  Juice Shop compiles TypeScript then runs: node build/app"
+          
+          echo ""
           echo "📋 Container Status:"
           docker ps | grep juice-shop || echo "❌ Container not running"
+          
+          echo ""
+          echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
+          docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
+          
+          echo ""
+          echo "🔧 Compiled build/app.js (what actually runs - first 40 lines):"
+          docker exec juice-shop head -40 build/app.js 2>/dev/null || echo "⚠️  Could not read build/app.js"
+          
+          echo ""
+          echo "🔍 Check for instrumentation in compiled code:"
+          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found in build/app.js"
+          
+          echo ""
+          echo "📄 Tracer.ts content:"
+          docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
+          
+          echo ""
+          echo "📄 Compiled build/tracer.js:"
+          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
           
           echo ""
           echo "🔧 Environment Variables:"
@@ -1401,12 +1424,20 @@
           docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
           
           echo ""
-          echo "🔍 AIKIDO Startup Messages:"
+          echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
           docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
           
           echo ""
           echo "📡 DataDog Agent Status on Host:"
           sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo to see agent status"
+          
+          echo ""
+          echo "🚀 Generate traffic to trigger instrumentation:"
+          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          
+          echo ""
+          echo "📊 After generating traffic, check for trace activity:"
+          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
         mode: '0755'
 
   handlers:
