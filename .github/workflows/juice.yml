@@ -2,7 +2,7 @@ name: IAST vs RASP Comparison
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev-test]
   workflow_dispatch:
 
 env:
