@@ -1,542 +1,182 @@
-name: IAST vs RASP - DAST Comparison Pipeline
+name: IAST vs RASP Comparison
 
 on:
   push:
-    branches: [main, dev-test]
-  pull_request:
-    branches: [main, dev-test]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      skip_ansible:
-        description: "Skip Ansible deployment"
-        type: boolean
-        default: false
-      deploy_continuous:
-        description: "Deploy 24/7 continuous DAST system"
-        type: boolean
-        default: false
-      zap_scan_type:
-        description: "ZAP scan type"
-        type: choice
-        default: "baseline"
-        options:
-          - baseline
-          - full
 
 env:
-  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-  ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
-  AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+  EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
 
 jobs:
-  # ============================================================================
-  # SAST
-  # ============================================================================
-  sast-semgrep:
-    name: 🔍 SAST - Semgrep
+  setup:
+    name: Setup Environment
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run Semgrep
-        run: |
-          semgrep scan --config=auto --json --output=semgrep-results.json || true
-          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-
-      - name: Upload to Semgrep
-        if: always()
-        run: semgrep ci
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-        continue-on-error: true
-
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep-results.sarif
-        continue-on-error: true
-
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: sast-results
-          path: semgrep-results.*
-
-  # ============================================================================
-  # Prerequisites
-  # ============================================================================
-  check-prerequisites:
-    name: ✅ Check Prerequisites
-    runs-on: ubuntu-latest
-    needs: sast-semgrep
-    outputs:
-      can_proceed: ${{ steps.check.outputs.can_proceed }}
-    steps:
-      - name: Check Secrets
-        id: check
-        run: |
-          MISSING=()
-          [ -z "${{ secrets.EC2_INSTANCE_IP }}" ] && MISSING+=("EC2_INSTANCE_IP")
-          [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ] && MISSING+=("EC2_SSH_PRIVATE_KEY")
-          [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ] && MISSING+=("ANSIBLE_VAULT_PASSWORD")
-          [ -z "${{ secrets.ZEN_FIREWALL_TOKEN }}" ] && MISSING+=("ZEN_FIREWALL_TOKEN")
-
-          if [ ${#MISSING[@]} -ne 0 ]; then
-            echo "::error::Missing: ${MISSING[*]}"
-            echo "can_proceed=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-          echo "✅ All secrets configured"
-          echo "can_proceed=true" >> $GITHUB_OUTPUT
-
-  # ============================================================================
-  # Configure Instance
-  # ============================================================================
-  configure-instance:
-    name: ⚙️ Configure EC2
-    runs-on: ubuntu-latest
-    needs: check-prerequisites
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      github.event.inputs.skip_ansible != 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Ansible
-        run: pip install ansible boto3
+      - uses: actions/checkout@v4
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          cat >> ~/.ssh/config << 'EOF'
-          Host *
-            ServerAliveInterval 30
-            ServerAliveCountMax 10
-            TCPKeepAlive yes
-          EOF
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
 
-      - name: Wait for SSH
+      - name: Run Ansible
         run: |
-          for i in {1..30}; do
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-               -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-               "echo 'SSH ready'" 2>/dev/null; then
-              echo "✅ SSH ready"
-              exit 0
-            fi
-            echo "Waiting ($i/30)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Create Inventory
-        run: |
-          mkdir -p ansible
-          cat > ansible/inventory.ini <<EOF
-          [juiceshop]
-          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          EOF
-
-      - name: Create Vault Password
-        run: |
+          pip install ansible
           cd ansible
-          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
-          chmod 600 .vault_pass
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault
+          ansible-playbook -i "${{ env.EC2_IP }}," playbook.yml --vault-password-file .vault \
+            -u ubuntu --private-key ~/.ssh/key -e "ansible_host=${{ env.EC2_IP }}"
 
-      - name: Run Ansible Playbook
-        run: |
-          cd ansible
-          ansible-playbook -i inventory.ini playbook.yml --vault-password-file .vault_pass -v
-        timeout-minutes: 45
-
-      - name: Cleanup
-        if: always()
-        run: rm -f ansible/.vault_pass
-
-  # ============================================================================
-  # Deploy Continuous System
-  # ============================================================================
-  deploy-continuous:
-    name: 🔄 Deploy Continuous DAST
+  test-iast:
+    name: Test IAST
+    needs: setup
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-instance]
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
-      github.event.inputs.deploy_continuous == 'true'
     steps:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
 
-      - name: Start DAST Benchmark Service
+      - name: Build and Start
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'EOF'
-            echo "🚀 Starting continuous DAST benchmark"
-            sudo systemctl start dast-benchmark
-            sleep 10
-            sudo systemctl status dast-benchmark --no-pager || true
-          EOF
-
-      - name: Create Summary
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🎯 Continuous DAST Benchmark Deployed
-
-          ## 📊 Access Dashboards
-
-          | Service | URL | Credentials |
-          |---------|-----|-------------|
-          | **Grafana** | [http://${{ env.EC2_INSTANCE_IP }}:3001](http://${{ env.EC2_INSTANCE_IP }}:3001) | admin / iast_rasp_2024 |
-          | **Prometheus** | [http://${{ env.EC2_INSTANCE_IP }}:9090](http://${{ env.EC2_INSTANCE_IP }}:9090) | - |
-          | **Metrics** | [http://${{ env.EC2_INSTANCE_IP }}:8000/metrics](http://${{ env.EC2_INSTANCE_IP }}:8000/metrics) | - |
-
-          ## 🕷️ How It Works
-
-          1. **OWASP ZAP** runs real DAST scans every 10 minutes
-          2. System rotates between **IAST** and **RASP** every hour
-          3. Results flow to Prometheus → Grafana for visualization
-          4. Logs analyzed for blocking/detection events
-
-          ## 📈 What You'll See
-
-          - **IAST**: Detects vulnerabilities, reports them (no blocking)
-          - **RASP**: Detects **AND blocks** attacks in real-time
-          - **ZAP Alerts**: Professional security scan findings
-          - **Comparison**: Clear superiority of RASP protection
-
-          ## 🔧 Management
-
-          \`\`\`bash
-          # Check status
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} systemctl status dast-benchmark
-
-          # View logs  
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} journalctl -u dast-benchmark -f
-
-          # View results
-          ssh ubuntu@${{ env.EC2_INSTANCE_IP }} ls -l /var/lib/benchmark-results/
-          \`\`\`
-
-          ⚠️ **Note**: First cycle takes 20 minutes (Docker build)
-          EOF
-
-  # ============================================================================
-  # Manual DAST Tests
-  # ============================================================================
-  dast-comparison:
-    name: 🕷️ ${{ matrix.config_display }}
-    runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-instance]
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
-      github.event.inputs.deploy_continuous != 'true'
-    strategy:
-      max-parallel: 1
-      fail-fast: false
-      matrix:
-        include:
-          - config: iast-detection
-            config_display: "DataDog IAST (Detection Only)"
-            dd_appsec: "true"
-            dd_iast: "true"
-            aikido_block: "false"
-          - config: rasp-protection
-            config_display: "Aikido RASP (Detection + Blocking)"
-            dd_appsec: "false"
-            dd_iast: "false"
-            aikido_block: "true"
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-      - name: Deploy ${{ matrix.config_display }}
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "════════════════════════════════════════"
-            echo "🔧 Deploying: ${{ matrix.config_display }}"
-            echo "════════════════════════════════════════"
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            cd /opt/app
+            export DD_APPSEC=true DD_IAST=true AIKIDO_BLOCK=false
             
-            cd /opt/juice-shop
+            # Start build in background
+            nohup docker compose up -d --build > /tmp/build.log 2>&1 &
+            BUILD_PID=$!
             
-            # Update config
-            cat > .env << 'EOF'
-          SECURITY_MODE=${{ matrix.config }}
-          DD_APPSEC_ENABLED=${{ matrix.dd_appsec }}
-          DD_IAST_ENABLED=${{ matrix.dd_iast }}
-          AIKIDO_BLOCK=${{ matrix.aikido_block }}
-          AIKIDO_TOKEN=${{ secrets.ZEN_FIREWALL_TOKEN }}
-          EOF
-            
-            # Build and start (this takes 15-20 minutes)
-            echo "📦 Building Docker image (15-20 min)..."
-            sg docker -c "docker compose down" || true
-            sleep 5
-            sg docker -c "docker compose up -d --build"
-            
-            # Wait for app
-            echo "⏳ Waiting for application..."
-            for i in {1..30}; do
-              if curl -f -s http://localhost:3000 > /dev/null 2>&1; then
-                echo "✅ Application ready!"
-                echo "Configuration: ${{ matrix.config }}"
+            # Wait max 25 minutes
+            for i in {1..300}; do
+              if docker ps | grep -q app; then
+                echo "App ready"
                 exit 0
               fi
               sleep 5
             done
             
-            echo "⚠️  Application delayed, continuing..."
-          ENDSSH
+            echo "Timeout waiting for app"
+            exit 1
+          EOF
         timeout-minutes: 30
 
-      - name: Run OWASP ZAP DAST Scan
+      - name: Run ZAP Scan
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
-            mkdir -p "$RESULTS_DIR"
-            
-            echo "🕷️  Running OWASP ZAP DAST scan..."
-            
-            SCAN_TYPE="${{ github.event.inputs.zap_scan_type || 'baseline' }}"
-            
-            if [ "$SCAN_TYPE" = "baseline" ]; then
-              ZAP_CMD="zap-baseline.py"
-              TIMEOUT=300
-            else
-              ZAP_CMD="zap-full-scan.py"
-              TIMEOUT=1200
-            fi
-            
-            sg docker -c "docker run --rm --network host \
-              -v $RESULTS_DIR:/zap/wrk:rw \
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            mkdir -p /var/lib/results/iast
+            docker run --rm --network host \
+              -v /var/lib/results/iast:/zap/wrk \
               ghcr.io/zaproxy/zaproxy:stable \
-              $ZAP_CMD \
-              -t http://localhost:3000 \
-              -r zap-report.html \
-              -J zap-report.json \
-              -w zap-report.md \
-              -m 3 -T $TIMEOUT" || echo "ZAP scan completed with warnings"
-            
-            echo "✅ ZAP scan completed"
-            ls -lh "$RESULTS_DIR"
-          ENDSSH
-        timeout-minutes: 25
-
-      - name: Extract Security Metrics
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            RESULTS_DIR="/tmp/benchmark-results/${{ matrix.config }}"
-            
-            # Extract container logs
-            sg docker -c "docker logs juice-shop" > "$RESULTS_DIR/container.log" 2>&1 || true
-            
-            # Count security events
-            BLOCKED=$(grep -ci "blocked" "$RESULTS_DIR/container.log" 2>/dev/null || echo "0")
-            DETECTED=$(grep -ciE "detected|vulnerability|attack" "$RESULTS_DIR/container.log" 2>/dev/null || echo "0")
-            
-            echo "METRIC,COUNT" > "$RESULTS_DIR/security_events.csv"
-            echo "BLOCKED,$BLOCKED" >> "$RESULTS_DIR/security_events.csv"
-            echo "DETECTED,$DETECTED" >> "$RESULTS_DIR/security_events.csv"
-            
-            # Parse ZAP results
-            if [ -f "$RESULTS_DIR/zap-report.json" ]; then
-              python3 << 'PYEOF' > "$RESULTS_DIR/zap_summary.txt"
-          import json
-          try:
-              with open('$RESULTS_DIR/zap-report.json', 'r') as f:
-                  data = json.load(f)
-              site = data.get('site', [{}])[0]
-              alerts = site.get('alerts', [])
-              high = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
-              medium = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
-              low = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
-              print(f"Total Alerts: {len(alerts)}")
-              print(f"High Risk: {high}")
-              print(f"Medium Risk: {medium}")
-              print(f"Low Risk: {low}")
-          except:
-              print("Error parsing ZAP results")
-          PYEOF
-            fi
-            
-            echo ""
-            echo "📊 Security Summary:"
-            cat "$RESULTS_DIR/zap_summary.txt" 2>/dev/null || echo "ZAP summary not available"
-            echo "Blocked: $BLOCKED | Detected: $DETECTED"
-          ENDSSH
-
-      - name: Download Results
-        run: |
-          mkdir -p ./results/${{ matrix.config }}
-          scp -i ~/.ssh/id_rsa -r \
-            ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/benchmark-results/${{ matrix.config }}/* \
-            ./results/${{ matrix.config }}/ 2>/dev/null || echo "Partial download"
-
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: dast-results-${{ matrix.config }}
-          path: ./results/${{ matrix.config }}/
-          retention-days: 30
-
-  # ============================================================================
-  # Generate Report
-  # ============================================================================
-  generate-report:
-    name: 📊 Generate Comparison Report
-    runs-on: ubuntu-latest
-    needs: dast-comparison
-    if: always() && needs.dast-comparison.result != 'skipped'
-    steps:
-      - name: Download Results
-        uses: actions/download-artifact@v4
-        with:
-          path: ./all-results
-        continue-on-error: true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Tools
-        run: pip install pandas tabulate
-
-      - name: Generate Analysis
-        run: |
-          python3 << 'PYEOF'
-          import json
-          from pathlib import Path
-          import pandas as pd
-
-          results_dir = Path('./all-results')
-          if not results_dir.exists():
-              print("No results found")
-              exit(0)
-
-          data = []
-          for config in ['iast-detection', 'rasp-protection']:
-              config_dir = results_dir / f'dast-results-{config}' / config
-              if not config_dir.exists():
-                  continue
-              
-              # Read ZAP report
-              zap_file = config_dir / 'zap-report.json'
-              if zap_file.exists():
-                  try:
-                      with open(zap_file, 'r') as f:
-                          zap_data = json.load(f)
-                      
-                      site = zap_data.get('site', [{}])[0]
-                      alerts = site.get('alerts', [])
-                      
-                      data.append({
-                          'Configuration': config,
-                          'Tool': 'IAST' if 'iast' in config else 'RASP',
-                          'Total_Vulnerabilities': len(alerts),
-                          'High_Risk': sum(1 for a in alerts if 'High' in a.get('riskdesc', '')),
-                          'Medium_Risk': sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
-                      })
-                  except Exception as e:
-                      print(f"Error: {e}")
-              
-              # Read security events
-              events_file = config_dir / 'security_events.csv'
-              if events_file.exists():
-                  try:
-                      df = pd.read_csv(events_file)
-                      blocked = df[df['METRIC'] == 'BLOCKED']['COUNT'].values[0]
-                      detected = df[df['METRIC'] == 'DETECTED']['COUNT'].values[0]
-                      if data:
-                          data[-1]['Blocked'] = int(blocked)
-                          data[-1]['Detected'] = int(detected)
-                  except:
-                      pass
-
-          if data:
-              df = pd.DataFrame(data)
-              df.to_csv('comparison.csv', index=False)
-              print(df.to_markdown(index=False))
-          PYEOF
-
-      - name: Create Report
-        run: |
-          cat > REPORT.md << 'EOF'
-          # 🔒 IAST vs RASP Comparison - DAST Results
-
-          **Run:** #${{ github.run_number }}  
-          **Date:** $(date -u)
-
-          ## 🕷️ Testing Approach
-
-          **DAST Tool**: OWASP ZAP (Industry-standard security scanner)  
-          **Attack Simulation**: Real-world vulnerability testing  
-          **Configurations Tested**:
-          - DataDog IAST (Detection-only monitoring)
-          - Aikido Zen RASP (Detection + Blocking protection)
-
-          ## 📊 Results
-
+              zap-baseline.py -t http://localhost:3000 -J report.json
           EOF
 
-          if [ -f comparison.csv ]; then
-            python3 << 'PYEOF' >> REPORT.md
-          import pandas as pd
-          try:
-              df = pd.read_csv('comparison.csv')
-              print("\n### Summary\n")
-              print(df.to_markdown(index=False))
-              
-              if len(df) == 2:
-                  iast = df[df['Tool'] == 'IAST']
-                  rasp = df[df['Tool'] == 'RASP']
-                  
-                  if not iast.empty and not rasp.empty:
-                      print("\n### 🏆 Key Findings\n")
-                      print(f"- **IAST**: {iast['Detected'].values[0]} threats detected, {iast['Blocked'].values[0]} blocked")
-                      print(f"- **RASP**: {rasp['Detected'].values[0]} threats detected, {rasp['Blocked'].values[0]} blocked")
-                      print(f"\n**Conclusion**: RASP provides active protection by blocking threats, while IAST only detects and reports.")
-          except Exception as e:
-              print(f"Error: {e}")
-          PYEOF
-          fi
+      - name: Extract and Push Metrics
+        run: |
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            docker logs app > /tmp/logs.txt 2>&1
+            
+            DETECTED=$(grep -ci "detected\|vulnerability" /tmp/logs.txt || echo 0)
+            BLOCKED=$(grep -ci "blocked" /tmp/logs.txt || echo 0)
+            ALERTS=$(jq '.site[0].alerts | length' /var/lib/results/iast/report.json 2>/dev/null || echo 0)
+            
+            # Push to Pushgateway
+            cat << METRICS | curl --data-binary @- http://localhost:9091/metrics/job/iast
+            iast_detected $DETECTED
+            iast_blocked $BLOCKED
+            iast_zap_alerts $ALERTS
+            METRICS
+          EOF
 
-          cat REPORT.md >> $GITHUB_STEP_SUMMARY
+  test-rasp:
+    name: Test RASP
+    needs: test-iast
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
 
-      - name: Upload Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: comparison-report
-          path: |
-            REPORT.md
-            comparison.csv
-          retention-days: 90
+      - name: Build and Start
+        run: |
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            cd /opt/app
+            docker compose down
+            export DD_APPSEC=false DD_IAST=false AIKIDO_BLOCK=true
+            
+            nohup docker compose up -d --build > /tmp/build.log 2>&1 &
+            
+            for i in {1..300}; do
+              if docker ps | grep -q app; then
+                echo "App ready"
+                exit 0
+              fi
+              sleep 5
+            done
+            exit 1
+          EOF
+        timeout-minutes: 30
+
+      - name: Run ZAP Scan
+        run: |
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            mkdir -p /var/lib/results/rasp
+            docker run --rm --network host \
+              -v /var/lib/results/rasp:/zap/wrk \
+              ghcr.io/zaproxy/zaproxy:stable \
+              zap-baseline.py -t http://localhost:3000 -J report.json
+          EOF
+
+      - name: Extract and Push Metrics
+        run: |
+          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} 'bash -s' << 'EOF'
+            docker logs app > /tmp/logs.txt 2>&1
+            
+            DETECTED=$(grep -ci "detected\|vulnerability" /tmp/logs.txt || echo 0)
+            BLOCKED=$(grep -ci "blocked" /tmp/logs.txt || echo 0)
+            ALERTS=$(jq '.site[0].alerts | length' /var/lib/results/rasp/report.json 2>/dev/null || echo 0)
+            
+            cat << METRICS | curl --data-binary @- http://localhost:9091/metrics/job/rasp
+            rasp_detected $DETECTED
+            rasp_blocked $BLOCKED
+            rasp_zap_alerts $ALERTS
+            METRICS
+          EOF
+
+  report:
+    name: Generate Report
+    needs: [test-iast, test-rasp]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
+
+      - name: Create Summary
+        run: |
+          EC2_IP="${{ env.EC2_IP }}"
+          ssh -i ~/.ssh/key ubuntu@$EC2_IP 'bash -s' << 'EOF'
+            echo "# IAST vs RASP Comparison Results"
+            echo ""
+            echo "## Metrics"
+            echo ""
+            echo "### IAST (Detection Only)"
+            curl -s http://localhost:9091/metrics | grep "^iast_"
+            echo ""
+            echo "### RASP (Detection + Blocking)"
+            curl -s http://localhost:9091/metrics | grep "^rasp_"
+          EOF | tee -a $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Grafana Dashboard" >> $GITHUB_STEP_SUMMARY
+          echo "Access: http://$EC2_IP:3001 (admin/admin)" >> $GITHUB_STEP_SUMMARY

@@ -1,637 +1,133 @@
 ---
-- name: IAST vs RASP - DAST-Only Comparison
+- name: Setup IAST vs RASP Environment
   hosts: juiceshop
   become: true
-  gather_facts: true
 
   vars:
-    juice_shop_dir: /opt/juice-shop
-    node_version: "22"
+    app_dir: /opt/app
 
   vars_files:
     - secrets.yml
 
   tasks:
-    - name: Update APT cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
-    - name: Install required system packages
-      apt:
-        name:
-          - curl
-          - wget
-          - git
-          - unzip
-          - apt-transport-https
-          - ca-certificates
-          - gnupg
-          - jq
-          - python3
-          - python3-pip
-        state: present
-
-    - name: Create keyrings directory
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: '0755'
-
-    - name: Add Docker GPG key
-      ansible.builtin.get_url:
-        url: https://download.docker.com/linux/ubuntu/gpg
-        dest: /etc/apt/keyrings/docker.asc
-        mode: '0644'
-
-    - name: Add Docker repository
-      apt_repository:
-        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
-        state: present
-        filename: docker
-
     - name: Install Docker
-      apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - docker-compose-plugin
-        state: present
-        update_cache: yes
+      shell: |
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sh /tmp/get-docker.sh
+        usermod -aG docker ubuntu
+      args:
+        creates: /usr/bin/docker
 
-    - name: Add ubuntu user to docker group
-      user:
-        name: ubuntu
-        groups: docker
-        append: yes
+    - name: Install DataDog
+      shell: |
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
 
-    - name: Start and enable Docker service
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
-
-    - name: Install UFW
-      apt:
-        name: ufw
-        state: present
-
-    - name: Configure UFW defaults
-      ufw:
-        direction: "{{ item.direction }}"
-        policy: "{{ item.policy }}"
-      loop:
-        - { direction: 'incoming', policy: 'deny' }
-        - { direction: 'outgoing', policy: 'allow' }
-
-    - name: Allow essential ports
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop:
-        - '22'
-        - '3000'
-        - '8126'
-        - '8000'
-        - '9090'
-        - '3001'
-
-    - name: Enable UFW
-      ufw:
-        state: enabled
-
-    - name: Check if DataDog agent exists
-      stat:
+    - name: Configure DataDog
+      lineinfile:
         path: /etc/datadog-agent/datadog.yaml
-      register: datadog_installed
+        line: "{{ item }}"
+      loop:
+        - "apm_config:"
+        - "  enabled: true"
 
-    - name: Install DataDog Agent
-      block:
-        - name: Download DataDog installation script
-          get_url:
-            url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
-            dest: /tmp/install_datadog.sh
-            mode: '0755'
-
-        - name: Install DataDog Agent
-          shell: >
-            DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
-          args:
-            creates: /etc/datadog-agent/datadog.yaml
-          register: datadog_install
-          retries: 3
-          delay: 15
-          until: datadog_install.rc == 0
-
-        - name: Wait for DataDog config file
-          wait_for:
-            path: /etc/datadog-agent/datadog.yaml
-            timeout: 60
-      when: not datadog_installed.stat.exists
-
-    - name: Configure DataDog for IAST detection
-      blockinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        block: |
-          apm_config:
-            enabled: true
-            apm_non_local_traffic: true
-            receiver_port: 8126
-          appsec_config:
-            enabled: true
-          runtime_security_config:
-            enabled: true
-          logs_enabled: true
-          logs_config:
-            container_collect_all: true
-        marker: "# {mark} IAST CONFIGURATION"
-        create: no
-        backup: yes
-      notify: Restart DataDog Agent
-
-    - name: Ensure DataDog Agent is running
-      systemd:
-        name: datadog-agent
-        state: started
-        enabled: yes
-
-    - name: Create application directory
+    - name: Create app files
       file:
-        path: "{{ juice_shop_dir }}"
+        path: "{{ app_dir }}"
         state: directory
         owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Clone Juice Shop repository
-      git:
-        repo: https://github.com/juice-shop/juice-shop.git
-        dest: "{{ juice_shop_dir }}"
-        depth: 1
-        update: yes
-        force: yes
-      become: true
-      become_user: ubuntu
-
-    - name: Create DataDog tracer file
-      copy:
-        dest: "{{ juice_shop_dir }}/tracer.ts"
-        content: |
-          import tracer from 'dd-trace';
-          tracer.init({ logInjection: true, profiling: true, runtimeMetrics: true });
-          export default tracer;
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
 
     - name: Create Dockerfile
       copy:
-        dest: "{{ juice_shop_dir }}/Dockerfile"
+        dest: "{{ app_dir }}/Dockerfile"
         content: |
-          FROM node:{{ node_version }}-bookworm-slim AS builder
-          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
-          WORKDIR /juice-shop
-          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          RUN npm install --legacy-peer-deps
-          RUN npm install @aikidosec/firewall dd-trace
-          COPY tracer.ts ./tracer.ts
-          RUN sed -i "1i import './tracer';" app.ts && \
-              sed -i "2i import '@aikidosec/firewall';" app.ts && \
-              sed -i "1i import './tracer';" server.ts && \
-              sed -i "2i import '@aikidosec/firewall';" server.ts
-          RUN npm run build:server || true
+          FROM node:22-slim AS builder
+          RUN apt-get update && apt-get install -y git python3 make g++
+          WORKDIR /app
+          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git .
+          RUN npm install --legacy-peer-deps && npm install @aikidosec/firewall dd-trace
           
-          FROM node:{{ node_version }}-bookworm-slim
-          RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
-          RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
-          WORKDIR /juice-shop
-          COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
-          RUN mkdir -p logs ftp data && chown -R juiceshop:juiceshop .
-          USER juiceshop
+          FROM node:22-slim
+          WORKDIR /app
+          COPY --from=builder /app /app
           EXPOSE 3000
-          HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-            CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
-          ENV NODE_ENV=production PORT=3000 NODE_OPTIONS="--max-old-space-size=3072"
           CMD ["npm", "start"]
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
 
-    - name: Create docker-compose template
+    - name: Create compose file
       copy:
-        dest: "{{ juice_shop_dir }}/docker-compose.yml"
+        dest: "{{ app_dir }}/docker-compose.yml"
         content: |
           services:
-            juice-shop:
+            app:
               build: .
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
+              ports: ["3000:3000"]
               environment:
-                NODE_ENV: production
-                DD_ENV: "${SECURITY_MODE:-baseline}"
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "${DD_APPSEC_ENABLED:-false}"
-                DD_IAST_ENABLED: "${DD_IAST_ENABLED:-false}"
-                AIKIDO_TOKEN: "${AIKIDO_TOKEN}"
+                DD_APPSEC_ENABLED: "${DD_APPSEC:-false}"
+                DD_IAST_ENABLED: "${DD_IAST:-false}"
+                AIKIDO_TOKEN: "{{ aikido_token }}"
                 AIKIDO_BLOCK: "${AIKIDO_BLOCK:-false}"
-                AIKIDO_DEBUG: "true"
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
 
-    - name: Create .env file
-      copy:
-        dest: "{{ juice_shop_dir }}/.env"
-        content: |
-          AIKIDO_TOKEN={{ aikido_token }}
-          AIKIDO_BLOCK=false
-          DD_APPSEC_ENABLED=false
-          DD_IAST_ENABLED=false
-          SECURITY_MODE=baseline
-        owner: ubuntu
-        group: ubuntu
-        mode: '0600'
-      no_log: true
-
-    - name: Install Python packages
-      pip:
-        name:
-          - prometheus-client
-          - pandas
-        break_system_packages: yes
-      ignore_errors: true
-
-    - name: Create results directory
+    - name: Create results dir
       file:
-        path: /var/lib/benchmark-results
+        path: /var/lib/results
         state: directory
         owner: ubuntu
-        group: ubuntu
-        mode: '0755'
 
-    - name: Create continuous DAST benchmark script
-      copy:
-        dest: /opt/continuous_dast_benchmark.py
-        content: |
-          #!/usr/bin/env python3
-          import subprocess, time, json, os, logging, signal, sys
-          from datetime import datetime
-          from pathlib import Path
-          
-          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s',
-              handlers=[logging.FileHandler('/var/log/dast_benchmark.log'), logging.StreamHandler()])
-          logger = logging.getLogger(__name__)
-          
-          class DASTBenchmark:
-              def __init__(self):
-                  self.configurations = [
-                      {'name': 'iast-detection', 'display_name': 'DataDog IAST', 
-                       'env_content': 'SECURITY_MODE=iast-detection\nDD_APPSEC_ENABLED=true\nDD_IAST_ENABLED=true\nAIKIDO_BLOCK=false'},
-                      {'name': 'rasp-protection', 'display_name': 'Aikido RASP',
-                       'env_content': 'SECURITY_MODE=rasp-protection\nDD_APPSEC_ENABLED=false\nDD_IAST_ENABLED=false\nAIKIDO_BLOCK=true'}
-                  ]
-                  self.current_config_index = 0
-                  self.running = True
-                  self.results_base = '/var/lib/benchmark-results'
-                  self.rotation_interval = 3600
-                  self.scan_interval = 600
-                  os.makedirs(self.results_base, exist_ok=True)
-                  signal.signal(signal.SIGTERM, self.handle_shutdown)
-                  signal.signal(signal.SIGINT, self.handle_shutdown)
-              
-              def handle_shutdown(self, signum, frame):
-                  logger.info("Shutting down...")
-                  self.running = False
-                  sys.exit(0)
-              
-              def deploy_configuration(self, config):
-                  logger.info(f"🔄 Deploying: {config['display_name']}")
-                  with open('/opt/juice-shop/.env', 'w') as f:
-                      f.write(config['env_content'])
-                  logger.info("📦 Building application (15-20 min)...")
-                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], capture_output=True)
-                  time.sleep(5)
-                  result = subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d', '--build'], 
-                                        capture_output=True, text=True, timeout=1800)
-                  if result.returncode != 0:
-                      logger.error(f"Build failed: {result.stderr}")
-                      return False
-                  logger.info("⏳ Waiting for application...")
-                  for i in range(60):
-                      try:
-                          if subprocess.run(['curl', '-f', '-s', 'http://localhost:3000'], capture_output=True, timeout=5).returncode == 0:
-                              logger.info(f"✅ {config['display_name']} READY")
-                              return True
-                      except: pass
-                      time.sleep(5)
-                  logger.warning("⚠️ Application delayed")
-                  return False
-              
-              def run_zap_scan(self, config_name):
-                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                  results_dir = f"{self.results_base}/{config_name}/{timestamp}"
-                  os.makedirs(results_dir, exist_ok=True)
-                  logger.info(f"🕷️ Running ZAP scan for {config_name}")
-                  try:
-                      subprocess.run(['docker', 'run', '--rm', '--network', 'host',
-                          '-v', f'{results_dir}:/zap/wrk:rw', 'ghcr.io/zaproxy/zaproxy:stable',
-                          'zap-baseline.py', '-t', 'http://localhost:3000',
-                          '-r', 'zap-report.html', '-J', 'zap-report.json', '-w', 'zap-report.md',
-                          '-m', '3', '-T', '300'], timeout=600, capture_output=True)
-                      logger.info("✅ ZAP scan completed")
-                  except Exception as e:
-                      logger.error(f"❌ ZAP error: {e}")
-                  self.extract_metrics(config_name, results_dir)
-                  try:
-                      result = subprocess.run(['docker', 'logs', 'juice-shop'], capture_output=True, text=True, timeout=30)
-                      with open(f"{results_dir}/container.log", 'w') as f:
-                          f.write(result.stdout + result.stderr)
-                      log_text = result.stdout + result.stderr
-                      blocked = log_text.lower().count('blocked')
-                      detected = log_text.lower().count('detected') + log_text.lower().count('vulnerability')
-                      with open(f"{results_dir}/security_events.csv", 'w') as f:
-                          f.write(f"METRIC,COUNT\nBLOCKED,{blocked}\nDETECTED,{detected}\n")
-                      logger.info(f"📊 Events: {detected} detected, {blocked} blocked")
-                  except Exception as e:
-                      logger.error(f"Error: {e}")
-                  latest_link = f"{self.results_base}/{config_name}/latest"
-                  if os.path.lexists(latest_link):
-                      os.remove(latest_link)
-                  os.symlink(results_dir, latest_link)
-                  return results_dir
-              
-              def extract_metrics(self, config_name, results_dir):
-                  zap_file = f"{results_dir}/zap-report.json"
-                  if not os.path.exists(zap_file):
-                      return
-                  try:
-                      with open(zap_file, 'r') as f:
-                          zap_data = json.load(f)
-                      alerts = zap_data.get('site', [{}])[0].get('alerts', [])
-                      total = len(alerts)
-                      high = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
-                      medium = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
-                      low = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
-                      with open(f"{results_dir}/zap_metrics.csv", 'w') as f:
-                          f.write(f"METRIC,COUNT\nTOTAL_ALERTS,{total}\nHIGH_RISK,{high}\nMEDIUM_RISK,{medium}\nLOW_RISK,{low}\n")
-                      logger.info(f"📊 ZAP: {total} alerts ({high} high, {medium} medium)")
-                  except Exception as e:
-                      logger.error(f"Error: {e}")
-              
-              def run_continuous_benchmark(self):
-                  logger.info("🚀 Starting Continuous DAST Benchmark")
-                  while self.running:
-                      config = self.configurations[self.current_config_index]
-                      if self.deploy_configuration(config):
-                          config_start_time = time.time()
-                          scan_count = 0
-                          while (time.time() - config_start_time) < self.rotation_interval and self.running:
-                              scan_count += 1
-                              self.run_zap_scan(config['name'])
-                              logger.info(f"✅ Scan {scan_count} completed")
-                              if self.running:
-                                  time.sleep(self.scan_interval)
-                      self.current_config_index = (self.current_config_index + 1) % len(self.configurations)
-                      logger.info(f"🔄 Next: {self.configurations[self.current_config_index]['display_name']}")
-          
-          if __name__ == '__main__':
-              DASTBenchmark().run_continuous_benchmark()
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+    - name: Start monitoring stack
+      block:
+        - name: Ensure monitoring directory exists
+          file:
+            path: /opt/monitoring
+            state: directory
+            owner: ubuntu
 
-    - name: Create systemd service
-      copy:
-        dest: /etc/systemd/system/dast-benchmark.service
-        content: |
-          [Unit]
-          Description=DAST Continuous Benchmark
-          After=network.target docker.service datadog-agent.service
-          Wants=docker.service
-          
-          [Service]
-          Type=simple
-          User=ubuntu
-          Group=ubuntu
-          SupplementaryGroups=docker
-          WorkingDirectory=/opt
-          ExecStart=/usr/bin/python3 /opt/continuous_dast_benchmark.py
-          Restart=always
-          RestartSec=30
-          StandardOutput=append:/var/log/dast_benchmark.log
-          StandardError=append:/var/log/dast_benchmark_error.log
-          
-          [Install]
-          WantedBy=multi-user.target
-        mode: '0644'
+        - name: Create Prometheus config
+          copy:
+            dest: /opt/monitoring/prometheus.yml
+            content: |
+              global:
+                scrape_interval: 5s
+              scrape_configs:
+                - job_name: 'pushgateway'
+                  static_configs:
+                    - targets: ['172.17.0.1:9091']
 
-    - name: Create monitoring directory
-      file:
-        path: /opt/monitoring
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+        - name: Start Pushgateway container
+          shell: docker run -d --name pushgateway --restart unless-stopped -p 9091:9091 prom/pushgateway
+          ignore_errors: true
 
-    - name: Create Prometheus exporter
-      copy:
-        dest: /opt/monitoring/prometheus_exporter.py
-        content: |
-          #!/usr/bin/env python3
-          from prometheus_client import start_http_server, Gauge
-          import time, json, logging
-          from pathlib import Path
-          
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
-          
-          zap_alerts_total = Gauge('zap_alerts_total', 'Total ZAP alerts', ['config'])
-          zap_high_risk = Gauge('zap_high_risk_alerts', 'High risk alerts', ['config'])
-          attacks_blocked = Gauge('security_attacks_blocked', 'Attacks blocked', ['config'])
-          blocking_rate = Gauge('security_blocking_rate_percent', 'Blocking rate', ['config'])
-          
-          class MetricsExporter:
-              def __init__(self):
-                  self.results_base = Path('/var/lib/benchmark-results')
-              
-              def process_results(self):
-                  for config in ['iast-detection', 'rasp-protection']:
-                      latest_path = self.results_base / config / 'latest'
-                      if not latest_path.exists():
-                          continue
-                      zap_file = latest_path / 'zap_metrics.csv'
-                      if zap_file.exists():
-                          try:
-                              metrics = {}
-                              with open(zap_file, 'r') as f:
-                                  for line in f.readlines()[1:]:
-                                      metric, value = line.strip().split(',')
-                                      metrics[metric] = int(value)
-                              zap_alerts_total.labels(config=config).set(metrics.get('TOTAL_ALERTS', 0))
-                              zap_high_risk.labels(config=config).set(metrics.get('HIGH_RISK', 0))
-                          except Exception as e:
-                              logger.error(f"Error: {e}")
-                      events_file = latest_path / 'security_events.csv'
-                      if events_file.exists():
-                          try:
-                              with open(events_file, 'r') as f:
-                                  lines = f.readlines()[1:]
-                              blocked = int(lines[0].split(',')[1]) if len(lines) > 0 else 0
-                              attacks_blocked.labels(config=config).set(blocked)
-                              total = max(zap_alerts_total._metrics.get((config,), {}).get('value', 1), 1)
-                              blocking_rate.labels(config=config).set((blocked / total) * 100)
-                          except Exception as e:
-                              logger.error(f"Error: {e}")
-              
-              def run(self, port=8000):
-                  logger.info(f"Starting exporter on port {port}")
-                  start_http_server(port)
-                  while True:
-                      try:
-                          self.process_results()
-                      except Exception as e:
-                          logger.error(f"Error: {e}")
-                      time.sleep(10)
-          
-          if __name__ == '__main__':
-              MetricsExporter().run()
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+        - name: Start Prometheus container
+          shell: docker run -d --name prometheus --restart unless-stopped -p 9090:9090 -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro prom/prometheus
+          ignore_errors: true
 
-    - name: Create Prometheus config
-      copy:
-        dest: /opt/monitoring/prometheus.yml
-        content: |
-          global:
-            scrape_interval: 10s
-          scrape_configs:
-            - job_name: 'dast-metrics'
-              static_configs:
-                - targets: ['host.docker.internal:8000']
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
+        - name: Start Grafana container
+          shell: docker run -d --name grafana --restart unless-stopped -p 3001:3000 -e GF_SECURITY_ADMIN_PASSWORD=admin -e GF_INSTALL_PLUGINS=grafana-piechart-panel grafana/grafana
+          ignore_errors: true
 
-    - name: Create monitoring docker-compose
-      copy:
-        dest: /opt/monitoring/docker-compose.yml
-        content: |
-          services:
-            prometheus:
-              image: prom/prometheus:latest
-              container_name: prometheus
-              restart: unless-stopped
-              ports:
-                - "9090:9090"
-              volumes:
-                - ./prometheus.yml:/etc/prometheus/prometheus.yml
-                - prometheus-data:/prometheus
-              command:
-                - '--config.file=/etc/prometheus/prometheus.yml'
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-            grafana:
-              image: grafana/grafana:latest
-              container_name: grafana
-              restart: unless-stopped
-              ports:
-                - "3001:3000"
-              environment:
-                - GF_SECURITY_ADMIN_USER=admin
-                - GF_SECURITY_ADMIN_PASSWORD=iast_rasp_2024
-              volumes:
-                - grafana-data:/var/lib/grafana
-              depends_on:
-                - prometheus
-          volumes:
-            prometheus-data:
-            grafana-data:
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
+        - name: Wait for Grafana to be available
+          wait_for:
+            host: localhost
+            port: 3001
+            delay: 15
+            timeout: 60
 
-    - name: Create startup script
-      copy:
-        dest: /opt/start_monitoring.sh
-        content: |
-          #!/bin/bash
-          echo "🚀 Starting Monitoring"
-          cd /opt/monitoring
-          sg docker -c "docker compose up -d"
-          sleep 10
-          pkill -f prometheus_exporter.py || true
-          nohup python3 /opt/monitoring/prometheus_exporter.py > /tmp/exporter.log 2>&1 &
-          echo "✅ Ready - Grafana: http://$(curl -s ifconfig.me):3001 (admin/iast_rasp_2024)"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+        - name: Configure Grafana datasource
+          uri:
+            url: http://admin:admin@localhost:3001/api/datasources
+            method: POST
+            headers:
+              Content-Type: "application/json"
+            body: '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}'
+            status_code: 200,409
+          ignore_errors: true
 
-    - name: Start monitoring
-      shell: nohup /opt/start_monitoring.sh > /tmp/monitoring.log 2>&1 &
-      become: true
-      become_user: ubuntu
-      async: 300
-      poll: 0
-
-    - name: Wait for monitoring
-      pause:
-        seconds: 30
-
-    - name: Enable DAST benchmark service
-      systemd:
-        name: dast-benchmark
-        enabled: yes
-        daemon_reload: yes
-
-    - name: Display information
-      debug:
-        msg: |
-          ════════════════════════════════════════
-          ✅ System Configured Successfully!
-          ════════════════════════════════════════
-          
-          📊 Grafana: http://{{ ansible_default_ipv4.address }}:3001
-             Username: admin / Password: iast_rasp_2024
-          
-          ⚠️  IMPORTANT: Docker image NOT pre-built
-             - Avoids SSH timeout during deployment
-             - Image builds automatically when:
-               1. GitHub Actions runs tests
-               2. Continuous service starts
-             - First build: 15-20 minutes
-             - Subsequent builds: 2-5 minutes (cached)
-          
-          🚀 To start continuous benchmark:
-             sudo systemctl start dast-benchmark
-          
-          📖 View logs:
-             journalctl -u dast-benchmark -f
-          
-          ════════════════════════════════════════
-
-  handlers:
-    - name: Restart DataDog Agent
-      systemd:
-        name: datadog-agent
-        state: restarted
+        - name: Configure Grafana dashboard
+          uri:
+            url: http://admin:admin@localhost:3001/api/dashboards/db
+            method: POST
+            headers:
+              Content-Type: "application/json"
+            body: '{"dashboard":{"title":"IAST vs RASP","panels":[{"id":1,"title":"Blocking Rate %","type":"gauge","targets":[{"expr":"100 * iast_blocked / (iast_zap_alerts + 1)","legendFormat":"IAST"},{"expr":"100 * rasp_blocked / (rasp_zap_alerts + 1)","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":0,"y":0}},{"id":2,"title":"Attacks Blocked","type":"stat","targets":[{"expr":"iast_blocked","legendFormat":"IAST"},{"expr":"rasp_blocked","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":12,"y":0}}]},"overwrite":true}'
+          ignore_errors: true
