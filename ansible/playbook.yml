@@ -1,115 +1,864 @@
 ---
-- name: IAST vs RASP Setup
-  hosts: all
+- name: Configure EC2 for Juice Shop with DevSecOps Tools + Metrics Stack
+  hosts: juiceshop
   become: true
+  gather_facts: true
+
   vars:
-    app_dir: /opt/app
+    juice_shop_dir: /opt/juice-shop
+    metrics_dir: /opt/security-metrics
+    node_version: "22"
+    prometheus_version: "2.48.0"
+    grafana_version: "10.2.2"
+
+  vars_files:
+    - secrets.yml
 
   tasks:
-    - name: Install Docker
-      shell: curl -fsSL https://get.docker.com | sh && usermod -aG docker ubuntu
-      args:
-        creates: /usr/bin/docker
-
-    - name: Install jq
+    # =======================================================================
+    # SYSTEM PREPARATION
+    # =======================================================================
+    - name: Update APT cache
       apt:
-        name: jq
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - unzip
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - jq
+          - python3
+          - python3-pip
+          - python3-venv
+        state: present
+
+    # =======================================================================
+    # DOCKER INSTALLATION
+    # =======================================================================
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
         state: present
         update_cache: yes
 
-    - name: Install DataDog
-      shell: |
-        DD_API_KEY={{ lookup('env', 'DD_API_KEY') }} \
-        DD_SITE={{ lookup('env', 'DD_SITE') | default('datadoghq.com') }} \
-        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    # =======================================================================
+    # DATADOG AGENT INSTALLATION
+    # =======================================================================
+    - name: Check if DataDog agent is already installed
+      stat:
+        path: /etc/datadog-agent
+      register: datadog_installed
+
+    - name: Download DataDog installation script
+      get_url:
+        url: "https://install.datadoghq.com/scripts/install_script_agent7.sh"
+        dest: /tmp/install_datadog.sh
+        mode: '0755'
+      when: not datadog_installed.stat.exists
+
+    - name: Install DataDog Agent
+      shell: >
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash /tmp/install_datadog.sh
       args:
         creates: /etc/datadog-agent/datadog.yaml
+      when: not datadog_installed.stat.exists
+      register: datadog_install
+      retries: 3
+      delay: 15
+      until: datadog_install.rc == 0
 
-    - name: Configure DataDog APM
+    - name: Configure DataDog Agent for APM and IAST
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
           apm_config:
             enabled: true
             apm_non_local_traffic: true
+            receiver_port: 8126
+            receiver_timeout: 10
+            max_traces_per_second: 100
 
-    - name: Create directories
+          appsec_config:
+            enabled: true
+
+          runtime_security_config:
+            enabled: true
+
+          process_config:
+            enabled: "true"
+            scrub_args: true
+
+          logs_enabled: true
+          logs_config:
+            container_collect_all: true
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS CONFIG"
+        create: no
+        backup: yes
+      notify: Restart DataDog Agent
+
+    - name: Ensure DataDog Agent is running
+      systemd:
+        name: datadog-agent
+        state: started
+        enabled: yes
+
+    # =======================================================================
+    # PROMETHEUS INSTALLATION
+    # =======================================================================
+    - name: Create Prometheus user
+      user:
+        name: prometheus
+        system: yes
+        shell: /bin/false
+        create_home: no
+
+    - name: Create Prometheus directories
       file:
         path: "{{ item }}"
         state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - /etc/prometheus
+        - /var/lib/prometheus
+
+    - name: Download and extract Prometheus
+      unarchive:
+        src: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: yes
+        creates: /tmp/prometheus-{{ prometheus_version }}.linux-amd64
+
+    - name: Copy Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: /usr/local/bin/
+        mode: '0755'
+        owner: prometheus
+        group: prometheus
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'security-metrics-exporter'
+              static_configs:
+                - targets: ['localhost:9999']
+              scrape_interval: 30s
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: Restart Prometheus
+
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path=/var/lib/prometheus/ \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart Prometheus
+
+    - name: Enable and start Prometheus
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # =======================================================================
+    # GRAFANA INSTALLATION
+    # =======================================================================
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana repository
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+
+    - name: Install Grafana
+      apt:
+        name: grafana
+        state: present
+        update_cache: yes
+
+    - name: Create Grafana provisioning directories
+      file:
+        path: "/etc/grafana/provisioning/{{ item }}"
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: '0755'
+      loop:
+        - datasources
+        - dashboards
+
+    - name: Configure Prometheus datasource for Grafana
+      copy:
+        dest: /etc/grafana/provisioning/datasources/prometheus.yml
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://localhost:9090
+              isDefault: true
+              editable: false
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Create dashboard provisioning config
+      copy:
+        dest: /etc/grafana/provisioning/dashboards/default.yml
+        content: |
+          apiVersion: 1
+          providers:
+            - name: 'Default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Create Grafana dashboards directory
+      file:
+        path: /var/lib/grafana/dashboards
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: '0755'
+
+    - name: Create IAST vs RASP Comparison Dashboard
+      copy:
+        dest: /var/lib/grafana/dashboards/iast-rasp-comparison.json
+        content: |
+          {
+            "dashboard": {
+              "title": "IAST vs RASP Security Comparison",
+              "tags": ["security", "iast", "rasp"],
+              "timezone": "browser",
+              "panels": [
+                {
+                  "id": 1,
+                  "title": "Attack Detection Rate",
+                  "type": "stat",
+                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+                  "targets": [
+                    {
+                      "expr": "security_detections_total{tool=\"datadog_iast\"}",
+                      "legendFormat": "DataDog IAST Detections"
+                    },
+                    {
+                      "expr": "security_detections_total{tool=\"aikido_rasp\"}",
+                      "legendFormat": "Aikido RASP Detections"
+                    }
+                  ]
+                },
+                {
+                  "id": 2,
+                  "title": "Attack Blocking Rate (RASP Only)",
+                  "type": "stat",
+                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+                  "targets": [
+                    {
+                      "expr": "security_blocks_total{tool=\"aikido_rasp\"}",
+                      "legendFormat": "Aikido RASP Blocks"
+                    }
+                  ]
+                },
+                {
+                  "id": 3,
+                  "title": "Vulnerability Types Detected",
+                  "type": "bargauge",
+                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+                  "targets": [
+                    {
+                      "expr": "sum by (vuln_type) (security_detections_total{tool=\"datadog_iast\"})",
+                      "legendFormat": "IAST - {{vuln_type}}"
+                    },
+                    {
+                      "expr": "sum by (vuln_type) (security_detections_total{tool=\"aikido_rasp\"})",
+                      "legendFormat": "RASP - {{vuln_type}}"
+                    }
+                  ]
+                },
+                {
+                  "id": 4,
+                  "title": "DAST Scan Results",
+                  "type": "table",
+                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+                  "targets": [
+                    {
+                      "expr": "dast_vulnerabilities_found",
+                      "format": "table"
+                    }
+                  ]
+                },
+                {
+                  "id": 5,
+                  "title": "Detection Timeline",
+                  "type": "timeseries",
+                  "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+                  "targets": [
+                    {
+                      "expr": "rate(security_detections_total{tool=\"datadog_iast\"}[5m])",
+                      "legendFormat": "IAST Detection Rate"
+                    },
+                    {
+                      "expr": "rate(security_detections_total{tool=\"aikido_rasp\"}[5m])",
+                      "legendFormat": "RASP Detection Rate"
+                    },
+                    {
+                      "expr": "rate(security_blocks_total{tool=\"aikido_rasp\"}[5m])",
+                      "legendFormat": "RASP Block Rate"
+                    }
+                  ]
+                },
+                {
+                  "id": 6,
+                  "title": "Effectiveness Comparison",
+                  "type": "piechart",
+                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+                  "targets": [
+                    {
+                      "expr": "security_detections_total{tool=\"datadog_iast\"}",
+                      "legendFormat": "IAST Detections"
+                    },
+                    {
+                      "expr": "security_blocks_total{tool=\"aikido_rasp\"}",
+                      "legendFormat": "RASP Blocks"
+                    }
+                  ]
+                },
+                {
+                  "id": 7,
+                  "title": "Response Time Impact",
+                  "type": "timeseries",
+                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+                  "targets": [
+                    {
+                      "expr": "security_response_time_ms",
+                      "legendFormat": "{{tool}}"
+                    }
+                  ]
+                }
+              ],
+              "schemaVersion": 36,
+              "version": 1
+            }
+          }
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Enable and start Grafana
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started
+
+    # =======================================================================
+    # METRICS EXPORTER SETUP
+    # =======================================================================
+    - name: Create metrics directory
+      file:
+        path: "{{ metrics_dir }}"
+        state: directory
         owner: ubuntu
         group: ubuntu
-      loop:
-        - "{{ app_dir }}"
-        - /var/lib/results
-        - /opt/monitoring
+        mode: '0755'
+
+    - name: Create Python virtual environment for metrics exporter
+      command: python3 -m venv {{ metrics_dir }}/venv
+      args:
+        creates: "{{ metrics_dir }}/venv"
+      become_user: ubuntu
+
+    - name: Install Python dependencies for metrics exporter
+      pip:
+        name:
+          - prometheus_client
+          - requests
+          - flask
+        virtualenv: "{{ metrics_dir }}/venv"
+      become_user: ubuntu
+
+    - name: Create metrics exporter script
+      copy:
+        dest: "{{ metrics_dir }}/metrics_exporter.py"
+        content: |
+          #!/usr/bin/env python3
+          """
+          Security Metrics Exporter for Prometheus
+          Collects metrics from DataDog IAST, Aikido RASP, and OWASP ZAP
+          """
+          import json
+          import os
+          import time
+          from collections import defaultdict
+          from prometheus_client import start_http_server, Gauge, Counter
+          import requests
+
+          # Prometheus metrics
+          security_detections = Counter('security_detections_total', 'Total security detections', ['tool', 'vuln_type', 'severity'])
+          security_blocks = Counter('security_blocks_total', 'Total attack blocks (RASP only)', ['tool', 'attack_type'])
+          dast_vulnerabilities = Gauge('dast_vulnerabilities_found', 'DAST vulnerabilities found', ['severity', 'scan_type'])
+          response_time = Gauge('security_response_time_ms', 'Security tool response time impact', ['tool'])
+          scan_phase = Gauge('current_scan_phase', 'Current DAST scan phase (1-4)')
+
+          # Configuration
+          DATADOG_API_KEY = os.environ.get('DD_API_KEY', '')
+          DATADOG_APP_KEY = os.environ.get('DD_APP_KEY', '')
+          DATADOG_SITE = os.environ.get('DD_SITE', 'us5.datadoghq.com')
+          AIKIDO_TOKEN = os.environ.get('AIKIDO_TOKEN', '')
+          METRICS_DIR = '/opt/security-metrics/data'
+          ZAP_RESULTS_DIR = '/opt/security-metrics/zap-results'
+
+          os.makedirs(METRICS_DIR, exist_ok=True)
+          os.makedirs(ZAP_RESULTS_DIR, exist_ok=True)
+
+          def fetch_datadog_iast_metrics():
+              """Fetch IAST vulnerabilities from DataDog API"""
+              if not DATADOG_API_KEY or not DATADOG_APP_KEY:
+                  print("DataDog credentials not configured")
+                  return
+
+              try:
+                  headers = {
+                      'DD-API-KEY': DATADOG_API_KEY,
+                      'DD-APPLICATION-KEY': DATADOG_APP_KEY
+                  }
+                  
+                  # Query for security signals (IAST findings)
+                  url = f'https://api.{DATADOG_SITE}/api/v2/security_monitoring/signals'
+                  params = {
+                      'filter[query]': 'service:juice-shop',
+                      'page[limit]': 100
+                  }
+                  
+                  response = requests.get(url, headers=headers, params=params, timeout=10)
+                  if response.status_code == 200:
+                      data = response.json()
+                      detections = defaultdict(int)
+                      
+                      for signal in data.get('data', []):
+                          attributes = signal.get('attributes', {})
+                          vuln_type = attributes.get('type', 'unknown')
+                          severity = attributes.get('severity', 'unknown')
+                          detections[(vuln_type, severity)] += 1
+                      
+                      for (vuln_type, severity), count in detections.items():
+                          security_detections.labels(
+                              tool='datadog_iast',
+                              vuln_type=vuln_type,
+                              severity=severity
+                          )._value._value = count
+                      
+                      print(f"DataDog IAST: {len(detections)} vulnerability types detected")
+                  else:
+                      print(f"DataDog API error: {response.status_code}")
+                      
+              except Exception as e:
+                  print(f"Error fetching DataDog metrics: {e}")
+
+          def fetch_aikido_rasp_metrics():
+              """Fetch RASP detections and blocks from Aikido API"""
+              if not AIKIDO_TOKEN:
+                  print("Aikido token not configured")
+                  return
+
+              try:
+                  headers = {
+                      'Authorization': f'Bearer {AIKIDO_TOKEN}',
+                      'Content-Type': 'application/json'
+                  }
+                  
+                  # Query for security events
+                  url = 'https://app.aikido.dev/api/v1/events'
+                  params = {'limit': 100}
+                  
+                  response = requests.get(url, headers=headers, params=params, timeout=10)
+                  if response.status_code == 200:
+                      data = response.json()
+                      detections = defaultdict(int)
+                      blocks = defaultdict(int)
+                      
+                      for event in data.get('events', []):
+                          attack_type = event.get('type', 'unknown')
+                          severity = event.get('severity', 'unknown')
+                          blocked = event.get('blocked', False)
+                          
+                          detections[(attack_type, severity)] += 1
+                          if blocked:
+                              blocks[attack_type] += 1
+                      
+                      # Update detection metrics
+                      for (attack_type, severity), count in detections.items():
+                          security_detections.labels(
+                              tool='aikido_rasp',
+                              vuln_type=attack_type,
+                              severity=severity
+                          )._value._value = count
+                      
+                      # Update block metrics
+                      for attack_type, count in blocks.items():
+                          security_blocks.labels(
+                              tool='aikido_rasp',
+                              attack_type=attack_type
+                          )._value._value = count
+                      
+                      print(f"Aikido RASP: {len(detections)} detections, {sum(blocks.values())} blocks")
+                  else:
+                      print(f"Aikido API error: {response.status_code}")
+                      
+              except Exception as e:
+                  print(f"Error fetching Aikido metrics: {e}")
+
+          def parse_zap_results():
+              """Parse OWASP ZAP scan results"""
+              try:
+                  for scan_type in ['baseline', 'full']:
+                      json_file = os.path.join(ZAP_RESULTS_DIR, f'{scan_type}_report.json')
+                      if os.path.exists(json_file):
+                          with open(json_file, 'r') as f:
+                              data = json.load(f)
+                              
+                          site = data.get('site', [{}])[0]
+                          alerts = site.get('alerts', [])
+                          
+                          severity_counts = defaultdict(int)
+                          for alert in alerts:
+                              risk = alert.get('riskdesc', 'Unknown').split()[0]
+                              severity_counts[risk] += len(alert.get('instances', []))
+                          
+                          for severity, count in severity_counts.items():
+                              dast_vulnerabilities.labels(
+                                  severity=severity,
+                                  scan_type=scan_type
+                              ).set(count)
+                          
+                          print(f"DAST {scan_type}: {sum(severity_counts.values())} vulnerabilities")
+                      
+              except Exception as e:
+                  print(f"Error parsing ZAP results: {e}")
+
+          def load_manual_metrics():
+              """Load manually recorded metrics from JSON files"""
+              try:
+                  metrics_file = os.path.join(METRICS_DIR, 'manual_metrics.json')
+                  if os.path.exists(metrics_file):
+                      with open(metrics_file, 'r') as f:
+                          data = json.load(f)
+                      
+                      # Load phase information
+                      if 'scan_phase' in data:
+                          scan_phase.set(data['scan_phase'])
+                      
+                      # Load response times
+                      if 'response_times' in data:
+                          for tool, time_ms in data['response_times'].items():
+                              response_time.labels(tool=tool).set(time_ms)
+                      
+                      print("Loaded manual metrics")
+              except Exception as e:
+                  print(f"Error loading manual metrics: {e}")
+
+          def collect_all_metrics():
+              """Collect metrics from all sources"""
+              print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Collecting metrics...")
+              fetch_datadog_iast_metrics()
+              fetch_aikido_rasp_metrics()
+              parse_zap_results()
+              load_manual_metrics()
+              print("Metrics collection complete\n")
+
+          if __name__ == '__main__':
+              # Start Prometheus metrics server
+              start_http_server(9999)
+              print("Security Metrics Exporter running on :9999")
+              
+              # Collect metrics every 30 seconds
+              while True:
+                  try:
+                      collect_all_metrics()
+                  except Exception as e:
+                      print(f"Error in metrics collection: {e}")
+                  time.sleep(30)
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create metrics exporter systemd service
+      copy:
+        dest: /etc/systemd/system/security-metrics-exporter.service
+        content: |
+          [Unit]
+          Description=Security Metrics Exporter for Prometheus
+          After=network.target prometheus.service
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory={{ metrics_dir }}
+          Environment="DD_API_KEY={{ datadog_api_key }}"
+          Environment="DD_APP_KEY={{ datadog_app_key }}"
+          Environment="DD_SITE={{ datadog_site }}"
+          Environment="AIKIDO_TOKEN={{ aikido_token }}"
+          ExecStart={{ metrics_dir }}/venv/bin/python {{ metrics_dir }}/metrics_exporter.py
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart Metrics Exporter
+
+    - name: Enable and start metrics exporter
+      systemd:
+        name: security-metrics-exporter
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # =======================================================================
+    # APPLICATION SETUP
+    # =======================================================================
+    - name: Create application directory
+      file:
+        path: "{{ juice_shop_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Clone Juice Shop repository
+      git:
+        repo: https://github.com/juice-shop/juice-shop.git
+        dest: "{{ juice_shop_dir }}"
+        depth: 1
+        update: yes
+      become_user: ubuntu
+
+    - name: Ensure repo ownership
+      file:
+        path: "{{ juice_shop_dir }}"
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+
+    - name: Create tracer.ts
+      copy:
+        dest: "{{ juice_shop_dir }}/tracer.ts"
+        content: |
+          import tracer from 'dd-trace';
+          tracer.init();
+          export default tracer;
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
 
     - name: Create Dockerfile
       copy:
-        dest: "{{ app_dir }}/Dockerfile"
-        owner: ubuntu
+        dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:22-slim AS build
+          FROM node:22-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
-          WORKDIR /app
-          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git .
-          RUN npm install --legacy-peer-deps && npm install @aikidosec/firewall dd-trace
-          RUN echo "import tracer from 'dd-trace'; tracer.init(); export default tracer;" > tracer.ts
-          RUN sed -i "1i import './tracer';" app.ts && sed -i "2i import '@aikidosec/firewall';" app.ts
-          
-          FROM node:22-slim
-          WORKDIR /app
-          COPY --from=build /app /app
+          WORKDIR /juice-shop
+          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          RUN npm install
+          RUN npm install --save-exact @aikidosec/firewall dd-trace
+          COPY tracer.ts ./tracer.ts
+          RUN sed -i "1i import './tracer'" app.ts && \
+              sed -i "2i import '@aikidosec/firewall'" app.ts && \
+              sed -i "1i import './tracer'" server.ts && \
+              sed -i "2i import '@aikidosec/firewall'" server.ts
+          RUN npx tsc || npm run build:server || true
+          RUN cd frontend && npm install --legacy-peer-deps && \
+              node ./node_modules/@angular/cli/bin/ng build --configuration production || true
+
+          FROM node:22-bookworm-slim
+          RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
+          RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
+          WORKDIR /juice-shop
+          COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
+          RUN mkdir -p logs ftp data && chown -R juiceshop:juiceshop /juice-shop
+          USER juiceshop
           EXPOSE 3000
+          HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+            CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
+          ENV NODE_ENV=production PORT=3000 NODE_OPTIONS="--max-old-space-size=2048"
           CMD ["npm", "start"]
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
 
     - name: Create docker-compose.yml
       copy:
-        dest: "{{ app_dir }}/docker-compose.yml"
-        owner: ubuntu
+        dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
           services:
-            app:
+            juice-shop:
               build: .
-              ports: ["3000:3000"]
+              image: juice-shop-secure:latest
+              container_name: juice-shop
+              restart: unless-stopped
+              ports:
+                - "3000:3000"
               environment:
+                NODE_ENV: production
+                DD_ENV: dev
+                DD_SERVICE: juice-shop
+                DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
-                DD_APPSEC_ENABLED: "${DD_APPSEC:-false}"
-                DD_IAST_ENABLED: "${DD_IAST:-false}"
-                AIKIDO_TOKEN: "{{ lookup('env', 'AIKIDO_TOKEN') }}"
-                AIKIDO_BLOCK: "${AIKIDO_BLOCK:-false}"
+                DD_TRACE_AGENT_PORT: 8126
+                DD_LOGS_INJECTION: "true"
+                DD_TRACE_SAMPLE_RATE: "1"
+                DD_PROFILING_ENABLED: "true"
+                DD_RUNTIME_METRICS_ENABLED: "true"
+                DD_DATA_STREAMS_ENABLED: "true"
+                DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
+                DD_APPSEC_ENABLED: "true"
+                DD_IAST_ENABLED: "true"
+                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
+                AIKIDO_BLOCK: "true"
+                AIKIDO_DEBUG: "true"
+              env_file:
+                - .env
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:3000"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 60s
+              logging:
+                driver: "json-file"
+                options:
+                  max-size: "10m"
+                  max-file: "3"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
 
-    - name: Start monitoring
-      shell: |
-        cat > /opt/monitoring/prometheus.yml << 'EOF'
-        global:
-          scrape_interval: 5s
-        scrape_configs:
-          - job_name: pushgateway
-            static_configs:
-              - targets: ['172.17.0.1:9091']
-        EOF
-        
-        docker rm -f pushgateway prometheus grafana 2>/dev/null || true
-        
-        docker run -d --name pushgateway --restart unless-stopped -p 9091:9091 prom/pushgateway
-        
-        docker run -d --name prometheus --restart unless-stopped \
-          -p 9090:9090 \
-          -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
-          prom/prometheus
-        
-        docker run -d --name grafana --restart unless-stopped \
-          -p 3001:3000 \
-          -e GF_SECURITY_ADMIN_PASSWORD=admin \
-          grafana/grafana
-        
-        sleep 15
-        
-        curl -X POST http://admin:admin@localhost:3001/api/datasources \
-          -H "Content-Type: application/json" \
-          -d '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}' || true
-        
-        curl -X POST http://admin:admin@localhost:3001/api/dashboards/db \
-          -H "Content-Type: application/json" \
-          -d '{"dashboard":{"title":"IAST vs RASP","panels":[{"id":1,"title":"Blocking Rate","type":"gauge","targets":[{"expr":"100*iast_blocked/(iast_zap_alerts+1)","legendFormat":"IAST"},{"expr":"100*rasp_blocked/(rasp_zap_alerts+1)","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":0,"y":0}},{"id":2,"title":"Blocked","type":"stat","targets":[{"expr":"iast_blocked","legendFormat":"IAST"},{"expr":"rasp_blocked","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":12,"y":0}}]},"overwrite":true}' || true
+    - name: Create .env file
+      copy:
+        dest: "{{ juice_shop_dir }}/.env"
+        content: |
+          AIKIDO_TOKEN={{ aikido_token }}
+          AIKIDO_BLOCK=true
+          AIKIDO_DEBUG=true
+          DD_ENV=dev
+          DD_VERSION=latest
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      no_log: true
+
+    - name: Create ZAP results directory
+      file:
+        path: /opt/security-metrics/zap-results
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+  handlers:
+    - name: Restart DataDog Agent
+      systemd:
+        name: datadog-agent
+        state: restarted
+
+    - name: Restart Prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+
+    - name: Restart Grafana
+      systemd:
+        name: grafana-server
+        state: restarted
+
+    - name: Restart Metrics Exporter
+      systemd:
+        name: security-metrics-exporter
+        state: restarted

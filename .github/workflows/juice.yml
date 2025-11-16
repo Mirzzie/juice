@@ -1,173 +1,708 @@
-name: IAST vs RASP Benchmark
+name: DevSecOps Pipeline - IAST vs RASP Comparison
 
 on:
   push:
     branches: [main, dev-test]
+  pull_request:
+    branches: [main, dev-test]
   workflow_dispatch:
+    inputs:
+      skip_ansible:
+        description: "Skip Ansible configuration"
+        required: false
+        type: boolean
+        default: true
+      run_full_pipeline:
+        description: "Run complete 4-phase DAST analysis"
+        required: false
+        type: boolean
+        default: true
 
 env:
-  EC2_IP: ${{ secrets.EC2_INSTANCE_IP }}
+  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
 
 jobs:
-  setup:
+  # =========================================================================
+  # JOB 1: SAST - Semgrep
+  # =========================================================================
+  sast-semgrep:
+    name: 🔍 SAST - Semgrep
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Setup SSH
+      - name: Run Semgrep Scan
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
-          chmod 600 ~/.ssh/key
-          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
-
-      - name: Run Ansible
-        run: |
-          pip install ansible
-          cd ansible
-          ansible-playbook -i "${{ env.EC2_IP }}," playbook.yml \
-            -u ubuntu --private-key ~/.ssh/key
+          semgrep scan --config=auto --json --output=semgrep-results.json || true
+          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
         env:
-          DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
-          DD_SITE: ${{ secrets.DATADOG_SITE }}
-          AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
-          ANSIBLE_HOST_KEY_CHECKING: "False"
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-  test-iast:
-    needs: setup
+      - name: Upload to Semgrep Dashboard
+        if: always()
+        run: semgrep ci
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+        continue-on-error: true
+
+      - name: Upload Semgrep Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: |
+            semgrep-results.json
+            semgrep-results.sarif
+
+  # =========================================================================
+  # JOB 2: Prerequisites Check
+  # =========================================================================
+  check-prerequisites:
+    name: ✅ Verify Prerequisites
     runs-on: ubuntu-latest
+    needs: sast-semgrep
+    outputs:
+      can_proceed: ${{ steps.check.outputs.can_proceed }}
     steps:
-      - name: Setup SSH
+      - name: Check Required Secrets
+        id: check
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
-          chmod 600 ~/.ssh/key
-          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
-
-      - name: Build and Run
-        run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            cd /opt/app
-            export DD_APPSEC=true DD_IAST=true AIKIDO_BLOCK=false
-            
-            nohup docker compose up -d --build > /tmp/build.log 2>&1 &
-            
-            for i in {1..300}; do
-              if docker ps | grep -q app; then
-                echo "Ready"
-                exit 0
-              fi
-              sleep 5
-            done
-            cat /tmp/build.log
+          MISSING_SECRETS=()
+          if [ -z "${{ secrets.EC2_INSTANCE_IP }}" ]; then
+            MISSING_SECRETS+=("EC2_INSTANCE_IP")
+          fi
+          if [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ]; then
+            MISSING_SECRETS+=("EC2_SSH_PRIVATE_KEY")
+          fi
+          if [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ]; then
+            MISSING_SECRETS+=("ANSIBLE_VAULT_PASSWORD")
+          fi
+          if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
+            echo "::error::Missing secrets: ${MISSING_SECRETS[*]}"
+            echo "can_proceed=false" >> $GITHUB_OUTPUT
             exit 1
-          EOF
-        timeout-minutes: 30
+          fi
+          echo "✅ All secrets configured"
+          echo "can_proceed=true" >> $GITHUB_OUTPUT
 
-      - name: ZAP Scan
-        run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            mkdir -p /var/lib/results/iast
-            docker run --rm --network host \
-              -v /var/lib/results/iast:/zap/wrk \
-              ghcr.io/zaproxy/zaproxy:stable \
-              zap-baseline.py -t http://localhost:3000 -J report.json
-          EOF
-
-      - name: Push Metrics
-        run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            docker logs app > /tmp/logs.txt 2>&1
-            DETECTED=$(grep -ci "detected\|vulnerability" /tmp/logs.txt || echo 0)
-            BLOCKED=$(grep -ci "blocked" /tmp/logs.txt || echo 0)
-            ALERTS=$(jq '.site[0].alerts | length' /var/lib/results/iast/report.json 2>/dev/null || echo 0)
-            
-            cat << METRICS | curl --data-binary @- http://localhost:9091/metrics/job/iast
-            iast_detected $DETECTED
-            iast_blocked $BLOCKED
-            iast_zap_alerts $ALERTS
-            METRICS
-          EOF
-
-  test-rasp:
-    needs: test-iast
+  # =========================================================================
+  # JOB 3: Configure Infrastructure
+  # =========================================================================
+  configure-instance:
+    name: ⚙️ Configure Infrastructure (Ansible)
     runs-on: ubuntu-latest
+    needs: check-prerequisites
+    if: |
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      (github.event.inputs.skip_ansible == 'false' || github.event.inputs.skip_ansible == '')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible
+        run: pip install ansible boto3 botocore
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Wait for SSH
+        run: |
+          for i in {1..30}; do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+               -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
+               "echo 'SSH ready'" 2>/dev/null; then
+              echo "✅ SSH ready"
+              exit 0
+            fi
+            echo "Attempt $i/30..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Create Ansible Inventory
+        run: |
+          mkdir -p ansible
+          cat > ansible/inventory.ini <<EOF
+          [juiceshop]
+          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          EOF
+
+      - name: Create Vault Password
+        run: |
+          cd ansible
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
+          chmod 600 .vault_pass
+
+      - name: Run Ansible Playbook
+        run: |
+          cd ansible
+          ansible-playbook -i inventory.ini playbook.yml --vault-password-file .vault_pass -v
+
+      - name: Clean Up Vault
+        if: always()
+        run: rm -f ansible/.vault_pass
+
+      - name: Verify Configuration
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
+            echo "=== Verification ==="
+            docker --version
+            systemctl is-active prometheus
+            systemctl is-active grafana-server
+            systemctl is-active security-metrics-exporter
+            curl -s http://localhost:9090/-/healthy || echo "Prometheus not ready"
+            curl -s http://localhost:3001/api/health || echo "Grafana not ready"
+          VERIFY
+
+  # =========================================================================
+  # JOB 4: Deploy Application
+  # =========================================================================
+  build-and-deploy:
+    name: 🚀 Build & Deploy
+    runs-on: ubuntu-latest
+    needs: [check-prerequisites, configure-instance]
+    if: |
+      always() &&
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Application
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'DEPLOY'
+            set -e
+            cd /opt/juice-shop
+            
+            echo "🛑 Stopping containers..."
+            docker compose down || true
+            docker image prune -f || true
+            
+            echo "📦 Building with security instrumentation..."
+            docker compose build --no-cache
+            
+            echo "▶️  Starting application..."
+            docker compose up -d
+            
+            echo "⏳ Waiting for startup (60s)..."
+            sleep 60
+            
+            if docker ps | grep -q juice-shop && curl -f -s http://localhost:3000 >/dev/null; then
+              echo "✅ Deployment successful"
+            else
+              echo "❌ Deployment failed"
+              docker compose logs --tail=50
+              exit 1
+            fi
+          DEPLOY
+
+      - name: Initialize Metrics Collection
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'METRICS'
+            # Set initial scan phase
+            mkdir -p /opt/security-metrics/data
+            cat > /opt/security-metrics/data/manual_metrics.json <<EOF
+            {
+              "scan_phase": 0,
+              "response_times": {
+                "datadog_iast": 0,
+                "aikido_rasp": 0
+              }
+            }
+          EOF
+            
+            # Verify metrics exporter is running
+            systemctl status security-metrics-exporter --no-pager || systemctl restart security-metrics-exporter
+            
+            # Wait for metrics endpoint
+            sleep 10
+            curl -s http://localhost:9999/metrics | head -20
+          METRICS
+
+  # =========================================================================
+  # JOB 5: Phase 1 - DAST Baseline Scan
+  # =========================================================================
+  phase1-baseline-scan:
+    name: 📊 Phase 1 - DAST Baseline Scan
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    if: |
+      needs.build-and-deploy.result == 'success' &&
+      (github.event.inputs.run_full_pipeline == 'true' || github.event.inputs.run_full_pipeline == '')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Update Scan Phase
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
+            jq '.scan_phase = 1' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
+            mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+          PHASE
+
+      - name: Generate Pre-Scan Traffic
+        run: |
+          echo "🚀 Generating traffic before scan..."
+          for i in {1..30}; do
+            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" >/dev/null || true
+            sleep 1
+          done
+
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: "http://${{ env.EC2_INSTANCE_IP }}:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j -m 5 -T 60"
+          allow_issue_writing: false
+          fail_action: false
+        continue-on-error: true
+
+      - name: Upload Baseline Results to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa report_json.json \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/baseline_report.json || true
+
+      - name: Upload Phase 1 Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-baseline-results
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+
+      - name: Wait for Metrics Processing
+        run: sleep 30
+
+  # =========================================================================
+  # JOB 6: Phase 2 - DAST Full Scan
+  # =========================================================================
+  phase2-full-scan:
+    name: 🕷️ Phase 2 - DAST Full Scan
+    runs-on: ubuntu-latest
+    needs: phase1-baseline-scan
+    if: needs.phase1-baseline-scan.result == 'success'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Update Scan Phase
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
+            jq '.scan_phase = 2' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
+            mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+          PHASE
+
+      - name: Run ZAP Full Scan
+        uses: zaproxy/action-full-scan@v0.8.0
+        with:
+          target: "http://${{ env.EC2_INSTANCE_IP }}:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j -m 5 -T 180"
+          allow_issue_writing: false
+          fail_action: false
+        continue-on-error: true
+
+      - name: Upload Full Scan Results to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa report_json.json \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/full_report.json || true
+
+      - name: Upload Phase 2 Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-full-scan-results
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+
+      - name: Wait for Metrics Processing
+        run: sleep 30
+
+  # =========================================================================
+  # JOB 7: Phase 3 - Targeted Attack Simulation
+  # =========================================================================
+  phase3-targeted-attacks:
+    name: 🎯 Phase 3 - Targeted Attacks
+    runs-on: ubuntu-latest
+    needs: phase2-full-scan
+    if: needs.phase2-full-scan.result == 'success'
     steps:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
-          chmod 600 ~/.ssh/key
-          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Build and Run
+      - name: Update Scan Phase
         run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            cd /opt/app
-            docker compose down
-            export DD_APPSEC=false DD_IAST=false AIKIDO_BLOCK=true
-            
-            nohup docker compose up -d --build > /tmp/build.log 2>&1 &
-            
-            for i in {1..300}; do
-              if docker ps | grep -q app; then
-                echo "Ready"
-                exit 0
-              fi
-              sleep 5
-            done
-            cat /tmp/build.log
-            exit 1
-          EOF
-        timeout-minutes: 30
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
+            jq '.scan_phase = 3' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
+            mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+          PHASE
 
-      - name: ZAP Scan
+      - name: Execute Targeted Attack Vectors
         run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            mkdir -p /var/lib/results/rasp
-            docker run --rm --network host \
-              -v /var/lib/results/rasp:/zap/wrk \
-              ghcr.io/zaproxy/zaproxy:stable \
-              zap-baseline.py -t http://localhost:3000 -J report.json
-          EOF
+          echo "🎯 Executing targeted security tests..."
 
-      - name: Push Metrics
-        run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            docker logs app > /tmp/logs.txt 2>&1
-            DETECTED=$(grep -ci "detected\|vulnerability" /tmp/logs.txt || echo 0)
-            BLOCKED=$(grep -ci "blocked" /tmp/logs.txt || echo 0)
-            ALERTS=$(jq '.site[0].alerts | length' /var/lib/results/rasp/report.json 2>/dev/null || echo 0)
-            
-            cat << METRICS | curl --data-binary @- http://localhost:9091/metrics/job/rasp
-            rasp_detected $DETECTED
-            rasp_blocked $BLOCKED
-            rasp_zap_alerts $ALERTS
-            METRICS
-          EOF
+          # XSS Attacks
+          echo "Testing XSS vulnerabilities..."
+          for payload in "<script>alert(1)</script>" "<img src=x onerror=alert(1)>" "javascript:alert(1)"; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=${payload}" >/dev/null || true
+            sleep 2
+          done
 
-  report:
-    needs: [test-iast, test-rasp]
+          # SQL Injection Attacks
+          echo "Testing SQL injection..."
+          for payload in "' OR '1'='1" "1' UNION SELECT NULL--" "admin'--"; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=${payload}" >/dev/null || true
+            sleep 2
+          done
+
+          # Path Traversal
+          echo "Testing path traversal..."
+          for payload in "../../../etc/passwd" "....//....//....//etc/passwd" "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/ftp/${payload}" >/dev/null || true
+            sleep 2
+          done
+
+          # Command Injection
+          echo "Testing command injection..."
+          for payload in "; ls -la" "| whoami" "\`id\`"; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=${payload}" >/dev/null || true
+            sleep 2
+          done
+
+          # Authentication Bypass
+          echo "Testing authentication bypass..."
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@juice-sh.op","password":"admin123"}' >/dev/null || true
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin'\'' OR 1=1--","password":"anything"}' >/dev/null || true
+
+          # LDAP Injection
+          echo "Testing LDAP injection..."
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"*)(uid=*))(|(uid=*","password":"*"}' >/dev/null || true
+
+          # XXE (XML External Entity)
+          echo "Testing XXE..."
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/file-upload" \
+            -H "Content-Type: application/xml" \
+            -d '<?xml version="1.0"?><!DOCTYPE root [<!ENTITY test SYSTEM "file:///etc/passwd">]><root>&test;</root>' >/dev/null || true
+
+          # NoSQL Injection
+          echo "Testing NoSQL injection..."
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":{"$gt":""},"password":{"$gt":""}}' >/dev/null || true
+
+          # SSRF (Server-Side Request Forgery)
+          echo "Testing SSRF..."
+          curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/redirect?to=http://169.254.169.254/latest/meta-data/" >/dev/null || true
+
+          # Mass assignment
+          echo "Testing mass assignment..."
+          curl -X POST "http://${{ env.EC2_INSTANCE_IP }}:3000/api/Users" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"hacker@test.com","password":"test123","role":"admin"}' >/dev/null || true
+
+          # Rate limiting bypass
+          echo "Testing rate limiting..."
+          for i in {1..50}; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=test" >/dev/null || true
+          done
+
+          echo "✅ Targeted attacks completed"
+
+      - name: Wait for Detection Processing
+        run: sleep 60
+
+  # =========================================================================
+  # JOB 8: Phase 4 - Comprehensive Metrics Collection
+  # =========================================================================
+  phase4-metrics-collection:
+    name: 📈 Phase 4 - Metrics Collection
     runs-on: ubuntu-latest
+    needs: phase3-targeted-attacks
+    if: needs.phase3-targeted-attacks.result == 'success'
     steps:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
-          chmod 600 ~/.ssh/key
-          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Summary
+      - name: Update Scan Phase
         run: |
-          ssh -i ~/.ssh/key ubuntu@${{ env.EC2_IP }} << 'EOF'
-            echo "# Results"
-            echo ""
-            echo "## IAST"
-            curl -s http://localhost:9091/metrics | grep "^iast_"
-            echo ""
-            echo "## RASP"
-            curl -s http://localhost:9091/metrics | grep "^rasp_"
-          EOF | tee -a $GITHUB_STEP_SUMMARY
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'PHASE'
+            jq '.scan_phase = 4' /opt/security-metrics/data/manual_metrics.json > /tmp/metrics.json
+            mv /tmp/metrics.json /opt/security-metrics/data/manual_metrics.json
+          PHASE
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Grafana: http://${{ env.EC2_IP }}:3001 (admin/admin)" >> $GITHUB_STEP_SUMMARY
+      - name: Generate High-Volume Traffic for IAST Analysis
+        run: |
+          echo "📊 Generating traffic for IAST analysis..."
+          for i in {1..100}; do
+            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" >/dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/api/Challenges" >/dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/admin/application-version" >/dev/null || true
+            [ $((i % 10)) -eq 0 ] && echo "Progress: $i/100"
+          done
+          echo "✅ Traffic generation complete"
+
+      - name: Wait for Final Metrics Collection
+        run: |
+          echo "⏳ Waiting for metrics to propagate (2 minutes)..."
+          sleep 120
+
+      - name: Collect Final Metrics
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'COLLECT'
+            echo "=== Prometheus Metrics ==="
+            curl -s http://localhost:9999/metrics | grep -E "security_detections_total|security_blocks_total|dast_vulnerabilities_found"
+            
+            echo ""
+            echo "=== DataDog Logs ==="
+            docker logs juice-shop 2>&1 | grep -i "datadog\|trace" | tail -20 || echo "No DataDog traces found"
+            
+            echo ""
+            echo "=== Aikido Logs ==="
+            docker logs juice-shop 2>&1 | grep -i "aikido" | tail -20 || echo "No Aikido logs found"
+            
+            echo ""
+            echo "=== Service Status ==="
+            systemctl status security-metrics-exporter --no-pager | grep Active
+            systemctl status prometheus --no-pager | grep Active
+            systemctl status grafana-server --no-pager | grep Active
+          COLLECT
+
+  # =========================================================================
+  # JOB 9: Generate Comparison Report
+  # =========================================================================
+  generate-report:
+    name: 📋 Generate Comparison Report
+    runs-on: ubuntu-latest
+    needs:
+      [
+        phase1-baseline-scan,
+        phase2-full-scan,
+        phase3-targeted-attacks,
+        phase4-metrics-collection,
+      ]
+    if: always()
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+
+      - name: Generate Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # 🔒 IAST vs RASP Security Comparison Report
+
+          **Pipeline Run:** #${{ github.run_number }}  
+          **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
+          **Instance:** ${{ env.EC2_INSTANCE_IP }}
+
+          ---
+
+          ## 📊 Test Phases Completed
+
+          | Phase | Type | Status |
+          |-------|------|--------|
+          | Phase 1 | DAST Baseline Scan | ${{ needs.phase1-baseline-scan.result }} |
+          | Phase 2 | DAST Full Scan | ${{ needs.phase2-full-scan.result }} |
+          | Phase 3 | Targeted Attacks | ${{ needs.phase3-targeted-attacks.result }} |
+          | Phase 4 | Metrics Collection | ${{ needs.phase4-metrics-collection.result }} |
+
+          ---
+
+          ## 🔍 Access Dashboards
+
+          ### Grafana IAST vs RASP Dashboard
+          **URL:** http://${{ env.EC2_INSTANCE_IP }}:3001  
+          **Default Credentials:** admin / admin  
+          **Dashboard:** "IAST vs RASP Security Comparison"
+
+          ### Prometheus Metrics
+          **URL:** http://${{ env.EC2_INSTANCE_IP }}:9090  
+          **Query Examples:**
+          - `security_detections_total{tool="datadog_iast"}`
+          - `security_detections_total{tool="aikido_rasp"}`
+          - `security_blocks_total{tool="aikido_rasp"}`
+          - `dast_vulnerabilities_found`
+
+          ### Security Tool Dashboards
+          - **DataDog IAST:** https://app.us5.datadoghq.com/security/appsec?service=juice-shop
+          - **Aikido RASP:** https://app.aikido.dev
+          - **Semgrep SAST:** https://semgrep.dev/orgs/-/findings
+
+          ---
+
+          ## 📈 Key Metrics to Compare
+
+          1. **Detection Coverage**
+             - IAST: Code-level vulnerability detection
+             - RASP: Runtime attack detection
+
+          2. **Attack Prevention**
+             - IAST: Detection only (no blocking)
+             - RASP: Detection + blocking capability
+
+          3. **Response Time Impact**
+             - Compare instrumentation overhead
+
+          4. **Vulnerability Types**
+             - Compare coverage across different attack vectors
+
+          ---
+
+          ## 🔧 SSH Access for Analysis
+
+          ```bash
+          ssh -i your-key.pem ubuntu@${{ env.EC2_INSTANCE_IP }}
+
+          # View metrics
+          curl http://localhost:9999/metrics
+
+          # Check logs
+          docker logs juice-shop -f
+
+          # Restart services if needed
+          sudo systemctl restart security-metrics-exporter
+          ```
+
+          ---
+
+          ## 📊 Expected Results
+
+          Based on thesis hypothesis:
+          - **RASP (Aikido)** should show ~80% attack blocking rate
+          - **IAST (DataDog)** provides detection without blocking
+          - Both tools should detect similar vulnerability types
+          - RASP may have slightly higher overhead due to runtime protection
+
+          EOF
+
+      - name: Create Analysis Guide
+        run: |
+          cat > analysis-guide.txt << 'EOF'
+          IAST vs RASP Analysis Guide
+          ============================
+
+          1. Access Grafana Dashboard:
+             - URL: http://${{ env.EC2_INSTANCE_IP }}:3001
+             - Login: admin/admin
+             - Navigate to "IAST vs RASP Security Comparison"
+
+          2. Key Metrics to Analyze:
+
+             A. Detection Metrics:
+                - security_detections_total{tool="datadog_iast"}
+                - security_detections_total{tool="aikido_rasp"}
+
+             B. Blocking Metrics (RASP only):
+                - security_blocks_total{tool="aikido_rasp"}
+
+             C. DAST Results:
+                - dast_vulnerabilities_found{severity="High"}
+                - dast_vulnerabilities_found{severity="Medium"}
+
+          3. Comparative Analysis:
+
+             a) Detection Coverage:
+                Compare vulnerability types detected by each tool
+
+             b) Blocking Effectiveness:
+                RASP block rate = blocks_total / detections_total
+
+             c) Performance Impact:
+                Compare response_time_ms between tools
+
+          4. Export Data for Thesis:
+
+             ssh to instance and run:
+             curl http://localhost:9090/api/v1/query?query=security_detections_total
+
+          5. Prometheus Query Examples:
+
+             # Total detections by tool
+             sum(security_detections_total) by (tool)
+
+             # Block rate (RASP only)
+             sum(security_blocks_total) / sum(security_detections_total{tool="aikido_rasp"})
+
+             # Detections by vulnerability type
+             sum(security_detections_total) by (vuln_type, tool)
+
+          EOF
+
+      - name: Upload Analysis Guide
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-guide
+          path: analysis-guide.txt
