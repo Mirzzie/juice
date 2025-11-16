@@ -607,13 +607,28 @@
     - name: Display information
       debug:
         msg: |
-          ✅ IAST vs RASP System Ready!
+          ════════════════════════════════════════
+          ✅ System Configured Successfully!
+          ════════════════════════════════════════
           
           📊 Grafana: http://{{ ansible_default_ipv4.address }}:3001
              Username: admin / Password: iast_rasp_2024
           
-          Start benchmark: sudo systemctl start dast-benchmark
-          View logs: journalctl -u dast-benchmark -f
+          ⚠️  IMPORTANT: Docker image NOT pre-built
+             - Avoids SSH timeout during deployment
+             - Image builds automatically when:
+               1. GitHub Actions runs tests
+               2. Continuous service starts
+             - First build: 15-20 minutes
+             - Subsequent builds: 2-5 minutes (cached)
+          
+          🚀 To start continuous benchmark:
+             sudo systemctl start dast-benchmark
+          
+          📖 View logs:
+             journalctl -u dast-benchmark -f
+          
+          ════════════════════════════════════════
 
   handlers:
     - name: Restart DataDog Agent
