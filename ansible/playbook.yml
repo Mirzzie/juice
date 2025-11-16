@@ -726,6 +726,8 @@
         dest: "{{ juice_shop_dir }}"
         depth: 1
         update: yes
+        force: yes
+      become: true
       become_user: ubuntu
 
     - name: Ensure repo ownership
