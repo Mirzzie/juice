@@ -12,9 +12,6 @@
     - secrets.yml
 
   tasks:
-    # =======================================================================
-    # SYSTEM PREPARATION
-    # =======================================================================
     - name: Update APT cache
       apt:
         update_cache: yes
@@ -35,9 +32,6 @@
           - python3-pip
         state: present
 
-    # =======================================================================
-    # DOCKER INSTALLATION
-    # =======================================================================
     - name: Create keyrings directory
       file:
         path: /etc/apt/keyrings
@@ -78,9 +72,6 @@
         state: started
         enabled: yes
 
-    # =======================================================================
-    # FIREWALL CONFIGURATION
-    # =======================================================================
     - name: Install UFW
       apt:
         name: ufw
@@ -100,20 +91,17 @@
         port: "{{ item }}"
         proto: tcp
       loop:
-        - '22'      # SSH
-        - '3000'    # Juice Shop
-        - '8126'    # DataDog Agent
-        - '8000'    # Prometheus Exporter
-        - '9090'    # Prometheus
-        - '3001'    # Grafana
+        - '22'
+        - '3000'
+        - '8126'
+        - '8000'
+        - '9090'
+        - '3001'
 
     - name: Enable UFW
       ufw:
         state: enabled
 
-    # =======================================================================
-    # DATADOG AGENT INSTALLATION (IAST)
-    # =======================================================================
     - name: Check if DataDog agent exists
       stat:
         path: /etc/datadog-agent/datadog.yaml
@@ -147,18 +135,14 @@
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
-          # DataDog IAST Configuration
           apm_config:
             enabled: true
             apm_non_local_traffic: true
             receiver_port: 8126
-
           appsec_config:
             enabled: true
-
           runtime_security_config:
             enabled: true
-
           logs_enabled: true
           logs_config:
             container_collect_all: true
@@ -173,26 +157,6 @@
         state: started
         enabled: yes
 
-    # =======================================================================
-    # PRE-FLIGHT CHECKS & CLEANUP
-    # =======================================================================
-    - name: Clean up Docker system to reclaim disk space
-      ansible.builtin.shell: docker system prune -af || true
-      register: docker_prune
-      changed_when: "'Total reclaimed space' in docker_prune.stdout"
-
-    - name: Check for sufficient disk space before building
-      assert:
-        that:
-          - ansible_fs_avail.root.size_available > 5 * 1024 * 1024 * 1024 # Assert > 5GB free
-        fail_msg: "CRITICAL ERROR: Insufficient disk space. Only {{ (ansible_fs_avail.root.size_available / (1024*1024*1024)) | round(2) }}GB free. Please increase the EC2 volume size to at least 40GB."
-      vars:
-        ansible_fs_avail:
-          root: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | list | first }}"
-
-    # =======================================================================
-    # APPLICATION SETUP
-    # =======================================================================
     - name: Create application directory
       file:
         path: "{{ juice_shop_dir }}"
@@ -215,83 +179,36 @@
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
-          // DataDog APM & IAST Tracer
           import tracer from 'dd-trace';
-          tracer.init({
-            logInjection: true,
-            profiling: true,
-            runtimeMetrics: true
-          });
+          tracer.init({ logInjection: true, profiling: true, runtimeMetrics: true });
           export default tracer;
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    # =======================================================================
-    # *** FINAL FIX ***: DOCKERFILE CORRECTED FOR SSH/HTTPS & CA CERTS
-    # =======================================================================
-    - name: Create Final Optimized Dockerfile
+    - name: Create Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Stage 1: Build environment
           FROM node:{{ node_version }}-bookworm-slim AS builder
-
-          # Install build dependencies and CA certs so HTTPS git/npm works
-          RUN apt-get update && apt-get install -y --no-install-recommends \
-              git \
-              python3 \
-              make \
-              g++ \
-              openssh-client \
-              ca-certificates \
-              curl \
-              && rm -rf /var/lib/apt/lists/*
-
-          # Ensure common git URL forms are rewritten to HTTPS so npm doesn't try SSH
-          RUN git config --global url."https://github.com/".insteadOf "git@github.com:" && \
-              git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" && \
-              git config --global url."https://".insteadOf "git://"
-
+          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
-
-          # Copy ONLY package.json files to leverage Docker layer caching
-          COPY package.json ./ 
-          COPY frontend/package.json ./frontend/
-
-          # Run npm install. This creates package-lock.json and installs all dependencies,
-          # including triggering the frontend install via the postinstall script.
+          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           RUN npm install --legacy-peer-deps
-
-          # Now, copy the rest of the application source code
-          COPY . .
-
-          # Install our security tools
-          RUN npm install @aikidosec/firewall dd-trace --no-audit --no-fund
-
-          # Inject tracers into the source code (only if files exist)
-          RUN if [ -f app.ts ]; then sed -i "1i import './tracer' // DataDog IAST" app.ts || true; \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts || true; fi && \
-              if [ -f server.ts ]; then sed -i "1i import './tracer' // DataDog IAST" server.ts || true; \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts || true; fi
-
-          # Build the TypeScript backend. Frontend was built by the 'npm install' step.
+          RUN npm install @aikidosec/firewall dd-trace
+          COPY tracer.ts ./tracer.ts
+          RUN sed -i "1i import './tracer';" app.ts && \
+              sed -i "2i import '@aikidosec/firewall';" app.ts && \
+              sed -i "1i import './tracer';" server.ts && \
+              sed -i "2i import '@aikidosec/firewall';" server.ts
           RUN npm run build:server || true
-
-          # Prune development dependencies and clean cache to reduce image size
-          RUN npm prune --production && npm cache clean --force
-
-          # Stage 2: Production environment
+          
           FROM node:{{ node_version }}-bookworm-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends curl procps ca-certificates && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           WORKDIR /juice-shop
-
-          # Copy only the pruned application files from the builder stage
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
-
-          RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
-              chown -R juiceshop:juiceshop /juice-shop
+          RUN mkdir -p logs ftp data && chown -R juiceshop:juiceshop .
           USER juiceshop
           EXPOSE 3000
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
@@ -377,45 +294,27 @@
         dest: /opt/continuous_dast_benchmark.py
         content: |
           #!/usr/bin/env python3
-          import subprocess
-          import time
-          import json
-          import os
+          import subprocess, time, json, os, logging, signal, sys
           from datetime import datetime
-          import logging
-          import signal
-          import sys
+          from pathlib import Path
           
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(levelname)s - %(message)s',
-              handlers=[
-                  logging.FileHandler('/var/log/dast_benchmark.log'),
-                  logging.StreamHandler()
-              ]
-          )
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s',
+              handlers=[logging.FileHandler('/var/log/dast_benchmark.log'), logging.StreamHandler()])
           logger = logging.getLogger(__name__)
           
           class DASTBenchmark:
               def __init__(self):
                   self.configurations = [
-                      {
-                          'name': 'iast-detection',
-                          'display_name': 'DataDog IAST (Detection Only)',
-                          'env_content': 'SECURITY_MODE=iast-detection\nDD_APPSEC_ENABLED=true\nDD_IAST_ENABLED=true\nAIKIDO_BLOCK=false'
-                      },
-                      {
-                          'name': 'rasp-protection',
-                          'display_name': 'Aikido RASP (Detection + Blocking)',
-                          'env_content': 'SECURITY_MODE=rasp-protection\nDD_APPSEC_ENABLED=false\nDD_IAST_ENABLED=false\nAIKIDO_BLOCK=true'
-                      }
+                      {'name': 'iast-detection', 'display_name': 'DataDog IAST', 
+                       'env_content': 'SECURITY_MODE=iast-detection\nDD_APPSEC_ENABLED=true\nDD_IAST_ENABLED=true\nAIKIDO_BLOCK=false'},
+                      {'name': 'rasp-protection', 'display_name': 'Aikido RASP',
+                       'env_content': 'SECURITY_MODE=rasp-protection\nDD_APPSEC_ENABLED=false\nDD_IAST_ENABLED=false\nAIKIDO_BLOCK=true'}
                   ]
                   self.current_config_index = 0
                   self.running = True
                   self.results_base = '/var/lib/benchmark-results'
                   self.rotation_interval = 3600
                   self.scan_interval = 600
-                  
                   os.makedirs(self.results_base, exist_ok=True)
                   signal.signal(signal.SIGTERM, self.handle_shutdown)
                   signal.signal(signal.SIGINT, self.handle_shutdown)
@@ -426,157 +325,97 @@
                   sys.exit(0)
               
               def deploy_configuration(self, config):
-                  logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                   logger.info(f"🔄 Deploying: {config['display_name']}")
-                  logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                  
                   with open('/opt/juice-shop/.env', 'w') as f:
                       f.write(config['env_content'])
-                  
-                  logger.info("📦 Building and starting application (this takes 15-20 minutes)...")
-                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], 
-                                capture_output=True)
+                  logger.info("📦 Building application (15-20 min)...")
+                  subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'down'], capture_output=True)
                   time.sleep(5)
-                  
                   result = subprocess.run(['docker', 'compose', '-f', '/opt/juice-shop/docker-compose.yml', 'up', '-d', '--build'], 
                                         capture_output=True, text=True, timeout=1800)
-                  
                   if result.returncode != 0:
                       logger.error(f"Build failed: {result.stderr}")
                       return False
-                  
                   logger.info("⏳ Waiting for application...")
                   for i in range(60):
                       try:
-                          result = subprocess.run(['curl', '-f', '-s', 'http://localhost:3000'], 
-                                                capture_output=True, timeout=5)
-                          if result.returncode == 0:
-                              logger.info(f"✅ {config['display_name']} is READY")
+                          if subprocess.run(['curl', '-f', '-s', 'http://localhost:3000'], capture_output=True, timeout=5).returncode == 0:
+                              logger.info(f"✅ {config['display_name']} READY")
                               return True
-                      except:
-                          pass
+                      except: pass
                       time.sleep(5)
-                  
-                  logger.warning("⚠️  Application delayed")
+                  logger.warning("⚠️ Application delayed")
                   return False
               
               def run_zap_scan(self, config_name):
                   timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                   results_dir = f"{self.results_base}/{config_name}/{timestamp}"
                   os.makedirs(results_dir, exist_ok=True)
-                  
-                  logger.info(f"🕷️  Running OWASP ZAP scan for {config_name}")
-                  
+                  logger.info(f"🕷️ Running ZAP scan for {config_name}")
                   try:
-                      subprocess.run([
-                          'docker', 'run', '--rm', '--network', 'host',
-                          '-v', f'{results_dir}:/zap/wrk:rw',
-                          'ghcr.io/zaproxy/zaproxy:stable',
-                          'zap-baseline.py',
-                          '-t', 'http://localhost:3000',
-                          '-r', 'zap-report.html',
-                          '-J', 'zap-report.json',
-                          '-w', 'zap-report.md',
-                          '-m', '3',
-                          '-T', '300'
-                      ], timeout=600, capture_output=True)
-                      
-                      logger.info(f"✅ ZAP scan completed")
-                  except subprocess.TimeoutExpired:
-                      logger.warning("⚠️  ZAP scan timed out")
+                      subprocess.run(['docker', 'run', '--rm', '--network', 'host',
+                          '-v', f'{results_dir}:/zap/wrk:rw', 'ghcr.io/zaproxy/zaproxy:stable',
+                          'zap-baseline.py', '-t', 'http://localhost:3000',
+                          '-r', 'zap-report.html', '-J', 'zap-report.json', '-w', 'zap-report.md',
+                          '-m', '3', '-T', '300'], timeout=600, capture_output=True)
+                      logger.info("✅ ZAP scan completed")
                   except Exception as e:
-                      logger.error(f"❌ ZAP scan error: {e}")
-                  
+                      logger.error(f"❌ ZAP error: {e}")
                   self.extract_metrics(config_name, results_dir)
-                  
                   try:
-                      result = subprocess.run(['docker', 'logs', 'juice-shop'],
-                                            capture_output=True, text=True, timeout=30)
-                      
+                      result = subprocess.run(['docker', 'logs', 'juice-shop'], capture_output=True, text=True, timeout=30)
                       with open(f"{results_dir}/container.log", 'w') as f:
-                          f.write(result.stdout)
-                          f.write(result.stderr)
-                      
+                          f.write(result.stdout + result.stderr)
                       log_text = result.stdout + result.stderr
                       blocked = log_text.lower().count('blocked')
                       detected = log_text.lower().count('detected') + log_text.lower().count('vulnerability')
-                      
                       with open(f"{results_dir}/security_events.csv", 'w') as f:
-                          f.write("METRIC,COUNT\n")
-                          f.write(f"BLOCKED,{blocked}\n")
-                          f.write(f"DETECTED,{detected}\n")
-                      
+                          f.write(f"METRIC,COUNT\nBLOCKED,{blocked}\nDETECTED,{detected}\n")
                       logger.info(f"📊 Events: {detected} detected, {blocked} blocked")
                   except Exception as e:
-                      logger.error(f"Error extracting logs: {e}")
-                  
+                      logger.error(f"Error: {e}")
                   latest_link = f"{self.results_base}/{config_name}/latest"
                   if os.path.lexists(latest_link):
                       os.remove(latest_link)
                   os.symlink(results_dir, latest_link)
-                  
                   return results_dir
               
               def extract_metrics(self, config_name, results_dir):
                   zap_file = f"{results_dir}/zap-report.json"
                   if not os.path.exists(zap_file):
                       return
-                  
                   try:
                       with open(zap_file, 'r') as f:
                           zap_data = json.load(f)
-                      
-                      site = zap_data.get('site', [{}])[0]
-                      alerts = site.get('alerts', [])
-                      
-                      total_alerts = len(alerts)
-                      high_risk = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
-                      medium_risk = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
-                      low_risk = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
-                      
-                      sqli = sum(1 for a in alerts if 'SQL' in a.get('name', '').upper())
-                      xss = sum(1 for a in alerts if 'XSS' in a.get('name', '').upper() or 'SCRIPT' in a.get('name', '').upper())
-                      path = sum(1 for a in alerts if 'PATH' in a.get('name', '').upper() or 'TRAVERSAL' in a.get('name', '').upper())
-                      
+                      alerts = zap_data.get('site', [{}])[0].get('alerts', [])
+                      total = len(alerts)
+                      high = sum(1 for a in alerts if 'High' in a.get('riskdesc', ''))
+                      medium = sum(1 for a in alerts if 'Medium' in a.get('riskdesc', ''))
+                      low = sum(1 for a in alerts if 'Low' in a.get('riskdesc', ''))
                       with open(f"{results_dir}/zap_metrics.csv", 'w') as f:
-                          f.write("METRIC,COUNT\n")
-                          f.write(f"TOTAL_ALERTS,{total_alerts}\n")
-                          f.write(f"HIGH_RISK,{high_risk}\n")
-                          f.write(f"MEDIUM_RISK,{medium_risk}\n")
-                          f.write(f"LOW_RISK,{low_risk}\n")
-                          f.write(f"SQL_INJECTION,{sqli}\n")
-                          f.write(f"XSS,{xss}\n")
-                          f.write(f"PATH_TRAVERSAL,{path}\n")
-                      
-                      logger.info(f"📊 ZAP Metrics: {total_alerts} alerts ({high_risk} high, {medium_risk} medium)")
+                          f.write(f"METRIC,COUNT\nTOTAL_ALERTS,{total}\nHIGH_RISK,{high}\nMEDIUM_RISK,{medium}\nLOW_RISK,{low}\n")
+                      logger.info(f"📊 ZAP: {total} alerts ({high} high, {medium} medium)")
                   except Exception as e:
-                      logger.error(f"Error extracting ZAP metrics: {e}")
+                      logger.error(f"Error: {e}")
               
               def run_continuous_benchmark(self):
                   logger.info("🚀 Starting Continuous DAST Benchmark")
-                  
                   while self.running:
                       config = self.configurations[self.current_config_index]
-                      
                       if self.deploy_configuration(config):
                           config_start_time = time.time()
                           scan_count = 0
-                          
                           while (time.time() - config_start_time) < self.rotation_interval and self.running:
                               scan_count += 1
                               self.run_zap_scan(config['name'])
                               logger.info(f"✅ Scan {scan_count} completed")
-                              
                               if self.running:
                                   time.sleep(self.scan_interval)
-                      
                       self.current_config_index = (self.current_config_index + 1) % len(self.configurations)
-                      next_config = self.configurations[self.current_config_index]
-                      logger.info(f"🔄 Next: {next_config['display_name']}")
+                      logger.info(f"🔄 Next: {self.configurations[self.current_config_index]['display_name']}")
           
           if __name__ == '__main__':
-              benchmark = DASTBenchmark()
-              benchmark.run_continuous_benchmark()
+              DASTBenchmark().run_continuous_benchmark()
         owner: ubuntu
         group: ubuntu
         mode: '0755'
@@ -620,20 +459,15 @@
         content: |
           #!/usr/bin/env python3
           from prometheus_client import start_http_server, Gauge
-          import time
-          import json
-          import os
+          import time, json, logging
           from pathlib import Path
-          import logging
           
           logging.basicConfig(level=logging.INFO)
           logger = logging.getLogger(__name__)
           
           zap_alerts_total = Gauge('zap_alerts_total', 'Total ZAP alerts', ['config'])
           zap_high_risk = Gauge('zap_high_risk_alerts', 'High risk alerts', ['config'])
-          zap_medium_risk = Gauge('zap_medium_risk_alerts', 'Medium risk alerts', ['config'])
           attacks_blocked = Gauge('security_attacks_blocked', 'Attacks blocked', ['config'])
-          attacks_detected = Gauge('security_attacks_detected', 'Attacks detected', ['config'])
           blocking_rate = Gauge('security_blocking_rate_percent', 'Blocking rate', ['config'])
           
           class MetricsExporter:
@@ -645,7 +479,6 @@
                       latest_path = self.results_base / config / 'latest'
                       if not latest_path.exists():
                           continue
-                      
                       zap_file = latest_path / 'zap_metrics.csv'
                       if zap_file.exists():
                           try:
@@ -654,30 +487,21 @@
                                   for line in f.readlines()[1:]:
                                       metric, value = line.strip().split(',')
                                       metrics[metric] = int(value)
-                              
                               zap_alerts_total.labels(config=config).set(metrics.get('TOTAL_ALERTS', 0))
                               zap_high_risk.labels(config=config).set(metrics.get('HIGH_RISK', 0))
-                              zap_medium_risk.labels(config=config).set(metrics.get('MEDIUM_RISK', 0))
                           except Exception as e:
-                              logger.error(f"Error reading ZAP metrics: {e}")
-                      
+                              logger.error(f"Error: {e}")
                       events_file = latest_path / 'security_events.csv'
                       if events_file.exists():
                           try:
                               with open(events_file, 'r') as f:
                                   lines = f.readlines()[1:]
-                              
                               blocked = int(lines[0].split(',')[1]) if len(lines) > 0 else 0
-                              detected = int(lines[1].split(',')[1]) if len(lines) > 1 else 0
-                              
                               attacks_blocked.labels(config=config).set(blocked)
-                              attacks_detected.labels(config=config).set(detected)
-                              
                               total = max(zap_alerts_total._metrics.get((config,), {}).get('value', 1), 1)
-                              block_pct = (blocked / total) * 100
-                              blocking_rate.labels(config=config).set(block_pct)
+                              blocking_rate.labels(config=config).set((blocked / total) * 100)
                           except Exception as e:
-                              logger.error(f"Error reading events: {e}")
+                              logger.error(f"Error: {e}")
               
               def run(self, port=8000):
                   logger.info(f"Starting exporter on port {port}")
@@ -690,8 +514,7 @@
                       time.sleep(10)
           
           if __name__ == '__main__':
-              exporter = MetricsExporter()
-              exporter.run()
+              MetricsExporter().run()
         owner: ubuntu
         group: ubuntu
         mode: '0755'
@@ -706,44 +529,6 @@
             - job_name: 'dast-metrics'
               static_configs:
                 - targets: ['host.docker.internal:8000']
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
-
-    - name: Create Grafana dashboard
-      copy:
-        dest: /opt/monitoring/dashboard.json
-        content: |
-          {
-            "dashboard": {
-              "title": "IAST vs RASP - DAST Results",
-              "panels": [
-                {
-                  "id": 1,
-                  "title": "🛡️ Blocking Rate Comparison",
-                  "type": "bargauge",
-                  "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
-                  "targets": [{"expr": "security_blocking_rate_percent", "legendFormat": "{{ '{{config}}' }}"}],
-                  "fieldConfig": {"defaults": {"unit": "percent", "max": 100}}
-                },
-                {
-                  "id": 2,
-                  "title": "🎯 ZAP Alerts Detected",
-                  "type": "stat",
-                  "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
-                  "targets": [{"expr": "zap_alerts_total"}]
-                },
-                {
-                  "id": 3,
-                  "title": "🚨 High Risk Vulnerabilities",
-                  "type": "stat",
-                  "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
-                  "targets": [{"expr": "zap_high_risk_alerts"}],
-                  "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 5, "color": "red"}]}}}
-                }
-              ]
-            }
-          }
         owner: ubuntu
         group: ubuntu
         mode: '0644'
@@ -791,22 +576,19 @@
         dest: /opt/start_monitoring.sh
         content: |
           #!/bin/bash
-          echo "🚀 Starting Monitoring Stack"
+          echo "🚀 Starting Monitoring"
           cd /opt/monitoring
           sg docker -c "docker compose up -d"
           sleep 10
           pkill -f prometheus_exporter.py || true
           nohup python3 /opt/monitoring/prometheus_exporter.py > /tmp/exporter.log 2>&1 &
-          echo "✅ Monitoring ready"
-          echo "Grafana: http://$(curl -s ifconfig.me):3001 (admin/iast_rasp_2024)"
+          echo "✅ Ready - Grafana: http://$(curl -s ifconfig.me):3001 (admin/iast_rasp_2024)"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
     - name: Start monitoring
-      shell: |
-        cd /opt
-        nohup ./start_monitoring.sh > /tmp/monitoring.log 2>&1 &
+      shell: nohup /opt/start_monitoring.sh > /tmp/monitoring.log 2>&1 &
       become: true
       become_user: ubuntu
       async: 300
@@ -830,13 +612,8 @@
           📊 Grafana: http://{{ ansible_default_ipv4.address }}:3001
              Username: admin / Password: iast_rasp_2024
           
-          🔄 System will:
-             1. Build Juice Shop (20 min first time)
-             2. Run ZAP DAST scans every 10 minutes
-             3. Rotate IAST/RASP every hour
-          
-          📝 Start benchmark: sudo systemctl start dast-benchmark
-          📖 View logs: journalctl -u dast-benchmark -f
+          Start benchmark: sudo systemctl start dast-benchmark
+          View logs: journalctl -u dast-benchmark -f
 
   handlers:
     - name: Restart DataDog Agent
