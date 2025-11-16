@@ -32,11 +32,21 @@
         - "apm_config:"
         - "  enabled: true"
 
-    - name: Create app files
+    - name: Create app directory
       file:
         path: "{{ app_dir }}"
         state: directory
         owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create results directory
+      file:
+        path: /var/lib/results
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
 
     - name: Create Dockerfile
       copy:
@@ -75,59 +85,79 @@
         state: directory
         owner: ubuntu
 
+    - name: Create monitoring directory
+      file:
+        path: /opt/monitoring
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create prometheus.yml
+      copy:
+        dest: /opt/monitoring/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 5s
+          scrape_configs:
+            - job_name: 'pushgateway'
+              static_configs:
+                - targets: ['172.17.0.1:9091']
+
     - name: Start monitoring stack
-      block:
-        - name: Ensure monitoring directory exists
-          file:
-            path: /opt/monitoring
-            state: directory
-            owner: ubuntu
+      shell: |
+        # Pushgateway
+        docker run -d --name pushgateway --restart unless-stopped \
+          -p 9091:9091 prom/pushgateway
 
-        - name: Create Prometheus config
-          copy:
-            dest: /opt/monitoring/prometheus.yml
-            content: |
-              global:
-                scrape_interval: 5s
-              scrape_configs:
-                - job_name: 'pushgateway'
-                  static_configs:
-                    - targets: ['172.17.0.1:9091']
+        # Prometheus
+        docker run -d --name prometheus --restart unless-stopped \
+          -p 9090:9090 \
+          -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
+          prom/prometheus
 
-        - name: Start Pushgateway container
-          shell: docker run -d --name pushgateway --restart unless-stopped -p 9091:9091 prom/pushgateway
-          ignore_errors: true
+        # Grafana
+        docker run -d --name grafana --restart unless-stopped \
+          -p 3001:3000 \
+          -e GF_SECURITY_ADMIN_PASSWORD=admin \
+          -e GF_INSTALL_PLUGINS=grafana-piechart-panel \
+          grafana/grafana
 
-        - name: Start Prometheus container
-          shell: docker run -d --name prometheus --restart unless-stopped -p 9090:9090 -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro prom/prometheus
-          ignore_errors: true
+        sleep 15
 
-        - name: Start Grafana container
-          shell: docker run -d --name grafana --restart unless-stopped -p 3001:3000 -e GF_SECURITY_ADMIN_PASSWORD=admin -e GF_INSTALL_PLUGINS=grafana-piechart-panel grafana/grafana
-          ignore_errors: true
+        # Configure Grafana
+        curl -X POST http://admin:admin@localhost:3001/api/datasources \
+          -H "Content-Type: application/json" \
+          -d '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}'
 
-        - name: Wait for Grafana to be available
-          wait_for:
-            host: localhost
-            port: 3001
-            delay: 15
-            timeout: 60
-
-        - name: Configure Grafana datasource
-          uri:
-            url: http://admin:admin@localhost:3001/api/datasources
-            method: POST
-            headers:
-              Content-Type: "application/json"
-            body: '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}'
-            status_code: 200,409
-          ignore_errors: true
-
-        - name: Configure Grafana dashboard
-          uri:
-            url: http://admin:admin@localhost:3001/api/dashboards/db
-            method: POST
-            headers:
-              Content-Type: "application/json"
-            body: '{"dashboard":{"title":"IAST vs RASP","panels":[{"id":1,"title":"Blocking Rate %","type":"gauge","targets":[{"expr":"100 * iast_blocked / (iast_zap_alerts + 1)","legendFormat":"IAST"},{"expr":"100 * rasp_blocked / (rasp_zap_alerts + 1)","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":0,"y":0}},{"id":2,"title":"Attacks Blocked","type":"stat","targets":[{"expr":"iast_blocked","legendFormat":"IAST"},{"expr":"rasp_blocked","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":12,"y":0}}]},"overwrite":true}'
-          ignore_errors: true
+        curl -X POST http://admin:admin@localhost:3001/api/dashboards/db \
+          -H "Content-Type: application/json" \
+          -d '{
+            "dashboard": {
+              "title": "IAST vs RASP",
+              "panels": [
+                {
+                  "id": 1,
+                  "title": "Blocking Rate %",
+                  "type": "gauge",
+                  "targets": [
+                    {"expr": "100 * iast_blocked / (iast_zap_alerts + 1)", "legendFormat": "IAST"},
+                    {"expr": "100 * rasp_blocked / (rasp_zap_alerts + 1)", "legendFormat": "RASP"}
+                  ],
+                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+                },
+                {
+                  "id": 2,
+                  "title": "Attacks Blocked",
+                  "type": "stat",
+                  "targets": [
+                    {"expr": "iast_blocked", "legendFormat": "IAST"},
+                    {"expr": "rasp_blocked", "legendFormat": "RASP"}
+                  ],
+                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+                }
+              ]
+            },
+            "overwrite": true
+          }'
+      ignore_errors: true
