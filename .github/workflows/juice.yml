@@ -2,9 +2,9 @@ name: IAST vs RASP - DAST Comparison Pipeline
 
 on:
   push:
-    branches: [main, dev-test]
+    branches: [main, dev]
   pull_request:
-    branches: [main, dev-test]
+    branches: [main, dev]
   workflow_dispatch:
     inputs:
       skip_ansible:
@@ -14,7 +14,7 @@ on:
       deploy_continuous:
         description: "Deploy 24/7 continuous DAST system"
         type: boolean
-        default: true
+        default: false
       zap_scan_type:
         description: "ZAP scan type"
         type: choice
@@ -31,6 +31,9 @@ env:
   AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
 
 jobs:
+  # ============================================================================
+  # SAST
+  # ============================================================================
   sast-semgrep:
     name: 🔍 SAST - Semgrep
     runs-on: ubuntu-latest
@@ -67,6 +70,9 @@ jobs:
           name: sast-results
           path: semgrep-results.*
 
+  # ============================================================================
+  # Prerequisites
+  # ============================================================================
   check-prerequisites:
     name: ✅ Check Prerequisites
     runs-on: ubuntu-latest
@@ -92,6 +98,9 @@ jobs:
           echo "✅ All secrets configured"
           echo "can_proceed=true" >> $GITHUB_OUTPUT
 
+  # ============================================================================
+  # Configure Instance
+  # ============================================================================
   configure-instance:
     name: ⚙️ Configure EC2
     runs-on: ubuntu-latest
@@ -161,6 +170,9 @@ jobs:
         if: always()
         run: rm -f ansible/.vault_pass
 
+  # ============================================================================
+  # Deploy Continuous System
+  # ============================================================================
   deploy-continuous:
     name: 🔄 Deploy Continuous DAST
     runs-on: ubuntu-latest
@@ -168,7 +180,7 @@ jobs:
     if: |
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
       (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
-      (github.ref == 'refs/heads/main' || github.event.inputs.deploy_continuous == 'true')
+      github.event.inputs.deploy_continuous == 'true'
     steps:
       - name: Setup SSH
         run: |
@@ -229,6 +241,9 @@ jobs:
           ⚠️ **Note**: First cycle takes 20 minutes (Docker build)
           EOF
 
+  # ============================================================================
+  # Manual DAST Tests
+  # ============================================================================
   dast-comparison:
     name: 🕷️ ${{ matrix.config_display }}
     runs-on: ubuntu-latest
@@ -393,6 +408,9 @@ jobs:
           path: ./results/${{ matrix.config }}/
           retention-days: 30
 
+  # ============================================================================
+  # Generate Report
+  # ============================================================================
   generate-report:
     name: 📊 Generate Comparison Report
     runs-on: ubuntu-latest
