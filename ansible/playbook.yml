@@ -1,72 +1,72 @@
 ---
-- name: Setup IAST vs RASP Environment
-  hosts: juiceshop
+- name: IAST vs RASP Setup
+  hosts: all
   become: true
-
   vars:
     app_dir: /opt/app
 
-  vars_files:
-    - secrets.yml
-
   tasks:
     - name: Install Docker
-      shell: |
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-        sh /tmp/get-docker.sh
-        usermod -aG docker ubuntu
+      shell: curl -fsSL https://get.docker.com | sh && usermod -aG docker ubuntu
       args:
         creates: /usr/bin/docker
 
+    - name: Install jq
+      apt:
+        name: jq
+        state: present
+        update_cache: yes
+
     - name: Install DataDog
       shell: |
-        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+        DD_API_KEY={{ lookup('env', 'DD_API_KEY') }} \
+        DD_SITE={{ lookup('env', 'DD_SITE') | default('datadoghq.com') }} \
+        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
         creates: /etc/datadog-agent/datadog.yaml
 
-    - name: Configure DataDog
-      lineinfile:
+    - name: Configure DataDog APM
+      blockinfile:
         path: /etc/datadog-agent/datadog.yaml
-        line: "{{ item }}"
+        block: |
+          apm_config:
+            enabled: true
+            apm_non_local_traffic: true
+
+    - name: Create directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
       loop:
-        - "apm_config:"
-        - "  enabled: true"
-
-    - name: Create app directory
-      file:
-        path: "{{ app_dir }}"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Create results directory
-      file:
-        path: /var/lib/results
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+        - "{{ app_dir }}"
+        - /var/lib/results
+        - /opt/monitoring
 
     - name: Create Dockerfile
       copy:
         dest: "{{ app_dir }}/Dockerfile"
+        owner: ubuntu
         content: |
-          FROM node:22-slim AS builder
-          RUN apt-get update && apt-get install -y git python3 make g++
+          FROM node:22-slim AS build
+          RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /app
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git .
           RUN npm install --legacy-peer-deps && npm install @aikidosec/firewall dd-trace
+          RUN echo "import tracer from 'dd-trace'; tracer.init(); export default tracer;" > tracer.ts
+          RUN sed -i "1i import './tracer';" app.ts && sed -i "2i import '@aikidosec/firewall';" app.ts
           
           FROM node:22-slim
           WORKDIR /app
-          COPY --from=builder /app /app
+          COPY --from=build /app /app
           EXPOSE 3000
           CMD ["npm", "start"]
 
-    - name: Create compose file
+    - name: Create docker-compose.yml
       copy:
         dest: "{{ app_dir }}/docker-compose.yml"
+        owner: ubuntu
         content: |
           services:
             app:
@@ -76,88 +76,40 @@
                 DD_AGENT_HOST: 172.17.0.1
                 DD_APPSEC_ENABLED: "${DD_APPSEC:-false}"
                 DD_IAST_ENABLED: "${DD_IAST:-false}"
-                AIKIDO_TOKEN: "{{ aikido_token }}"
+                AIKIDO_TOKEN: "{{ lookup('env', 'AIKIDO_TOKEN') }}"
                 AIKIDO_BLOCK: "${AIKIDO_BLOCK:-false}"
 
-    - name: Create results dir
-      file:
-        path: /var/lib/results
-        state: directory
-        owner: ubuntu
-
-    - name: Create monitoring directory
-      file:
-        path: /opt/monitoring
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Create prometheus.yml
-      copy:
-        dest: /opt/monitoring/prometheus.yml
-        content: |
-          global:
-            scrape_interval: 5s
-          scrape_configs:
-            - job_name: 'pushgateway'
-              static_configs:
-                - targets: ['172.17.0.1:9091']
-
-    - name: Start monitoring stack
+    - name: Start monitoring
       shell: |
-        # Pushgateway
-        docker run -d --name pushgateway --restart unless-stopped \
-          -p 9091:9091 prom/pushgateway
-
-        # Prometheus
+        cat > /opt/monitoring/prometheus.yml << 'EOF'
+        global:
+          scrape_interval: 5s
+        scrape_configs:
+          - job_name: pushgateway
+            static_configs:
+              - targets: ['172.17.0.1:9091']
+        EOF
+        
+        docker rm -f pushgateway prometheus grafana 2>/dev/null || true
+        
+        docker run -d --name pushgateway --restart unless-stopped -p 9091:9091 prom/pushgateway
+        
         docker run -d --name prometheus --restart unless-stopped \
           -p 9090:9090 \
           -v /opt/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
           prom/prometheus
-
-        # Grafana
+        
         docker run -d --name grafana --restart unless-stopped \
           -p 3001:3000 \
           -e GF_SECURITY_ADMIN_PASSWORD=admin \
-          -e GF_INSTALL_PLUGINS=grafana-piechart-panel \
           grafana/grafana
-
+        
         sleep 15
-
-        # Configure Grafana
+        
         curl -X POST http://admin:admin@localhost:3001/api/datasources \
           -H "Content-Type: application/json" \
-          -d '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}'
-
+          -d '{"name":"Prometheus","type":"prometheus","url":"http://172.17.0.1:9090","access":"proxy","isDefault":true}' || true
+        
         curl -X POST http://admin:admin@localhost:3001/api/dashboards/db \
           -H "Content-Type: application/json" \
-          -d '{
-            "dashboard": {
-              "title": "IAST vs RASP",
-              "panels": [
-                {
-                  "id": 1,
-                  "title": "Blocking Rate %",
-                  "type": "gauge",
-                  "targets": [
-                    {"expr": "100 * iast_blocked / (iast_zap_alerts + 1)", "legendFormat": "IAST"},
-                    {"expr": "100 * rasp_blocked / (rasp_zap_alerts + 1)", "legendFormat": "RASP"}
-                  ],
-                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
-                },
-                {
-                  "id": 2,
-                  "title": "Attacks Blocked",
-                  "type": "stat",
-                  "targets": [
-                    {"expr": "iast_blocked", "legendFormat": "IAST"},
-                    {"expr": "rasp_blocked", "legendFormat": "RASP"}
-                  ],
-                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
-                }
-              ]
-            },
-            "overwrite": true
-          }'
-      ignore_errors: true
+          -d '{"dashboard":{"title":"IAST vs RASP","panels":[{"id":1,"title":"Blocking Rate","type":"gauge","targets":[{"expr":"100*iast_blocked/(iast_zap_alerts+1)","legendFormat":"IAST"},{"expr":"100*rasp_blocked/(rasp_zap_alerts+1)","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":0,"y":0}},{"id":2,"title":"Blocked","type":"stat","targets":[{"expr":"iast_blocked","legendFormat":"IAST"},{"expr":"rasp_blocked","legendFormat":"RASP"}],"gridPos":{"h":8,"w":12,"x":12,"y":0}}]},"overwrite":true}' || true
