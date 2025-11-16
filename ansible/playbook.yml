@@ -1,5 +1,5 @@
 ---
-- name: Configure EC2 for Juice Shop with DevSecOps Tools + Metrics Stack
+- name: Configure EC2 for Juice Shop with DevSecOps Tools + Monitoring
   hosts: juiceshop
   become: true
   gather_facts: true
@@ -9,7 +9,6 @@
     metrics_dir: /opt/security-metrics
     node_version: "22"
     prometheus_version: "2.48.0"
-    grafana_version: "10.2.2"
 
   vars_files:
     - secrets.yml
@@ -250,6 +249,14 @@
         state: present
         update_cache: yes
 
+    - name: Configure Grafana to run on port 3001
+      lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: '^;?http_port ='
+        line: 'http_port = 3001'
+        state: present
+      notify: Restart Grafana
+
     - name: Create Grafana provisioning directories
       file:
         path: "/etc/grafana/provisioning/{{ item }}"
@@ -305,14 +312,6 @@
         owner: grafana
         group: grafana
         mode: '0755'
-
-    - name: Configure Grafana to run on port 3001
-      lineinfile:
-        path: /etc/grafana/grafana.ini
-        regexp: '^;?http_port ='
-        line: 'http_port = 3001'
-        state: present
-      notify: Restart Grafana
 
     - name: Create IAST vs RASP Comparison Dashboard
       copy:
@@ -457,6 +456,22 @@
         group: ubuntu
         mode: '0755'
 
+    - name: Create ZAP results directory
+      file:
+        path: "{{ metrics_dir }}/zap-results"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create metrics data directory
+      file:
+        path: "{{ metrics_dir }}/data"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
     - name: Create Python virtual environment for metrics exporter
       command: python3 -m venv {{ metrics_dir }}/venv
       args:
@@ -518,7 +533,6 @@
                       'DD-APPLICATION-KEY': DATADOG_APP_KEY
                   }
                   
-                  # Query for security signals (IAST findings)
                   url = f'https://api.{DATADOG_SITE}/api/v2/security_monitoring/signals'
                   params = {
                       'filter[query]': 'service:juice-shop',
@@ -562,7 +576,6 @@
                       'Content-Type': 'application/json'
                   }
                   
-                  # Query for security events
                   url = 'https://app.aikido.dev/api/v1/events'
                   params = {'limit': 100}
                   
@@ -581,7 +594,6 @@
                           if blocked:
                               blocks[attack_type] += 1
                       
-                      # Update detection metrics
                       for (attack_type, severity), count in detections.items():
                           security_detections.labels(
                               tool='aikido_rasp',
@@ -589,7 +601,6 @@
                               severity=severity
                           )._value._value = count
                       
-                      # Update block metrics
                       for attack_type, count in blocks.items():
                           security_blocks.labels(
                               tool='aikido_rasp',
@@ -639,11 +650,9 @@
                       with open(metrics_file, 'r') as f:
                           data = json.load(f)
                       
-                      # Load phase information
                       if 'scan_phase' in data:
                           scan_phase.set(data['scan_phase'])
                       
-                      # Load response times
                       if 'response_times' in data:
                           for tool, time_ms in data['response_times'].items():
                               response_time.labels(tool=tool).set(time_ms)
@@ -662,11 +671,9 @@
               print("Metrics collection complete\n")
 
           if __name__ == '__main__':
-              # Start Prometheus metrics server
               start_http_server(9999)
               print("Security Metrics Exporter running on :9999")
               
-              # Collect metrics every 30 seconds
               while True:
                   try:
                       collect_all_metrics()
@@ -710,7 +717,7 @@
         daemon_reload: yes
 
     # =======================================================================
-    # APPLICATION SETUP
+    # APPLICATION SETUP (YOUR WORKING VERSION)
     # =======================================================================
     - name: Create application directory
       file:
@@ -730,17 +737,18 @@
       become: true
       become_user: ubuntu
 
-    - name: Ensure repo ownership
+    - name: Ensure repo ownership is ubuntu
       file:
         path: "{{ juice_shop_dir }}"
         owner: ubuntu
         group: ubuntu
         recurse: yes
 
-    - name: Create tracer.ts
+    - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
+          // tracer.ts
           import tracer from 'dd-trace';
           tracer.init();
           export default tracer;
@@ -748,79 +756,83 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile
+    - name: Create Dockerfile (YOUR WORKING VERSION)
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Optimized Multi-stage Dockerfile for Juice Shop with Security Tools
+          # Multi-stage Dockerfile for Juice Shop with Security Tools
           FROM node:22-bookworm-slim AS builder
-          
-          # Install build dependencies
+
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
           WORKDIR /juice-shop
-          
+
           # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
-          # Copy security tool tracer first
-          COPY tracer.ts ./tracer.ts
-          
-          # Install production dependencies first (better caching)
-          COPY package*.json ./
-          RUN npm ci --only=production --ignore-scripts
-          
-          # Install dev dependencies and security tools
-          RUN npm install --save-dev typescript @types/node
+
+          # Install ALL dependencies (needed for TypeScript compilation)
+          RUN npm install
+
+          # Install security tools
           RUN npm install --save-exact @aikidosec/firewall dd-trace
-          
-          # Modify TypeScript source files BEFORE compilation
+
+          # Copy tracer
+          COPY tracer.ts ./tracer.ts
+
+          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
+          # 1. Modify app.ts (main entry point)
           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
-              sed -i "1i import './tracer' // DataDog APM" server.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
           
+          # 2. Also modify server.ts (in case it's loaded independently)
+          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
+
           # Verify modifications
           RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
-          
-          # Compile TypeScript to JavaScript
+          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+
+          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
+          # This mimics what happens before running locally
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
           
           # Verify build directory was created
           RUN ls -la build/ && \
-              echo "=== Checking for security instrumentation in build/app.js ===" && \
-              grep -E "tracer|aikido" build/app.js | head -5 || true
-          
-          # Build frontend (Angular) - this is the slowest part
-          RUN cd frontend && \
-              npm ci --legacy-peer-deps --prefer-offline && \
+              echo "=== build/app.js (first 30 lines) ===" && \
+              head -30 build/app.js && \
+              echo "=== Checking for tracer/aikido in build/app.js ===" && \
+              grep -E "tracer|aikido" build/app.js | head -5
+
+          # Build frontend (Angular)
+          RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
-          
-          # --- Production stage (smaller, faster) ---
+
+          # --- Production stage ---
           FROM node:22-bookworm-slim
           
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
           RUN groupadd -r juiceshop && useradd -r -g juiceshop juiceshop
           
           WORKDIR /juice-shop
-          
+
           # Copy entire application including compiled build/ directory
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
-          
+
           # Ensure directories exist with correct permissions
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
-          
+
           USER juiceshop
           EXPOSE 3000
-          
+
           HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
             CMD curl -f http://localhost:3000/rest/admin/application-version || exit 1
-          
+
           ENV NODE_ENV=production \
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
           
-          # Run compiled JavaScript (build/app.js has the instrumentation)
+          # ✅ This matches your local command: npm start (which runs: node build/app)
+          # The compiled build/app.js will have the instrumentation
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
@@ -839,23 +851,33 @@
               ports:
                 - "3000:3000"
               environment:
+                # Node environment
                 NODE_ENV: production
+                
+                # DataDog APM Configuration
                 DD_ENV: dev
                 DD_SERVICE: juice-shop
                 DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
+                
+                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
                 DD_PROFILING_ENABLED: "true"
                 DD_RUNTIME_METRICS_ENABLED: "true"
                 DD_DATA_STREAMS_ENABLED: "true"
                 DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
+                
+                # DataDog Security (AppSec & IAST)
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
+                
+                # Aikido Configuration
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
                 AIKIDO_BLOCK: "true"
                 AIKIDO_DEBUG: "true"
+                
               env_file:
                 - .env
               extra_hosts:
@@ -875,13 +897,16 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create .env file
+    - name: Create .env file with secrets
       copy:
         dest: "{{ juice_shop_dir }}/.env"
         content: |
+          # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
           AIKIDO_BLOCK=true
           AIKIDO_DEBUG=true
+          
+          # DataDog Configuration
           DD_ENV=dev
           DD_VERSION=latest
         owner: ubuntu
@@ -889,12 +914,125 @@
         mode: '0600'
       no_log: true
 
-    - name: Create ZAP results directory
-      file:
-        path: /opt/security-metrics/zap-results
-        state: directory
-        owner: ubuntu
-        group: ubuntu
+    - name: Create deploy.sh
+      copy:
+        dest: "{{ juice_shop_dir }}/deploy.sh"
+        content: |
+          #!/bin/bash
+          set -e
+          cd "{{ juice_shop_dir }}"
+          
+          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
+          
+          # Stop existing containers
+          docker compose down || true
+          
+          # Remove old images
+          docker rmi juice-shop-secure:latest 2>/dev/null || true
+          
+          # Build with progress output
+          echo "📦 Building Docker image (this includes TypeScript compilation)..."
+          docker compose build --no-cache --progress=plain
+          
+          # Start containers
+          echo "▶️  Starting containers..."
+          docker compose up -d
+          
+          # Wait for container to be healthy
+          echo "⏳ Waiting for application to start..."
+          sleep 45
+          
+          # Verify deployment
+          if docker ps | grep -q juice-shop; then
+            echo "✅ Container is running"
+            
+            # Check instrumentation in COMPILED code
+            echo ""
+            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
+            echo "======================================"
+            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
+            
+            # Check logs
+            echo ""
+            echo "📊 Application Logs:"
+            docker logs juice-shop 2>&1 | tail -30
+            
+            # Test application
+            if curl -f -s http://localhost:3000 > /dev/null; then
+              echo ""
+              echo "✅ Application is accessible at http://localhost:3000"
+              echo "✅ Deployment successful!"
+              echo ""
+              echo "🔍 Generate traffic to see traces in DataDog:"
+              echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; done"
+            else
+              echo "⚠️  Application not responding yet (may need more time)"
+            fi
+          else
+            echo "❌ Deployment failed - container not running"
+            docker compose logs
+            exit 1
+          fi
+        mode: '0755'
+
+    - name: Create verification script
+      copy:
+        dest: "{{ juice_shop_dir }}/verify-instrumentation.sh"
+        content: |
+          #!/bin/bash
+          echo "🔍 Security Instrumentation Verification"
+          echo "========================================"
+          
+          echo ""
+          echo "ℹ️  Juice Shop compiles TypeScript then runs: node build/app"
+          
+          echo ""
+          echo "📋 Container Status:"
+          docker ps | grep juice-shop || echo "❌ Container not running"
+          
+          echo ""
+          echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
+          docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
+          
+          echo ""
+          echo "🔧 Compiled build/app.js (what actually runs - first 40 lines):"
+          docker exec juice-shop head -40 build/app.js 2>/dev/null || echo "⚠️  Could not read build/app.js"
+          
+          echo ""
+          echo "🔍 Check for instrumentation in compiled code:"
+          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found in build/app.js"
+          
+          echo ""
+          echo "📄 Tracer.ts content:"
+          docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
+          
+          echo ""
+          echo "📄 Compiled build/tracer.js:"
+          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
+          
+          echo ""
+          echo "🔧 Environment Variables:"
+          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+          
+          echo ""
+          echo "📊 Application Startup Logs (looking for AIKIDO and DataDog):"
+          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
+          
+          echo ""
+          echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
+          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
+          
+          echo ""
+          echo "📡 DataDog Agent Status on Host:"
+          sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo to see agent status"
+          
+          echo ""
+          echo "🚀 Generate traffic to trigger instrumentation:"
+          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          
+          echo ""
+          echo "📊 After generating traffic, check for trace activity:"
+          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
         mode: '0755'
 
   handlers:
