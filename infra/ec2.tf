@@ -29,6 +29,22 @@ resource "aws_security_group" "juice_sg" {
   }
 
   ingress {
+    description = "Juice Shop Application"
+    from_port   = 3001
+    to_port     = 3001
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Juice Shop Application"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
     description = "DataDog APM / Trace Agent"
     from_port   = 8126
     to_port     = 8126
