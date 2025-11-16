@@ -19,16 +19,19 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/key
           chmod 600 ~/.ssh/key
+          ssh-keyscan ${{ env.EC2_IP }} >> ~/.ssh/known_hosts
 
       - name: Run Ansible
         run: |
           pip install ansible
           cd ansible
-          ansible-playbook -i "${{ env.EC2_IP }}," playbook.yml -u ubuntu --private-key ~/.ssh/key
+          ansible-playbook -i "${{ env.EC2_IP }}," playbook.yml \
+            -u ubuntu --private-key ~/.ssh/key
         env:
           DD_API_KEY: ${{ secrets.DATADOG_API_KEY }}
           DD_SITE: ${{ secrets.DATADOG_SITE }}
           AIKIDO_TOKEN: ${{ secrets.ZEN_FIREWALL_TOKEN }}
+          ANSIBLE_HOST_KEY_CHECKING: "False"
 
   test-iast:
     needs: setup
