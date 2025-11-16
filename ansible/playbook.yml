@@ -317,6 +317,7 @@
       copy:
         dest: /var/lib/grafana/dashboards/security-comparison.json
         content: |
+          {% raw %}
           {
             "dashboard": {
               "title": "DevSecOps Security Tools Comparison (SAST/DAST/IAST/RASP)",
@@ -625,6 +626,7 @@
               "editable": true
             }
           }
+          {% endraw %}
         owner: grafana
         group: grafana
         mode: '0644'
