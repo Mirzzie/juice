@@ -1,5 +1,5 @@
 ---
-- name: Configure EC2 for Juice Shop with DevSecOps Tools + Monitoring
+- name: Configure EC2 for Juice Shop with DevSecOps Tools + Two-Scenario Comparison
   hosts: juiceshop
   become: true
   gather_facts: true
@@ -313,320 +313,10 @@
         group: grafana
         mode: '0755'
 
-    - name: Create Enhanced SAST/DAST/IAST/RASP Comparison Dashboard
+    - name: Copy Enhanced Thesis Comparison Dashboard
       copy:
-        dest: /var/lib/grafana/dashboards/security-comparison.json
-        content: |
-          {% raw %}
-          {
-            "dashboard": {
-              "title": "DevSecOps Security Tools Comparison (SAST/DAST/IAST/RASP)",
-              "tags": ["security", "devsecops", "sast", "dast", "iast", "rasp"],
-              "timezone": "browser",
-              "refresh": "30s",
-              "panels": [
-                {
-                  "id": 1,
-                  "title": "📊 Overall Security Findings",
-                  "type": "bargauge",
-                  "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
-                  "targets": [
-                    {
-                      "expr": "sum(sast_vulnerabilities_found{rule_id=\"total\"})",
-                      "legendFormat": "SAST (Semgrep) - Code Analysis"
-                    },
-                    {
-                      "expr": "sum(dast_vulnerabilities_found{vuln_name=\"total\", scan_type=\"full\"})",
-                      "legendFormat": "DAST (ZAP) - Dynamic Testing"
-                    },
-                    {
-                      "expr": "sum(security_detections_total{tool=\"datadog_iast\"})",
-                      "legendFormat": "IAST (DataDog) - Runtime Detection"
-                    },
-                    {
-                      "expr": "sum(security_detections_total{tool=\"aikido_rasp\"})",
-                      "legendFormat": "RASP (Aikido) - Runtime Detection"
-                    }
-                  ],
-                  "options": {
-                    "orientation": "horizontal",
-                    "displayMode": "gradient",
-                    "showUnfilled": true
-                  },
-                  "fieldConfig": {
-                    "defaults": {
-                      "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                          {"value": 0, "color": "green"},
-                          {"value": 10, "color": "yellow"},
-                          {"value": 25, "color": "orange"},
-                          {"value": 50, "color": "red"}
-                        ]
-                      },
-                      "unit": "short"
-                    }
-                  }
-                },
-                {
-                  "id": 2,
-                  "title": "🛡️ RASP Attack Blocking (Real-time Protection)",
-                  "type": "stat",
-                  "gridPos": {"h": 6, "w": 12, "x": 0, "y": 8},
-                  "targets": [
-                    {
-                      "expr": "sum(security_blocks_total{tool=\"aikido_rasp\"})",
-                      "legendFormat": "Attacks Blocked"
-                    }
-                  ],
-                  "options": {
-                    "colorMode": "background",
-                    "graphMode": "area",
-                    "justifyMode": "center"
-                  },
-                  "fieldConfig": {
-                    "defaults": {
-                      "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                          {"value": 0, "color": "red"},
-                          {"value": 10, "color": "orange"},
-                          {"value": 30, "color": "green"}
-                        ]
-                      },
-                      "unit": "short"
-                    }
-                  }
-                },
-                {
-                  "id": 3,
-                  "title": "🎯 RASP Block Rate (%)",
-                  "type": "gauge",
-                  "gridPos": {"h": 6, "w": 12, "x": 12, "y": 8},
-                  "targets": [
-                    {
-                      "expr": "(sum(security_blocks_total{tool=\"aikido_rasp\"}) / sum(security_detections_total{tool=\"aikido_rasp\"})) * 100",
-                      "legendFormat": "Block Rate"
-                    }
-                  ],
-                  "options": {
-                    "showThresholdLabels": true,
-                    "showThresholdMarkers": true
-                  },
-                  "fieldConfig": {
-                    "defaults": {
-                      "thresholds": {
-                        "mode": "absolute",
-                        "steps": [
-                          {"value": 0, "color": "red"},
-                          {"value": 50, "color": "yellow"},
-                          {"value": 75, "color": "green"}
-                        ]
-                      },
-                      "unit": "percent",
-                      "min": 0,
-                      "max": 100
-                    }
-                  }
-                },
-                {
-                  "id": 4,
-                  "title": "🔍 SAST Findings (Semgrep) - By Severity",
-                  "type": "piechart",
-                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
-                  "targets": [
-                    {
-                      "expr": "sum by (severity) (sast_vulnerabilities_found{rule_id=\"total\"})",
-                      "legendFormat": "{{severity}}"
-                    }
-                  ]
-                },
-                {
-                  "id": 5,
-                  "title": "🕷️ DAST Vulnerabilities (ZAP) - By Severity",
-                  "type": "piechart",
-                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
-                  "targets": [
-                    {
-                      "expr": "sum by (severity) (dast_vulnerabilities_found{vuln_name=\"total\", scan_type=\"full\"})",
-                      "legendFormat": "{{severity}}"
-                    }
-                  ]
-                },
-                {
-                  "id": 6,
-                  "title": "📈 IAST vs RASP Detection Timeline",
-                  "type": "timeseries",
-                  "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
-                  "targets": [
-                    {
-                      "expr": "rate(security_detections_total{tool=\"datadog_iast\"}[5m])",
-                      "legendFormat": "IAST Detection Rate (per min)"
-                    },
-                    {
-                      "expr": "rate(security_detections_total{tool=\"aikido_rasp\"}[5m])",
-                      "legendFormat": "RASP Detection Rate (per min)"
-                    },
-                    {
-                      "expr": "rate(security_blocks_total{tool=\"aikido_rasp\"}[5m])",
-                      "legendFormat": "RASP Block Rate (per min)"
-                    }
-                  ],
-                  "fieldConfig": {
-                    "defaults": {
-                      "custom": {
-                        "drawStyle": "line",
-                        "lineInterpolation": "smooth",
-                        "fillOpacity": 10
-                      }
-                    }
-                  }
-                },
-                {
-                  "id": 7,
-                  "title": "🔬 IAST Detections by Vulnerability Type",
-                  "type": "bargauge",
-                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
-                  "targets": [
-                    {
-                      "expr": "sum by (vuln_type) (security_detections_total{tool=\"datadog_iast\"})",
-                      "legendFormat": "{{vuln_type}}"
-                    }
-                  ],
-                  "options": {
-                    "orientation": "horizontal"
-                  }
-                },
-                {
-                  "id": 8,
-                  "title": "🛡️ RASP Detections by Attack Type",
-                  "type": "bargauge",
-                  "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
-                  "targets": [
-                    {
-                      "expr": "sum by (vuln_type) (security_detections_total{tool=\"aikido_rasp\"})",
-                      "legendFormat": "{{vuln_type}}"
-                    }
-                  ],
-                  "options": {
-                    "orientation": "horizontal"
-                  }
-                },
-                {
-                  "id": 9,
-                  "title": "📋 Top 10 DAST Vulnerabilities (Detailed)",
-                  "type": "table",
-                  "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
-                  "targets": [
-                    {
-                      "expr": "topk(10, dast_vulnerabilities_found{vuln_name!=\"total\", scan_type=\"full\"})",
-                      "format": "table",
-                      "instant": true
-                    }
-                  ],
-                  "transformations": [
-                    {
-                      "id": "organize",
-                      "options": {
-                        "excludeByName": {"Time": true, "__name__": true, "scan_type": false},
-                        "renameByName": {
-                          "vuln_name": "Vulnerability",
-                          "severity": "Severity",
-                          "confidence": "Confidence",
-                          "Value": "Instances Found"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": 10,
-                  "title": "⚡ Current Scan Phase",
-                  "type": "stat",
-                  "gridPos": {"h": 4, "w": 8, "x": 0, "y": 48},
-                  "targets": [
-                    {
-                      "expr": "current_scan_phase",
-                      "legendFormat": "Phase"
-                    }
-                  ],
-                  "options": {
-                    "colorMode": "background"
-                  },
-                  "fieldConfig": {
-                    "defaults": {
-                      "mappings": [
-                        {"type": "value", "value": 0, "text": "Idle"},
-                        {"type": "value", "value": 1, "text": "Phase 1: Baseline"},
-                        {"type": "value", "value": 2, "text": "Phase 2: Full Scan"},
-                        {"type": "value", "value": 3, "text": "Phase 3: Attacks"},
-                        {"type": "value", "value": 4, "text": "Phase 4: Analysis"}
-                      ]
-                    }
-                  }
-                },
-                {
-                  "id": 11,
-                  "title": "🔄 DAST: Baseline vs Full Scan",
-                  "type": "bargauge",
-                  "gridPos": {"h": 4, "w": 16, "x": 8, "y": 48},
-                  "targets": [
-                    {
-                      "expr": "sum(dast_vulnerabilities_found{scan_type=\"baseline\", vuln_name=\"total\"})",
-                      "legendFormat": "Baseline Scan"
-                    },
-                    {
-                      "expr": "sum(dast_vulnerabilities_found{scan_type=\"full\", vuln_name=\"total\"})",
-                      "legendFormat": "Full Scan"
-                    }
-                  ]
-                },
-                {
-                  "id": 12,
-                  "title": "🎯 Key Thesis Metrics",
-                  "type": "stat",
-                  "gridPos": {"h": 6, "w": 24, "x": 0, "y": 52},
-                  "targets": [
-                    {
-                      "expr": "sum(sast_vulnerabilities_found{rule_id=\"total\", severity=\"ERROR\"})",
-                      "legendFormat": "SAST Critical"
-                    },
-                    {
-                      "expr": "sum(dast_vulnerabilities_found{severity=\"High\", vuln_name=\"total\"})",
-                      "legendFormat": "DAST High Risk"
-                    },
-                    {
-                      "expr": "sum(security_detections_total{tool=\"datadog_iast\"})",
-                      "legendFormat": "IAST Total"
-                    },
-                    {
-                      "expr": "sum(security_detections_total{tool=\"aikido_rasp\"})",
-                      "legendFormat": "RASP Detected"
-                    },
-                    {
-                      "expr": "sum(security_blocks_total{tool=\"aikido_rasp\"})",
-                      "legendFormat": "RASP Blocked"
-                    },
-                    {
-                      "expr": "(sum(security_blocks_total{tool=\"aikido_rasp\"}) / sum(security_detections_total{tool=\"aikido_rasp\"})) * 100",
-                      "legendFormat": "RASP Block %"
-                    }
-                  ],
-                  "options": {
-                    "colorMode": "value",
-                    "graphMode": "none",
-                    "justifyMode": "auto",
-                    "orientation": "horizontal"
-                  }
-                }
-              ],
-              "schemaVersion": 36,
-              "version": 1,
-              "uid": "security-comparison",
-              "editable": true
-            }
-          }
-          {% endraw %}
+        src: files/grafana-thesis-dashboard.json
+        dest: /var/lib/grafana/dashboards/thesis-comparison.json
         owner: grafana
         group: grafana
         mode: '0644'
@@ -639,31 +329,19 @@
         state: started
 
     # =======================================================================
-    # METRICS EXPORTER SETUP
+    # METRICS EXPORTER SETUP (ENHANCED FOR TWO-SCENARIO TESTING)
     # =======================================================================
-    - name: Create metrics directory
+    - name: Create metrics directory structure
       file:
-        path: "{{ metrics_dir }}"
+        path: "{{ item }}"
         state: directory
         owner: ubuntu
         group: ubuntu
         mode: '0755'
-
-    - name: Create ZAP results directory
-      file:
-        path: "{{ metrics_dir }}/zap-results"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Create metrics data directory
-      file:
-        path: "{{ metrics_dir }}/data"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
+      loop:
+        - "{{ metrics_dir }}"
+        - "{{ metrics_dir }}/zap-results"
+        - "{{ metrics_dir }}/data"
 
     - name: Create Python virtual environment for metrics exporter
       command: python3 -m venv {{ metrics_dir }}/venv
@@ -680,411 +358,10 @@
         virtualenv: "{{ metrics_dir }}/venv"
       become_user: ubuntu
 
-    - name: Create Enhanced Metrics Exporter Script
+    - name: Copy Enhanced Metrics Exporter Script (Two-Scenario Support)
       copy:
+        src: files/enhanced_metrics_exporter.py
         dest: "{{ metrics_dir }}/metrics_exporter.py"
-        content: |
-          #!/usr/bin/env python3
-          """
-          Enhanced Security Metrics Exporter for Prometheus
-          Collects metrics from Semgrep SAST, OWASP ZAP DAST, DataDog IAST, and Aikido RASP
-          """
-          import json
-          import os
-          import time
-          import traceback
-          from collections import defaultdict
-          from prometheus_client import start_http_server, Gauge, Counter
-          import requests
-
-          # ============= PROMETHEUS METRICS DEFINITIONS =============
-          
-          # SAST Metrics (Semgrep)
-          sast_vulnerabilities = Gauge(
-              'sast_vulnerabilities_found', 
-              'SAST vulnerabilities from Semgrep', 
-              ['severity', 'rule_id', 'language']
-          )
-          
-          # DAST Metrics (OWASP ZAP)
-          dast_vulnerabilities = Gauge(
-              'dast_vulnerabilities_found', 
-              'DAST vulnerabilities from ZAP', 
-              ['severity', 'scan_type', 'vuln_name', 'confidence']
-          )
-          
-          # IAST/RASP Metrics
-          security_detections = Counter(
-              'security_detections_total', 
-              'Total security detections', 
-              ['tool', 'vuln_type', 'severity']
-          )
-          
-          security_blocks = Counter(
-              'security_blocks_total', 
-              'Total attack blocks (RASP only)', 
-              ['tool', 'attack_type']
-          )
-          
-          response_time = Gauge(
-              'security_response_time_ms', 
-              'Security tool response time impact', 
-              ['tool']
-          )
-          
-          scan_phase = Gauge(
-              'current_scan_phase', 
-              'Current DAST scan phase (0=idle, 1=baseline, 2=full, 3=attacks, 4=analysis)'
-          )
-
-          # ============= CONFIGURATION =============
-          
-          DATADOG_API_KEY = os.environ.get('DD_API_KEY', '')
-          DATADOG_APP_KEY = os.environ.get('DD_APP_KEY', '')
-          DATADOG_SITE = os.environ.get('DD_SITE', 'us5.datadoghq.com')
-          AIKIDO_TOKEN = os.environ.get('AIKIDO_TOKEN', '')
-          METRICS_DIR = '/opt/security-metrics/data'
-          ZAP_RESULTS_DIR = '/opt/security-metrics/zap-results'
-
-          os.makedirs(METRICS_DIR, exist_ok=True)
-          os.makedirs(ZAP_RESULTS_DIR, exist_ok=True)
-
-          # ============= SEMGREP SAST PARSER =============
-          
-          def parse_semgrep_results():
-              """Parse Semgrep SAST results"""
-              try:
-                  semgrep_file = os.path.join(METRICS_DIR, 'semgrep-results.json')
-                  if not os.path.exists(semgrep_file):
-                      print(f"⚠️  Semgrep results not found at {semgrep_file}")
-                      return
-                  
-                  print(f"📄 Parsing Semgrep SAST results...")
-                  with open(semgrep_file, 'r') as f:
-                      data = json.load(f)
-                  
-                  # Clear old metrics
-                  sast_vulnerabilities._metrics.clear()
-                  
-                  results = data.get('results', [])
-                  severity_counts = defaultdict(int)
-                  
-                  for finding in results:
-                      extra = finding.get('extra', {})
-                      severity = extra.get('severity', 'INFO').upper()
-                      rule_id = finding.get('check_id', 'unknown').split('.')[-1]  # Get short name
-                      
-                      # Get language from path
-                      path = finding.get('path', '')
-                      if path.endswith('.js') or path.endswith('.ts'):
-                          language = 'javascript'
-                      elif path.endswith('.py'):
-                          language = 'python'
-                      elif path.endswith('.java'):
-                          language = 'java'
-                      else:
-                          language = 'other'
-                      
-                      severity_counts[severity] += 1
-                      
-                      # Set detailed metric
-                      sast_vulnerabilities.labels(
-                          severity=severity,
-                          rule_id=rule_id,
-                          language=language
-                      ).set(1)
-                  
-                  # Set aggregate counts
-                  for severity, count in severity_counts.items():
-                      sast_vulnerabilities.labels(
-                          severity=severity,
-                          rule_id='total',
-                          language='all'
-                      ).set(count)
-                  
-                  print(f"✅ SAST (Semgrep): {len(results)} findings")
-                  print(f"   - ERROR: {severity_counts.get('ERROR', 0)}")
-                  print(f"   - WARNING: {severity_counts.get('WARNING', 0)}")
-                  print(f"   - INFO: {severity_counts.get('INFO', 0)}")
-                  
-              except Exception as e:
-                  print(f"❌ Error parsing Semgrep results: {e}")
-                  traceback.print_exc()
-
-          # ============= OWASP ZAP DAST PARSER =============
-          
-          def parse_zap_results():
-              """Parse OWASP ZAP DAST scan results"""
-              try:
-                  # Clear old metrics
-                  dast_vulnerabilities._metrics.clear()
-                  
-                  for scan_type in ['baseline', 'full']:
-                      json_file = os.path.join(ZAP_RESULTS_DIR, f'{scan_type}_report.json')
-                      if not os.path.exists(json_file):
-                          print(f"⚠️  {scan_type} scan results not found at {json_file}")
-                          continue
-                      
-                      print(f"📄 Parsing ZAP {scan_type} scan results...")
-                      with open(json_file, 'r') as f:
-                          data = json.load(f)
-                      
-                      # Handle both ZAP JSON formats
-                      site = data.get('site', [{}])
-                      if isinstance(site, list):
-                          site = site[0] if len(site) > 0 else {}
-                      
-                      alerts = site.get('alerts', [])
-                      
-                      if not alerts:
-                          print(f"⚠️  No alerts found in {scan_type} scan")
-                          continue
-                      
-                      severity_counts = defaultdict(int)
-                      
-                      for alert in alerts:
-                          # Parse risk level
-                          risk_desc = alert.get('riskdesc', 'Unknown')
-                          risk = risk_desc.split()[0] if ' ' in risk_desc else risk_desc
-                          
-                          # Get vulnerability details
-                          vuln_name = alert.get('name', 'Unknown')
-                          confidence = alert.get('confidence', 'Unknown')
-                          instances = alert.get('instances', [])
-                          instance_count = len(instances)
-                          
-                          severity_counts[risk] += instance_count
-                          
-                          # Set detailed metric for each vulnerability
-                          dast_vulnerabilities.labels(
-                              severity=risk,
-                              scan_type=scan_type,
-                              vuln_name=vuln_name,
-                              confidence=confidence
-                          ).set(instance_count)
-                      
-                      # Set aggregate totals
-                      for severity, count in severity_counts.items():
-                          dast_vulnerabilities.labels(
-                              severity=severity,
-                              scan_type=scan_type,
-                              vuln_name='total',
-                              confidence='all'
-                          ).set(count)
-                      
-                      total = sum(severity_counts.values())
-                      print(f"✅ DAST {scan_type.upper()}: {total} vulnerabilities")
-                      print(f"   - High: {severity_counts.get('High', 0)}")
-                      print(f"   - Medium: {severity_counts.get('Medium', 0)}")
-                      print(f"   - Low: {severity_counts.get('Low', 0)}")
-                      print(f"   - Info: {severity_counts.get('Informational', 0)}")
-                  
-              except Exception as e:
-                  print(f"❌ Error parsing ZAP results: {e}")
-                  traceback.print_exc()
-
-          # ============= DATADOG IAST INTEGRATION =============
-          
-          def fetch_datadog_iast_metrics():
-              """Fetch IAST vulnerabilities from DataDog API"""
-              if not DATADOG_API_KEY or not DATADOG_APP_KEY:
-                  print("⚠️  DataDog credentials not configured")
-                  return
-
-              try:
-                  headers = {
-                      'DD-API-KEY': DATADOG_API_KEY,
-                      'DD-APPLICATION-KEY': DATADOG_APP_KEY,
-                      'Content-Type': 'application/json'
-                  }
-                  
-                  # Query security signals for juice-shop service
-                  url = f'https://api.{DATADOG_SITE}/api/v2/security_monitoring/signals'
-                  params = {
-                      'filter[query]': 'service:juice-shop',
-                      'filter[from]': int((time.time() - 3600) * 1000),  # Last hour
-                      'page[limit]': 100
-                  }
-                  
-                  response = requests.get(url, headers=headers, params=params, timeout=15)
-                  
-                  if response.status_code == 200:
-                      data = response.json()
-                      signals = data.get('data', [])
-                      detections = defaultdict(int)
-                      
-                      for signal in signals:
-                          attributes = signal.get('attributes', {})
-                          rule = attributes.get('rule', {})
-                          vuln_type = rule.get('name', 'unknown').lower().replace(' ', '_')
-                          severity = attributes.get('severity', 'unknown')
-                          
-                          detections[(vuln_type, severity)] += 1
-                      
-                      # Update metrics
-                      for (vuln_type, severity), count in detections.items():
-                          security_detections.labels(
-                              tool='datadog_iast',
-                              vuln_type=vuln_type,
-                              severity=severity
-                          )._value._value = count
-                      
-                      print(f"✅ DataDog IAST: {len(detections)} vulnerability types, {sum(detections.values())} total detections")
-                      
-                  elif response.status_code == 403:
-                      print(f"❌ DataDog API authentication failed - check your API keys")
-                  else:
-                      print(f"⚠️  DataDog API returned status {response.status_code}")
-                      print(f"Response: {response.text[:200]}")
-                      
-              except requests.exceptions.Timeout:
-                  print(f"⚠️  DataDog API request timed out")
-              except Exception as e:
-                  print(f"❌ Error fetching DataDog metrics: {e}")
-
-          # ============= AIKIDO RASP INTEGRATION =============
-          
-          def fetch_aikido_rasp_metrics():
-              """Fetch RASP detections and blocks from Aikido API"""
-              if not AIKIDO_TOKEN:
-                  print("⚠️  Aikido token not configured")
-                  return
-
-              try:
-                  headers = {
-                      'Authorization': f'Bearer {AIKIDO_TOKEN}',
-                      'Content-Type': 'application/json'
-                  }
-                  
-                  # Try to fetch events/attacks from Aikido
-                  url = 'https://app.aikido.dev/api/v1/runtime/events'
-                  params = {
-                      'limit': 100,
-                      'from': int((time.time() - 3600) * 1000)  # Last hour
-                  }
-                  
-                  response = requests.get(url, headers=headers, params=params, timeout=15)
-                  
-                  if response.status_code == 200:
-                      data = response.json()
-                      events = data.get('events', data.get('data', []))
-                      
-                      detections = defaultdict(int)
-                      blocks = defaultdict(int)
-                      
-                      for event in events:
-                          attack_type = event.get('type', event.get('attack_type', 'unknown'))
-                          severity = event.get('severity', 'unknown')
-                          blocked = event.get('blocked', event.get('was_blocked', False))
-                          
-                          detections[(attack_type, severity)] += 1
-                          if blocked:
-                              blocks[attack_type] += 1
-                      
-                      # Update detection metrics
-                      for (attack_type, severity), count in detections.items():
-                          security_detections.labels(
-                              tool='aikido_rasp',
-                              vuln_type=attack_type,
-                              severity=severity
-                          )._value._value = count
-                      
-                      # Update block metrics
-                      for attack_type, count in blocks.items():
-                          security_blocks.labels(
-                              tool='aikido_rasp',
-                              attack_type=attack_type
-                          )._value._value = count
-                      
-                      total_detections = sum(detections.values())
-                      total_blocks = sum(blocks.values())
-                      block_rate = (total_blocks / total_detections * 100) if total_detections > 0 else 0
-                      
-                      print(f"✅ Aikido RASP: {total_detections} detections, {total_blocks} blocks ({block_rate:.1f}% block rate)")
-                      
-                  elif response.status_code == 401 or response.status_code == 403:
-                      print(f"❌ Aikido API authentication failed - check your token")
-                  else:
-                      print(f"⚠️  Aikido API returned status {response.status_code}")
-                      print(f"Response: {response.text[:200]}")
-                      
-              except requests.exceptions.Timeout:
-                  print(f"⚠️  Aikido API request timed out")
-              except Exception as e:
-                  print(f"❌ Error fetching Aikido metrics: {e}")
-
-          # ============= MANUAL METRICS LOADER =============
-          
-          def load_manual_metrics():
-              """Load manually recorded metrics from JSON files"""
-              try:
-                  metrics_file = os.path.join(METRICS_DIR, 'manual_metrics.json')
-                  if os.path.exists(metrics_file):
-                      with open(metrics_file, 'r') as f:
-                          data = json.load(f)
-                      
-                      if 'scan_phase' in data:
-                          scan_phase.set(data['scan_phase'])
-                      
-                      if 'response_times' in data:
-                          for tool, time_ms in data['response_times'].items():
-                              response_time.labels(tool=tool).set(time_ms)
-                      
-                      print("✅ Loaded manual metrics")
-              except Exception as e:
-                  print(f"⚠️  Error loading manual metrics: {e}")
-
-          # ============= MAIN COLLECTION LOOP =============
-          
-          def collect_all_metrics():
-              """Collect metrics from all sources"""
-              print(f"\n{'='*60}")
-              print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Collecting Security Metrics")
-              print(f"{'='*60}")
-              
-              parse_semgrep_results()      # SAST
-              parse_zap_results()          # DAST
-              fetch_datadog_iast_metrics() # IAST
-              fetch_aikido_rasp_metrics()  # RASP
-              load_manual_metrics()        # Manual metrics
-              
-              print(f"{'='*60}")
-              print("✅ Metrics collection cycle complete\n")
-
-          # ============= STARTUP =============
-          
-          if __name__ == '__main__':
-              print("\n" + "="*60)
-              print("🚀 Security Metrics Exporter Starting")
-              print("="*60)
-              print(f"📊 Metrics endpoint: http://localhost:9999/metrics")
-              print(f"📁 Metrics directory: {METRICS_DIR}")
-              print(f"🕷️  ZAP results directory: {ZAP_RESULTS_DIR}")
-              print(f"🔄 Collection interval: 30 seconds")
-              print("="*60 + "\n")
-              
-              # Start Prometheus HTTP server
-              start_http_server(9999)
-              print("✅ Prometheus exporter running on port 9999\n")
-              
-              # Initial collection
-              try:
-                  collect_all_metrics()
-              except Exception as e:
-                  print(f"❌ Error in initial collection: {e}")
-              
-              # Continuous collection loop
-              while True:
-                  try:
-                      time.sleep(30)
-                      collect_all_metrics()
-                  except KeyboardInterrupt:
-                      print("\n👋 Shutting down metrics exporter...")
-                      break
-                  except Exception as e:
-                      print(f"❌ Error in metrics collection: {e}")
-                      traceback.print_exc()
-                      time.sleep(30)
         owner: ubuntu
         group: ubuntu
         mode: '0755'
@@ -1094,7 +371,7 @@
         dest: /etc/systemd/system/security-metrics-exporter.service
         content: |
           [Unit]
-          Description=Security Metrics Exporter for Prometheus (SAST/DAST/IAST/RASP)
+          Description=Security Metrics Exporter for Prometheus (SAST/DAST/IAST/RASP - Two Scenarios)
           After=network.target prometheus.service
 
           [Service]
@@ -1122,6 +399,24 @@
         enabled: yes
         state: started
         daemon_reload: yes
+
+    - name: Initialize manual metrics file for scenario tracking
+      copy:
+        dest: "{{ metrics_dir }}/data/manual_metrics.json"
+        content: |
+          {
+            "scan_phase": 0,
+            "scenario": "unknown",
+            "scenario_id": 0,
+            "response_times": {
+              "datadog_iast": 0,
+              "aikido_rasp": 0
+            }
+          }
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+        force: no
 
     # =======================================================================
     # APPLICATION SETUP (YOUR WORKING VERSION)
@@ -1243,7 +538,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create docker-compose.yml
+    - name: Create docker-compose.yml (Base template - will be modified by pipeline)
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
@@ -1278,7 +573,7 @@
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
                 
-                # Aikido Configuration
+                # Aikido Configuration (will be modified per scenario)
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
                 AIKIDO_BLOCK: "true"
                 AIKIDO_DEBUG: "true"
@@ -1439,6 +734,58 @@
           echo "📊 After generating traffic, check for trace activity:"
           echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
         mode: '0755'
+
+    # =======================================================================
+    # POST-INSTALLATION VERIFICATION
+    # =======================================================================
+    - name: Wait for services to stabilize
+      pause:
+        seconds: 10
+
+    - name: Verify all services are running
+      shell: |
+        echo "=== Service Status Check ==="
+        systemctl is-active prometheus && echo "✅ Prometheus: Active" || echo "❌ Prometheus: Inactive"
+        systemctl is-active grafana-server && echo "✅ Grafana: Active" || echo "❌ Grafana: Inactive"
+        systemctl is-active security-metrics-exporter && echo "✅ Metrics Exporter: Active" || echo "❌ Metrics Exporter: Inactive"
+        systemctl is-active datadog-agent && echo "✅ DataDog Agent: Active" || echo "❌ DataDog Agent: Inactive"
+      register: service_check
+      changed_when: false
+
+    - name: Display service status
+      debug:
+        msg: "{{ service_check.stdout_lines }}"
+
+    - name: Display setup completion summary
+      debug:
+        msg:
+          - "=========================================="
+          - "✅ TWO-SCENARIO TESTING INFRASTRUCTURE READY"
+          - "=========================================="
+          - ""
+          - "📊 Monitoring Stack:"
+          - "  - Prometheus: http://{{ ansible_host }}:9090"
+          - "  - Grafana: http://{{ ansible_host }}:3001 (admin/admin)"
+          - "  - Metrics Exporter: http://{{ ansible_host }}:9999/metrics"
+          - ""
+          - "🔒 Security Tools:"
+          - "  - DataDog Agent: Active (APM + IAST)"
+          - "  - Aikido RASP: Ready (scenario-dependent)"
+          - ""
+          - "📈 Grafana Dashboards:"
+          - "  - Thesis Comparison: Two-scenario analysis"
+          - "  - Side-by-side IAST vs RASP comparison"
+          - ""
+          - "🎯 Ready for Two-Scenario Testing:"
+          - "  - Scenario 1: IAST Only (detection, no blocking)"
+          - "  - Scenario 2: IAST + RASP (detection + blocking)"
+          - ""
+          - "🚀 Next Steps:"
+          - "  1. Run GitHub Actions pipeline"
+          - "  2. Pipeline will deploy both scenarios"
+          - "  3. View results in Grafana dashboard"
+          - "  4. Export metrics for thesis analysis"
+          - "=========================================="
 
   handlers:
     - name: Restart DataDog Agent
