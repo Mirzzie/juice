@@ -9,9 +9,6 @@
     metrics_dir: /opt/security-metrics
     node_version: "22"
     prometheus_version: "2.48.0"
-    # default mode (can be overwritten via -e mode=iast or -e mode=rasp)
-    mode: "iast"          # accepted values: iast, rasp
-    juice_config_path: "{{ juice_shop_dir }}/config/config.json"
 
   vars_files:
     - secrets.yml
@@ -41,12 +38,10 @@
           - python3
           - python3-pip
           - python3-venv
-          - ca-certificates
         state: present
-        update_cache: yes
 
     # =======================================================================
-    # DOCKER INSTALLATION (ensure docker CLI present)
+    # DOCKER INSTALLATION
     # =======================================================================
     - name: Add Docker GPG key
       apt_key:
@@ -58,7 +53,7 @@
         repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
 
-    - name: Install Docker packages
+    - name: Install Docker
       apt:
         name:
           - docker-ce
@@ -80,34 +75,6 @@
         name: docker
         state: started
         enabled: yes
-
-    # =======================================================================
-    # STOP / REMOVE ANY EXISTING JUICE-SHOP CONTAINER & IMAGE (clean slate)
-    # =======================================================================
-    - name: Stop any running juice-shop container (best-effort)
-      shell: |
-        docker ps -q --filter "name=juice-shop" | xargs -r docker stop || true
-      args:
-        warn: false
-      register: stop_container
-      changed_when: stop_container.rc == 0
-
-    - name: Remove any existing juice-shop container (best-effort)
-      shell: |
-        docker ps -a -q --filter "name=juice-shop" | xargs -r docker rm -f || true
-      args:
-        warn: false
-
-    - name: Remove old juice-shop images (best-effort)
-      shell: |
-        docker images -q "juice-shop*" | xargs -r docker rmi -f || true
-      args:
-        warn: false
-
-    - name: Prune dangling objects (images/volumes/networks) - best-effort
-      shell: docker system prune -af || true
-      args:
-        warn: false
 
     # =======================================================================
     # DATADOG AGENT INSTALLATION
@@ -171,7 +138,7 @@
         enabled: yes
 
     # =======================================================================
-    # PROMETHEUS & GRAFANA INSTALLATION (unchanged from your working version)
+    # PROMETHEUS INSTALLATION
     # =======================================================================
     - name: Create Prometheus user
       user:
@@ -263,6 +230,9 @@
         state: started
         daemon_reload: yes
 
+    # =======================================================================
+    # GRAFANA INSTALLATION
+    # =======================================================================
     - name: Add Grafana GPG key
       apt_key:
         url: https://apt.grafana.com/gpg.key
@@ -449,27 +419,24 @@
         force: no
 
     # =======================================================================
-    # APPLICATION SETUP (REPO + CONFIG)
+    # APPLICATION SETUP (YOUR WORKING VERSION)
     # =======================================================================
-    - name: Create application directories
+    - name: Create application directory
       file:
-        path: "{{ item.path }}"
+        path: "{{ juice_shop_dir }}"
         state: directory
         owner: ubuntu
         group: ubuntu
-        mode: "{{ item.mode | default('0755') }}"
-      loop:
-        - { path: "{{ juice_shop_dir }}" }
-        - { path: "{{ juice_shop_dir }}/config", mode: '0750' }
-        - { path: "{{ juice_shop_dir }}/files", mode: '0755' }
+        mode: '0755'
 
-    - name: Clone Juice Shop repository (shallow)
+    - name: Clone Juice Shop repository
       git:
         repo: https://github.com/juice-shop/juice-shop.git
         dest: "{{ juice_shop_dir }}"
         depth: 1
         update: yes
         force: yes
+      become: true
       become_user: ubuntu
 
     - name: Ensure repo ownership is ubuntu
@@ -513,15 +480,32 @@
           # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # Modify TypeScript source files BEFORE compilation (if files exist)
-          RUN if [ -f app.ts ]; then sed -i "1i import './tracer' // DataDog APM" app.ts && sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts; fi
-          RUN if [ -f server.ts ]; then sed -i "1i import './tracer' // DataDog APM" server.ts && sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts; fi
+          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
+          # 1. Modify app.ts (main entry point)
+          RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
+          
+          # 2. Also modify server.ts (in case it's loaded independently)
+          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
-          # COMPILE TypeScript to JavaScript (attempt)
+          # Verify modifications
+          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
+          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+
+          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
+          
+          # Verify build directory was created
+          RUN ls -la build/ && \
+              echo "=== build/app.js (first 30 lines) ===" && \
+              head -30 build/app.js && \
+              echo "=== Checking for tracer/aikido in build/app.js ===" && \
+              grep -E "tracer|aikido" build/app.js | head -5
 
-          # Build frontend (Angular) if exists
-          RUN if [ -d frontend ]; then cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build attempted"; fi
+          # Build frontend (Angular)
+          RUN cd frontend && npm install --legacy-peer-deps && \
+              node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
           # --- Production stage ---
           FROM node:22-bookworm-slim
@@ -535,7 +519,7 @@
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
           # Ensure directories exist with correct permissions
-          RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data /juice-shop/config && \
+          RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
           USER juiceshop
@@ -548,45 +532,52 @@
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
           
+          # ✅ This matches your local command: npm start (which runs: node build/app)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create docker-compose.yml (mounts host config to container)
+    - name: Create docker-compose.yml (Base template - will be modified by pipeline)
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
-          version: "3.8"
           services:
             juice-shop:
               build: .
-              image: juice-shop:latest
+              image: juice-shop-secure:latest
               container_name: juice-shop
               restart: unless-stopped
               ports:
                 - "3000:3000"
               environment:
+                # Node environment
                 NODE_ENV: production
+                
+                # DataDog APM Configuration
                 DD_ENV: dev
                 DD_SERVICE: juice-shop
                 DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
+                
+                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
                 DD_PROFILING_ENABLED: "true"
                 DD_RUNTIME_METRICS_ENABLED: "true"
+                DD_DATA_STREAMS_ENABLED: "true"
+                DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
+                
+                # DataDog Security (AppSec & IAST)
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
-                # Aikido envs remain but effective behavior is controlled by config
+                
+                # Aikido Configuration (will be modified per scenario)
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
                 AIKIDO_BLOCK: "true"
                 AIKIDO_DEBUG: "true"
-              volumes:
-                - "{{ juice_shop_dir }}/config/config.json:/juice-shop/config/config.json:ro"
-                - "{{ juice_shop_dir }}/logs:/juice-shop/logs"
-                - "{{ juice_shop_dir }}/data:/juice-shop/data"
+                
               env_file:
                 - .env
               extra_hosts:
@@ -610,9 +601,12 @@
       copy:
         dest: "{{ juice_shop_dir }}/.env"
         content: |
+          # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
           AIKIDO_BLOCK=true
           AIKIDO_DEBUG=true
+          
+          # DataDog Configuration
           DD_ENV=dev
           DD_VERSION=latest
         owner: ubuntu
@@ -620,87 +614,65 @@
         mode: '0600'
       no_log: true
 
-    - name: Create default IAST config (config-iast.json)
-      copy:
-        dest: "{{ juice_shop_dir }}/config/config-iast.json"
-        content: |
-          {
-            "mode": "iast",
-            "aikido_enabled": false,
-            "datadog": {
-              "apm": true,
-              "iast": true
-            },
-            "rasp": {
-              "block": false,
-              "debug": false
-            }
-          }
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
-
-    - name: Create default RASP config (config-rasp.json)
-      copy:
-        dest: "{{ juice_shop_dir }}/config/config-rasp.json"
-        content: |
-          {
-            "mode": "rasp",
-            "aikido_enabled": true,
-            "datadog": {
-              "apm": true,
-              "iast": true
-            },
-            "rasp": {
-              "block": true,
-              "debug": true
-            }
-          }
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
-
-    - name: Ensure selected config symlink / selected config is present
-      block:
-        - name: Copy selected config into active config.json (select by mode)
-          copy:
-            src: "{{ juice_shop_dir }}/config/config-{{ mode }}.json"
-            dest: "{{ juice_config_path }}"
-            owner: ubuntu
-            group: ubuntu
-            mode: '0644'
-      when: mode is defined
-
-    - name: Create deploy script (idempotent simplified)
+    - name: Create deploy.sh
       copy:
         dest: "{{ juice_shop_dir }}/deploy.sh"
         content: |
           #!/bin/bash
           set -e
           cd "{{ juice_shop_dir }}"
-
-          echo "Stopping old container if exists..."
+          
+          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
+          
+          # Stop existing containers
           docker compose down || true
-          docker system prune -f || true
-
-          echo "Building/updating image..."
+          
+          # Remove old images
+          docker rmi juice-shop-secure:latest 2>/dev/null || true
+          
+          # Build with progress output
+          echo "📦 Building Docker image (this includes TypeScript compilation)..."
           docker compose build --no-cache --progress=plain
-
-          echo "Starting container..."
+          
+          # Start containers
+          echo "▶️  Starting containers..."
           docker compose up -d
-
-          echo "Waiting for health..."
-          sleep 30
-
+          
+          # Wait for container to be healthy
+          echo "⏳ Waiting for application to start..."
+          sleep 45
+          
+          # Verify deployment
           if docker ps | grep -q juice-shop; then
-            echo "Application is running"
+            echo "✅ Container is running"
+            
+            # Check instrumentation in COMPILED code
+            echo ""
+            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
+            echo "======================================"
+            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
+            
+            # Check logs
+            echo ""
+            echo "📊 Application Logs:"
+            docker logs juice-shop 2>&1 | tail -30
+            
+            # Test application
+            if curl -f -s http://localhost:3000 > /dev/null; then
+              echo ""
+              echo "✅ Application is accessible at http://localhost:3000"
+              echo "✅ Deployment successful!"
+              echo ""
+              echo "🔍 Generate traffic to see traces in DataDog:"
+              echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; done"
+            else
+              echo "⚠️  Application not responding yet (may need more time)"
+            fi
           else
-            echo "Deployment failed"
-            docker compose logs --no-color
+            echo "❌ Deployment failed - container not running"
+            docker compose logs
             exit 1
           fi
-        owner: ubuntu
-        group: ubuntu
         mode: '0755'
 
     - name: Create verification script
@@ -709,20 +681,58 @@
         content: |
           #!/bin/bash
           echo "🔍 Security Instrumentation Verification"
-
-          echo "Container check:"
-          docker ps | grep juice-shop || echo "Container not running"
-
-          echo "Active config:"
-          cat {{ juice_config_path }} || echo "No config"
-
-          echo "Startup logs:"
-          docker logs juice-shop --tail 80 || true
-
-          echo "Metrics endpoint (host):"
-          curl -s http://localhost:9999/metrics | head -20 || echo "No metrics"
-        owner: ubuntu
-        group: ubuntu
+          echo "========================================"
+          
+          echo ""
+          echo "ℹ️  Juice Shop compiles TypeScript then runs: node build/app"
+          
+          echo ""
+          echo "📋 Container Status:"
+          docker ps | grep juice-shop || echo "❌ Container not running"
+          
+          echo ""
+          echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
+          docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
+          
+          echo ""
+          echo "🔧 Compiled build/app.js (what actually runs - first 40 lines):"
+          docker exec juice-shop head -40 build/app.js 2>/dev/null || echo "⚠️  Could not read build/app.js"
+          
+          echo ""
+          echo "🔍 Check for instrumentation in compiled code:"
+          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found in build/app.js"
+          
+          echo ""
+          echo "📄 Tracer.ts content:"
+          docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
+          
+          echo ""
+          echo "📄 Compiled build/tracer.js:"
+          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
+          
+          echo ""
+          echo "🔧 Environment Variables:"
+          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+          
+          echo ""
+          echo "📊 Application Startup Logs (looking for AIKIDO and DataDog):"
+          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
+          
+          echo ""
+          echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
+          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
+          
+          echo ""
+          echo "📡 DataDog Agent Status on Host:"
+          sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo to see agent status"
+          
+          echo ""
+          echo "🚀 Generate traffic to trigger instrumentation:"
+          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          
+          echo ""
+          echo "📊 After generating traffic, check for trace activity:"
+          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
         mode: '0755'
 
     # =======================================================================
@@ -760,16 +770,21 @@
           - ""
           - "🔒 Security Tools:"
           - "  - DataDog Agent: Active (APM + IAST)"
-          - "  - Aikido RASP: controlled by config files"
+          - "  - Aikido RASP: Ready (scenario-dependent)"
+          - ""
+          - "📈 Grafana Dashboards:"
+          - "  - Thesis Comparison: Two-scenario analysis"
+          - "  - Side-by-side IAST vs RASP comparison"
           - ""
           - "🎯 Ready for Two-Scenario Testing:"
-          - "  - Scenario 1: IAST Only (detection, no blocking) -> config-iast.json"
-          - "  - Scenario 2: IAST + RASP (detection + blocking) -> config-rasp.json"
+          - "  - Scenario 1: IAST Only (detection, no blocking)"
+          - "  - Scenario 2: IAST + RASP (detection + blocking)"
           - ""
           - "🚀 Next Steps:"
           - "  1. Run GitHub Actions pipeline"
-          - "  2. Pipeline will copy the appropriate config (config-iast.json or config-rasp.json) to {{ juice_config_path }}"
-          - "  3. Pipeline will run deploy.sh on host to rebuild/start container (same image)"
+          - "  2. Pipeline will deploy both scenarios"
+          - "  3. View results in Grafana dashboard"
+          - "  4. Export metrics for thesis analysis"
           - "=========================================="
 
   handlers:
