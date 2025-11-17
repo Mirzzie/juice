@@ -773,7 +773,7 @@
         mode: '0755'
 
     # =======================================================================
-    # 🔨 BUILD THE CONTAINER ONCE DURING ANSIBLE
+    # 🔨 PREPARE FOR DOCKER BUILD (files ready, actual build in pipeline)
     # =======================================================================
     - name: Clean up any existing containers and images
       shell: |
@@ -785,24 +785,18 @@
         docker rmi juice-shop-secure:iast-rasp 2>/dev/null || true
         docker system prune -f
       become: true
-      ignore_errors: true
+      ignore_errors: yes
 
-    - name: Build Docker image ONCE (this takes time, but only happens once)
+    - name: Verify Docker setup is ready
       shell: |
-        cd {{ juice_shop_dir }}
-        echo "📦 Building Docker image (this will take 3-5 minutes)..."
-        docker compose build --no-cache --progress=plain
-        echo "✅ Image built successfully: juice-shop-secure:latest"
+        echo "=== Docker Setup Verification ==="
+        docker --version
+        docker compose version
+        ls -lh {{ juice_shop_dir }}/Dockerfile
+        ls -lh {{ juice_shop_dir }}/docker-compose.yml
+        echo "✅ Docker files ready for build"
       become: true
-      register: docker_build
-      async: 600  # Allow 10 minutes for build
-      poll: 10
-
-    - name: Verify Docker image was created
-      shell: docker images | grep juice-shop-secure
-      become: true
-      register: image_check
-      failed_when: image_check.rc != 0
+      register: docker_ready
 
     - name: Display build completion
       debug:
@@ -939,9 +933,10 @@
           - "✅ TWO-SCENARIO TESTING INFRASTRUCTURE READY"
           - "=========================================="
           - ""
-          - "📦 Docker Image: juice-shop-secure:latest (BUILT)"
-          - "   - Image includes both IAST and RASP"
-          - "   - Scenarios controlled by environment variables"
+          - "📦 Docker Setup: Ready for build"
+          - "   - Dockerfile created"
+          - "   - docker-compose.yml created"
+          - "   - Build will occur in GitHub Actions pipeline"
           - ""
           - "🔄 Scenario Switching:"
           - "   cd /opt/juice-shop"
@@ -962,9 +957,9 @@
           - "  - Scenario 2: IAST + RASP (detection + blocking)"
           - ""
           - "🚀 Next Steps:"
-          - "  1. Image is already built"
-          - "  2. Pipeline will call switch-scenario.sh"
-          - "  3. Container starts in <10 seconds per scenario"
+          - "  1. Infrastructure is configured"
+          - "  2. Pipeline will build image ONCE"
+          - "  3. Pipeline will run both scenarios"
           - "  4. View results in Grafana dashboard"
           - "=========================================="
 

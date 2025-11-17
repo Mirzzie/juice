@@ -216,16 +216,87 @@ jobs:
           VERIFY
 
   # =========================================================================
-  # JOB 4: SCENARIO 1 - IAST Only (NO REBUILD, just switch config)
+  # JOB 4: Build Docker Image Once (after infrastructure is ready)
   # =========================================================================
-  scenario1-iast-only:
-    name: 🔬 Scenario 1 - IAST Only (Detection)
+  build-docker-image:
+    name: 🐳 Build Docker Image (Once)
     runs-on: ubuntu-latest
     needs: [check-prerequisites, configure-instance]
     if: |
       always() &&
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped') &&
+      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped')
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Build Docker Image on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'BUILD'
+            set -e
+            cd /opt/juice-shop
+            
+            echo "=========================================="
+            echo "🐳 Building Docker Image (This takes 4-6 minutes)"
+            echo "=========================================="
+            
+            # Clean up any existing images
+            sudo docker compose down 2>/dev/null || true
+            sudo docker system prune -f
+            
+            echo ""
+            echo "📦 Starting build..."
+            
+            # Build with progress output
+            sudo docker compose build --no-cache 2>&1 | tee /tmp/docker-build.log
+            
+            echo ""
+            echo "✅ Build complete!"
+            
+            # Verify image was created
+            if sudo docker images | grep -q juice-shop-secure; then
+              echo ""
+              echo "🎉 Image successfully created:"
+              sudo docker images | grep juice-shop-secure
+              
+              echo ""
+              echo "📊 Image details:"
+              sudo docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | grep -E "REPOSITORY|juice-shop-secure"
+            else
+              echo "❌ Image not found!"
+              exit 1
+            fi
+          BUILD
+
+      - name: Save Build Log
+        if: always()
+        run: |
+          scp -i ~/.ssh/id_rsa \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/tmp/docker-build.log \
+            ./docker-build.log || echo "Could not retrieve build log"
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-build-log
+          path: docker-build.log
+
+  # =========================================================================
+  # JOB 5: SCENARIO 1 - IAST Only (NO REBUILD, just switch config)
+  # =========================================================================
+  scenario1-iast-only:
+    name: 🔬 Scenario 1 - IAST Only (Detection)
+    runs-on: ubuntu-latest
+    needs: [check-prerequisites, build-docker-image]
+    if: |
+      always() &&
+      needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      needs.build-docker-image.result == 'success' &&
       (github.event.inputs.run_scenario == 'both' || github.event.inputs.run_scenario == 'iast-only' || github.event.inputs.run_scenario == '')
     steps:
       - name: Checkout Code
@@ -345,15 +416,16 @@ jobs:
             scenario1-*.html
 
   # =========================================================================
-  # JOB 5: SCENARIO 2 - IAST + RASP (NO REBUILD, just switch config)
+  # JOB 6: SCENARIO 2 - IAST + RASP (NO REBUILD, just switch config)
   # =========================================================================
   scenario2-iast-rasp:
     name: 🛡️ Scenario 2 - IAST + RASP (Detection + Blocking)
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-instance, scenario1-iast-only]
+    needs: [check-prerequisites, build-docker-image, scenario1-iast-only]
     if: |
       always() &&
       needs.check-prerequisites.outputs.can_proceed == 'true' &&
+      needs.build-docker-image.result == 'success' &&
       (needs.scenario1-iast-only.result == 'success' || needs.scenario1-iast-only.result == 'skipped') &&
       (github.event.inputs.run_scenario == 'both' || github.event.inputs.run_scenario == 'iast-rasp' || github.event.inputs.run_scenario == '')
     steps:
@@ -477,7 +549,7 @@ jobs:
             scenario2-*.html
 
   # =========================================================================
-  # JOB 6: Generate Comparative Analysis Report
+  # JOB 7: Generate Comparative Analysis Report
   # =========================================================================
   generate-comparison-report:
     name: 📊 Generate Comparison Report
@@ -574,19 +646,22 @@ jobs:
 
           | Metric | Old Approach | New Approach | Improvement |
           |--------|-------------|--------------|-------------|
-          | **Docker Build** | 2 builds (~8 min) | 1 build (~4 min) | **50% faster** |
+          | **Ansible Duration** | Includes build (~15 min) | Config only (~5 min) | **Faster & no timeouts** |
+          | **Docker Build** | 2 builds (~8 min) | 1 build (~5 min) | **50% faster** |
+          | **Build Location** | In Ansible (timeout risk) | In pipeline (visible) | **More reliable** |
           | **Scenario Switch** | Full rebuild | Config change only | **95% faster** |
-          | **Total Pipeline Time** | ~20 minutes | ~10 minutes | **50% faster** |
-          | **SSH Timeout Risk** | High | Low | **More reliable** |
+          | **Total Pipeline Time** | ~25 minutes | ~15 minutes | **40% faster** |
 
           ---
 
-          ## 📊 Two-Scenario Testing Complete
+          ## 📊 Pipeline Execution Status
 
-          | Scenario | Configuration | Status |
-          |----------|--------------|--------|
-          | **Scenario 1** | IAST Only (Detection) | ${{ needs.scenario1-iast-only.result }} |
-          | **Scenario 2** | IAST + RASP (Detection + Blocking) | ${{ needs.scenario2-iast-rasp.result }} |
+          | Stage | Status |
+          |-------|--------|
+          | **Infrastructure Setup** | ${{ needs.configure-instance.result }} |
+          | **Docker Image Build** | ${{ needs.build-docker-image.result }} |
+          | **Scenario 1 (IAST Only)** | ${{ needs.scenario1-iast-only.result }} |
+          | **Scenario 2 (IAST + RASP)** | ${{ needs.scenario2-iast-rasp.result }} |
 
           ---
 
@@ -639,17 +714,18 @@ jobs:
 
           ## 🎯 Architecture Benefits
 
-          ### Build Once, Run Anywhere
-          - ✅ Single Docker image contains both IAST and RASP
-          - ✅ Scenarios controlled by environment variables
-          - ✅ No rebuild needed between scenarios
-          - ✅ Faster iteration and testing
+          ### Build Once in Pipeline
+          - ✅ Ansible sets up infrastructure only (fast, no timeouts)
+          - ✅ Docker build happens once in dedicated pipeline job
+          - ✅ Build progress visible in GitHub Actions logs
+          - ✅ Scenarios reuse the same pre-built image
+          - ✅ No SSH connection timeouts during build
 
-          ### Resource Efficiency
-          - 💾 50% less disk space (single image)
-          - ⏱️ 50% less build time
-          - 🔄 Instant scenario switching (~10s)
-          - 📊 Cleaner metrics (same container ID across scenarios)
+          ### Smart Scenario Switching
+          - 🔄 Scenarios controlled by environment variables
+          - ⚡ Switch time: ~10 seconds (vs 4+ minutes rebuild)
+          - 📊 Same container, different configurations
+          - 🔧 Easy to test and iterate
 
           ---
 
