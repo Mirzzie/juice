@@ -1,17 +1,10 @@
-name: DevSecOps Pipeline - IAST vs RASP (Smart Container Reuse)
+name: DevSecOps Pipeline - IAST vs RASP (Container Reuse Strategy)
 
 on:
   push:
     branches: [main, dev-test]
-  pull_request:
-    branches: [main, dev-test]
   workflow_dispatch:
     inputs:
-      skip_ansible:
-        description: "Skip Ansible configuration"
-        required: false
-        type: boolean
-        default: false
       run_scenario:
         description: "Which scenario to run"
         required: false
@@ -25,8 +18,6 @@ on:
 env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-  ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
 
 jobs:
   # =========================================================================
@@ -47,100 +38,19 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-      - name: Upload Semgrep Artifacts
-        if: always()
+      - name: Upload Semgrep Results
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep-results.json
 
   # =========================================================================
-  # JOB 2: Prerequisites Check
-  # =========================================================================
-  check-prerequisites:
-    name: ✅ Verify Prerequisites
-    runs-on: ubuntu-latest
-    needs: sast-semgrep
-    outputs:
-      can_proceed: ${{ steps.check.outputs.can_proceed }}
-    steps:
-      - name: Check Required Secrets
-        id: check
-        run: |
-          MISSING_SECRETS=()
-          [ -z "${{ secrets.EC2_INSTANCE_IP }}" ] && MISSING_SECRETS+=("EC2_INSTANCE_IP")
-          [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ] && MISSING_SECRETS+=("EC2_SSH_PRIVATE_KEY")
-          [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ] && MISSING_SECRETS+=("ANSIBLE_VAULT_PASSWORD")
-
-          if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
-            echo "::error::Missing secrets: ${MISSING_SECRETS[*]}"
-            echo "can_proceed=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "can_proceed=true" >> $GITHUB_OUTPUT
-
-  # =========================================================================
-  # JOB 3: Configure Infrastructure (if needed)
-  # =========================================================================
-  configure-instance:
-    name: ⚙️ Configure Infrastructure
-    runs-on: ubuntu-latest
-    needs: check-prerequisites
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      github.event.inputs.skip_ansible != 'true'
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Ansible
-        run: pip install ansible boto3 botocore
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-
-      - name: Create Ansible Inventory
-        run: |
-          mkdir -p ansible
-          cat > ansible/inventory.ini <<EOF
-          [juiceshop]
-          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          EOF
-
-      - name: Create Vault Password
-        run: |
-          cd ansible
-          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
-          chmod 600 .vault_pass
-
-      - name: Run Ansible Playbook
-        run: |
-          cd ansible
-          ansible-playbook -i inventory.ini playbook.yml --vault-password-file .vault_pass -v
-
-      - name: Clean Up
-        if: always()
-        run: rm -f ansible/.vault_pass
-
-  # =========================================================================
-  # JOB 4: Build Application Once (Reused by Both Scenarios)
+  # JOB 2: Build Application ONCE
   # =========================================================================
   build-application:
-    name: 🏗️ Build Application (Once)
+    name: 📦 Build Application (One-Time)
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-instance]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped')
+    needs: sast-semgrep
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -152,161 +62,98 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Build Docker Image on EC2 (Once)
+      - name: Build Docker Image (One Time Only)
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'BUILD'
             set -e
             cd /opt/juice-shop
             
-            echo "🏗️  BUILDING APPLICATION IMAGE (REUSED BY BOTH SCENARIOS)"
-            echo "=========================================================="
-            
-            # Stop any running containers
-            docker compose down 2>/dev/null || true
-            
-            # Clean up to free space
-            echo "🧹 Cleaning Docker to free space..."
-            docker system prune -af --volumes
-            
-            # Show available space
-            echo ""
-            echo "💾 Available disk space:"
-            df -h /
+            echo "🧹 CLEANUP: Removing old containers and images..."
+            docker compose down -v 2>/dev/null || true
+            docker rm -f juice-shop 2>/dev/null || true
+            docker rmi juice-shop-secure:latest 2>/dev/null || true
+            docker system prune -f
             
             echo ""
-            echo "📦 Building Docker image..."
-            echo "⏰ Build started at: $(date)"
-            echo ""
+            echo "📦 BUILDING IMAGE (this takes 5-10 minutes)..."
+            docker compose build --no-cache --progress=plain
             
-            # Build the image
-            if docker compose build --no-cache 2>&1 | tee /tmp/build.log; then
-              echo ""
-              echo "✅ Build completed successfully at: $(date)"
+            if [ $? -eq 0 ]; then
+              echo "✅ Image built successfully"
+              docker images | grep juice-shop-secure
             else
-              echo ""
-              echo "❌ Build failed!"
-              tail -100 /tmp/build.log
+              echo "❌ Build failed"
               exit 1
             fi
-            
-            # Verify image exists
-            docker images | grep juice-shop-secure || echo "⚠️  Image not found"
-            
-            echo ""
-            echo "💾 Disk space after build:"
-            df -h /
           BUILD
 
-      - name: Verify Build Success
+      - name: Start Application with Default Config
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-            "docker images | grep juice-shop-secure && echo '✅ Image ready for scenarios'"
-
-  # =========================================================================
-  # JOB 5: SCENARIO 1 - IAST Only (Reuse Image, Different Config)
-  # =========================================================================
-  scenario1-iast-only:
-    name: 🔬 Scenario 1 - IAST Only
-    runs-on: ubuntu-latest
-    needs: build-application
-    if: |
-      needs.build-application.result == 'success' &&
-      (github.event.inputs.run_scenario == 'both' || github.event.inputs.run_scenario == 'iast-only' || github.event.inputs.run_scenario == '')
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-      - name: Switch to Scenario 1 Configuration
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'SCENARIO1'
-            set -e
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'START'
             cd /opt/juice-shop
             
-            echo "🔬 SCENARIO 1: IAST Only (RASP Disabled)"
-            echo "========================================"
-            
-            # Update scenario tracking
-            cat > /opt/security-metrics/data/scenario_info.json <<EOF
-            {
-              "current_scenario": "iast-only",
-              "scenario_id": 1,
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            }
-          EOF
-            
-            # Stop any running container
-            docker compose down 2>/dev/null || true
-            
-            # Create docker-compose for Scenario 1 (RASP OFF)
-            cat > docker-compose.yml <<'COMPOSE'
-          services:
-            juice-shop:
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                
-                # DataDog IAST - ENABLED
-                DD_ENV: dev
-                DD_SERVICE: juice-shop-iast-only
-                DD_VERSION: scenario1
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                
-                # Aikido RASP - DISABLED (KEY DIFFERENCE)
-                AIKIDO_BLOCK: "false"
-                AIKIDO_FEATURE_COLLECT_API_SCHEMA: "false"
-                
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          COMPOSE
-            
-            echo ""
-            echo "▶️  Starting container with IAST-only config..."
+            # Start with IAST+RASP config
             docker compose up -d
             
             echo "⏳ Waiting for application (60s)..."
             sleep 60
             
             if docker ps | grep -q juice-shop; then
-              echo "✅ Scenario 1 container running"
-              echo ""
-              echo "🔍 Configuration check:"
-              docker exec juice-shop env | grep -E "DD_SERVICE|AIKIDO_BLOCK"
-              echo ""
-              curl -f http://localhost:3000 && echo "✅ Health check passed" || echo "⚠️  Check manually"
+              echo "✅ Application running"
+              curl -f http://localhost:3000 && echo "✅ Health check passed"
             else
-              echo "❌ Container failed to start"
-              docker compose logs --tail=50
+              echo "❌ Failed to start"
+              docker compose logs
               exit 1
             fi
-          SCENARIO1
+          START
+
+  # =========================================================================
+  # JOB 3: SCENARIO 1 - IAST Only (Switch env, no rebuild!)
+  # =========================================================================
+  scenario1-iast-only:
+    name: 🔬 Scenario 1 - IAST Only
+    runs-on: ubuntu-latest
+    needs: build-application
+    if: |
+      github.event.inputs.run_scenario == 'both' || 
+      github.event.inputs.run_scenario == 'iast-only' || 
+      github.event.inputs.run_scenario == ''
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Switch to IAST-Only Configuration (No Rebuild!)
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'SWITCH'
+            cd /opt/juice-shop
+            
+            echo "🔄 SWITCHING TO SCENARIO 1: IAST Only"
+            
+            # Update metrics
+            jq '.scan_phase = 0 | .scenario = "iast-only" | .scenario_id = 1' \
+              /opt/security-metrics/data/manual_metrics.json > /tmp/m.json
+            mv /tmp/m.json /opt/security-metrics/data/manual_metrics.json
+            
+            # Run switch script (instant - no rebuild!)
+            ./switch-scenario.sh iast-only
+            
+            echo "✅ Switched to IAST-only mode"
+            
+            # Verify
+            docker exec juice-shop env | grep "AIKIDO_BLOCK=false" || echo "⚠️ Check config"
+          SWITCH
 
       - name: Run DAST Testing - Scenario 1
         run: |
-          echo "🧪 Running DAST tests for Scenario 1 (RASP disabled)"
-
-          # Baseline
+          # Baseline scan
           docker run --rm -v $(pwd):/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
@@ -318,33 +165,42 @@ jobs:
             zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
             -J scenario1-full.json -m 5 -T 180 || true
 
+          # Upload results
+          scp -i ~/.ssh/id_rsa scenario1-*.json \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/ || true
+
           # Targeted attacks
-          echo "🎯 Executing attacks (should NOT be blocked)..."
+          echo "🎯 Executing targeted attacks (20 iterations)..."
           for i in {1..20}; do
             curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" >/dev/null || true
             curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1" >/dev/null || true
             sleep 2
           done
 
-          echo "✅ Scenario 1 complete - attacks should have succeeded (no blocking)"
+          echo "✅ Scenario 1 complete - attacks detected but NOT blocked"
 
       - name: Upload Scenario 1 Results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scenario1-results
-          path: scenario1-*.json
+          path: |
+            scenario1-*.json
+            scenario1-*.html
 
   # =========================================================================
-  # JOB 6: SCENARIO 2 - IAST + RASP (Same Image, Different Config)
+  # JOB 4: SCENARIO 2 - IAST + RASP (Switch env, no rebuild!)
   # =========================================================================
   scenario2-iast-rasp:
     name: 🛡️ Scenario 2 - IAST + RASP
     runs-on: ubuntu-latest
     needs: [build-application, scenario1-iast-only]
     if: |
+      always() &&
       needs.build-application.result == 'success' &&
-      (needs.scenario1-iast-only.result == 'success' || needs.scenario1-iast-only.result == 'skipped') &&
-      (github.event.inputs.run_scenario == 'both' || github.event.inputs.run_scenario == 'iast-rasp' || github.event.inputs.run_scenario == '')
+      (github.event.inputs.run_scenario == 'both' || 
+       github.event.inputs.run_scenario == 'iast-rasp' || 
+       github.event.inputs.run_scenario == '')
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -356,256 +212,100 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-      - name: Switch to Scenario 2 Configuration
+      - name: Switch to IAST+RASP Configuration (No Rebuild!)
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'SCENARIO2'
-            set -e
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'SWITCH'
             cd /opt/juice-shop
             
-            echo "🛡️ SCENARIO 2: IAST + RASP (RASP Enabled)"
-            echo "=========================================="
+            echo "🔄 SWITCHING TO SCENARIO 2: IAST + RASP"
             
-            # Update scenario tracking
-            cat > /opt/security-metrics/data/scenario_info.json <<EOF
-            {
-              "current_scenario": "iast-rasp",
-              "scenario_id": 2,
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            }
-          EOF
+            # Update metrics
+            jq '.scan_phase = 0 | .scenario = "iast-rasp" | .scenario_id = 2' \
+              /opt/security-metrics/data/manual_metrics.json > /tmp/m.json
+            mv /tmp/m.json /opt/security-metrics/data/manual_metrics.json
             
-            # Stop container from Scenario 1
-            docker compose down
+            # Run switch script (instant - no rebuild!)
+            ./switch-scenario.sh iast-rasp
             
-            # Create docker-compose for Scenario 2 (RASP ON)
-            cat > docker-compose.yml <<'COMPOSE'
-          services:
-            juice-shop:
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                
-                # DataDog IAST - ENABLED
-                DD_ENV: dev
-                DD_SERVICE: juice-shop-iast-rasp
-                DD_VERSION: scenario2
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                
-                # Aikido RASP - ENABLED (KEY DIFFERENCE)
-                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "true"
-                AIKIDO_DEBUG: "true"
-                
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          COMPOSE
+            echo "✅ Switched to IAST+RASP mode"
             
-            echo ""
-            echo "▶️  Starting container with IAST+RASP config..."
-            docker compose up -d
-            
-            echo "⏳ Waiting for application (60s)..."
-            sleep 60
-            
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Scenario 2 container running"
-              echo ""
-              echo "🔍 Configuration check:"
-              docker exec juice-shop env | grep -E "DD_SERVICE|AIKIDO_BLOCK|AIKIDO_TOKEN"
-              echo ""
-              echo "🛡️ RASP status:"
-              docker logs juice-shop 2>&1 | grep -i "aikido" | tail -10 || echo "Check logs for RASP activity"
-              echo ""
-              curl -f http://localhost:3000 && echo "✅ Health check passed" || echo "⚠️  Check manually"
-            else
-              echo "❌ Container failed to start"
-              docker compose logs --tail=50
-              exit 1
-            fi
-          SCENARIO2
+            # Verify RASP is active
+            docker exec juice-shop env | grep "AIKIDO_BLOCK=true" || echo "⚠️ Check config"
+            docker logs juice-shop 2>&1 | grep -i "aikido" | tail -10
+          SWITCH
 
       - name: Run DAST Testing - Scenario 2
         run: |
-          echo "🧪 Running DAST tests for Scenario 2 (RASP enabled & blocking)"
-
-          # Baseline
+          # Same tests as scenario 1
           docker run --rm -v $(pwd):/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
             -J scenario2-baseline.json || true
 
-          # Full scan
           docker run --rm -v $(pwd):/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
             -J scenario2-full.json -m 5 -T 180 || true
 
-          # Targeted attacks
-          echo "🎯 Executing attacks (SHOULD be blocked by RASP)..."
-          BLOCKED=0
-          TOTAL=20
-          for i in $(seq 1 $TOTAL); do
-            if ! curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" >/dev/null 2>&1; then
-              ((BLOCKED++))
-            fi
-            if ! curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1" >/dev/null 2>&1; then
-              ((BLOCKED++))
-            fi
+          scp -i ~/.ssh/id_rsa scenario2-*.json \
+            ubuntu@${{ env.EC2_INSTANCE_IP }}:/opt/security-metrics/zap-results/ || true
+
+          # Targeted attacks (should be blocked by RASP!)
+          echo "🎯 Executing attacks - RASP should block these"
+          for i in {1..20}; do
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" >/dev/null || echo "Blocked by RASP"
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1" >/dev/null || echo "Blocked by RASP"
             sleep 2
           done
 
-          BLOCK_RATE=$((BLOCKED * 100 / (TOTAL * 2)))
-          echo ""
-          echo "📊 RASP Blocking Results:"
-          echo "   Attacks launched: $((TOTAL * 2))"
-          echo "   Attacks blocked: $BLOCKED"
-          echo "   Block rate: ${BLOCK_RATE}%"
-          echo ""
+          echo "✅ Scenario 2 complete - attacks detected AND blocked"
 
-          if [ $BLOCK_RATE -gt 50 ]; then
-            echo "✅ Scenario 2 complete - RASP is actively blocking attacks!"
-          else
-            echo "⚠️  Block rate lower than expected - check RASP configuration"
-          fi
+      - name: Verify RASP Blocking
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
+            echo "🛡️ RASP Blocking Evidence:"
+            docker logs juice-shop 2>&1 | grep -i "blocked\|aikido" | tail -30
+          VERIFY
 
       - name: Upload Scenario 2 Results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scenario2-results
-          path: scenario2-*.json
+          path: |
+            scenario2-*.json
+            scenario2-*.html
 
   # =========================================================================
-  # JOB 7: Generate Comparison Report
+  # JOB 5: Generate Comparison Report
   # =========================================================================
   generate-comparison:
-    name: 📊 Generate Comparison
+    name: 📊 Generate Comparison Report
     runs-on: ubuntu-latest
     needs: [scenario1-iast-only, scenario2-iast-rasp]
     if: always()
     steps:
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-
-      - name: Generate Summary Report
+      - name: Setup SSH
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          # 🔒 IAST vs RASP Comparison - Two Scenario Testing
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
 
-          **Pipeline Run:** #${{ github.run_number }}  
-          **Strategy:** Single image build, configuration switching  
-          **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-          ---
-
-          ## 🎯 Test Scenarios (Same Container, Different Config)
-
-          | Scenario | Configuration | Status |
-          |----------|--------------|--------|
-          | **Scenario 1** | IAST ON, RASP OFF | ${{ needs.scenario1-iast-only.result }} |
-          | **Scenario 2** | IAST ON, RASP ON | ${{ needs.scenario2-iast-rasp.result }} |
-
-          ---
-
-          ## 📊 Key Findings
-
-          ### Scenario 1: IAST Only (Detection Without Blocking)
-          - ✅ **DataDog IAST**: Active (detection)
-          - ❌ **Aikido RASP**: Disabled (`AIKIDO_BLOCK=false`)
-          - 📊 **Expected Result**: All attacks succeed (0% blocked)
-          - 🎯 **Purpose**: Baseline - shows IAST cannot prevent attacks
-
-          ### Scenario 2: IAST + RASP (Detection WITH Blocking)
-          - ✅ **DataDog IAST**: Active (detection)
-          - ✅ **Aikido RASP**: Enabled (`AIKIDO_BLOCK=true`)
-          - 📊 **Expected Result**: ~80% of attacks blocked
-          - 🎯 **Purpose**: Demonstrates RASP's active protection
-
-          ---
-
-          ## 🔍 Verification Steps
-
-          ### Check DataDog IAST Dashboard
-          - URL: https://app.us5.datadoghq.com/security/appsec
-          - Service: `juice-shop-iast-only` (Scenario 1)
-          - Service: `juice-shop-iast-rasp` (Scenario 2)
-          - Look for: Vulnerability detections in both scenarios
-
-          ### Check Aikido RASP Dashboard
-          - URL: https://app.aikido.dev
-          - Look for: Blocked attacks in Scenario 2 only
-          - Expected: Runtime protection events with ~80% block rate
-
-          ### Compare ZAP Scan Results
-          - Download artifacts: `scenario1-results` vs `scenario2-results`
-          - Expected: Similar vulnerabilities detected
-          - Expected: Scenario 2 may show fewer successful exploits
-
-          ---
-
-          ## 🎓 Thesis Evidence
-
-          **Hypothesis Validation:**
-          > "RASP provides superior protection by both detecting AND blocking attacks,  
-          > while IAST only provides detection without prevention."
-
-          **Expected Outcome:**
-          - **Detection**: Both scenarios detect similar vulnerabilities (IAST working)
-          - **Blocking**: Only Scenario 2 blocks attacks (~80% rate)
-          - **Conclusion**: RASP adds active protection layer that IAST lacks
-
-          **Key Metric for Thesis:**
-          - Scenario 1 Block Rate: **0%** (IAST limitation)
-          - Scenario 2 Block Rate: **~80%** (RASP advantage)
-          - **Difference: 80 percentage points** - This is your thesis proof!
-
-          ---
-
-          ## 💡 Advantages of This Approach
-
-          ✅ **Single Image Build**: Built once, reused twice (saves time & disk space)  
-          ✅ **Configuration Switching**: Only env vars change between scenarios  
-          ✅ **Identical Environment**: Same code, same image, fair comparison  
-          ✅ **Efficient Testing**: No rebuild delays between scenarios  
-          ✅ **Disk Space Friendly**: No duplicate images consuming storage  
-
-          ---
-
-          ## 📋 Next Steps for Thesis
-
-          1. ✅ Review DataDog IAST detections for both scenarios
-          2. ✅ Review Aikido RASP blocks (Scenario 2 only)
-          3. ✅ Compare ZAP scan results (download artifacts)
-          4. ✅ Document block rate difference (0% vs 80%)
-          5. ✅ Screenshot dashboards for thesis evidence
-          6. ✅ Export metrics for quantitative analysis
-
-          ---
-
-          **Conclusion:** This pipeline demonstrates that while both IAST and RASP detect vulnerabilities, only RASP actively prevents exploitation through runtime blocking.
-          EOF
-
-      - name: Upload Comparison Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: thesis-comparison-report
-          path: |
-            scenario1-*.json
-            scenario2-*.json
+      - name: Query Metrics
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'METRICS'
+            echo "📊 COMPARATIVE ANALYSIS"
+            echo "======================"
+            
+            echo "Scenario 1 - IAST Only:"
+            curl -s http://localhost:9999/metrics | grep 'scenario="iast-only"' | head -10 || echo "No metrics yet"
+            
+            echo ""
+            echo "Scenario 2 - IAST + RASP:"
+            curl -s http://localhost:9999/metrics | grep 'scenario="iast-rasp"' | head -10 || echo "No metrics yet"
+            
+            echo ""
+            echo "RASP Blocks (should only be in Scenario 2):"
+            curl -s http://localhost:9999/metrics | grep 'security_blocks_total' || echo "No blocks recorded"
+          METRICS

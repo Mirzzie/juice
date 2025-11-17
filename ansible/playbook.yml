@@ -1,5 +1,5 @@
 ---
-- name: Configure EC2 for Juice Shop with DevSecOps Tools (Stable + Minimal Metrics)
+- name: Configure EC2 for Juice Shop with DevSecOps Tools + Two-Scenario Comparison (Container Reuse)
   hosts: juiceshop
   become: true
   gather_facts: true
@@ -8,7 +8,7 @@
     juice_shop_dir: /opt/juice-shop
     metrics_dir: /opt/security-metrics
     node_version: "22"
-    docker_compose_version: "2.23.0"
+    prometheus_version: "2.48.0"
 
   vars_files:
     - secrets.yml
@@ -37,6 +37,7 @@
           - jq
           - python3
           - python3-pip
+          - python3-venv
         state: present
 
     # =======================================================================
@@ -137,7 +138,199 @@
         enabled: yes
 
     # =======================================================================
-    # MINIMAL METRICS SETUP (For Thesis Comparison)
+    # PROMETHEUS INSTALLATION
+    # =======================================================================
+    - name: Create Prometheus user
+      user:
+        name: prometheus
+        system: yes
+        shell: /bin/false
+        create_home: no
+
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - /etc/prometheus
+        - /var/lib/prometheus
+
+    - name: Download and extract Prometheus
+      unarchive:
+        src: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: yes
+        creates: /tmp/prometheus-{{ prometheus_version }}.linux-amd64
+
+    - name: Copy Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: /usr/local/bin/
+        mode: '0755'
+        owner: prometheus
+        group: prometheus
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'security-metrics-exporter'
+              static_configs:
+                - targets: ['localhost:9999']
+              scrape_interval: 30s
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: Restart Prometheus
+
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path=/var/lib/prometheus/ \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart Prometheus
+
+    - name: Enable and start Prometheus
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # =======================================================================
+    # GRAFANA INSTALLATION
+    # =======================================================================
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana repository
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+
+    - name: Install Grafana
+      apt:
+        name: grafana
+        state: present
+        update_cache: yes
+
+    - name: Configure Grafana to run on port 3001
+      lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: '^;?http_port ='
+        line: 'http_port = 3001'
+        state: present
+      notify: Restart Grafana
+
+    - name: Create Grafana provisioning directories
+      file:
+        path: "/etc/grafana/provisioning/{{ item }}"
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: '0755'
+      loop:
+        - datasources
+        - dashboards
+
+    - name: Configure Prometheus datasource for Grafana
+      copy:
+        dest: /etc/grafana/provisioning/datasources/prometheus.yml
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://localhost:9090
+              isDefault: true
+              editable: false
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Create dashboard provisioning config
+      copy:
+        dest: /etc/grafana/provisioning/dashboards/default.yml
+        content: |
+          apiVersion: 1
+          providers:
+            - name: 'Default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Create Grafana dashboards directory
+      file:
+        path: /var/lib/grafana/dashboards
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: '0755'
+
+    - name: Copy Enhanced Thesis Comparison Dashboard
+      copy:
+        src: files/grafana-thesis-dashboard.json
+        dest: /var/lib/grafana/dashboards/thesis-comparison.json
+        owner: grafana
+        group: grafana
+        mode: '0644'
+      notify: Restart Grafana
+      ignore_errors: yes
+
+    - name: Enable and start Grafana
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started
+
+    # =======================================================================
+    # METRICS EXPORTER SETUP
     # =======================================================================
     - name: Create metrics directory structure
       file:
@@ -151,14 +344,77 @@
         - "{{ metrics_dir }}/zap-results"
         - "{{ metrics_dir }}/data"
 
-    - name: Initialize scenario tracking file
+    - name: Create Python virtual environment for metrics exporter
+      command: python3 -m venv {{ metrics_dir }}/venv
+      args:
+        creates: "{{ metrics_dir }}/venv"
+      become_user: ubuntu
+
+    - name: Install Python dependencies for metrics exporter
+      pip:
+        name:
+          - prometheus_client
+          - requests
+          - flask
+        virtualenv: "{{ metrics_dir }}/venv"
+      become_user: ubuntu
+
+    - name: Copy Enhanced Metrics Exporter Script
       copy:
-        dest: "{{ metrics_dir }}/data/scenario_info.json"
+        src: files/enhanced_metrics_exporter.py
+        dest: "{{ metrics_dir }}/metrics_exporter.py"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      ignore_errors: yes
+
+    - name: Create metrics exporter systemd service
+      copy:
+        dest: /etc/systemd/system/security-metrics-exporter.service
+        content: |
+          [Unit]
+          Description=Security Metrics Exporter for Prometheus (SAST/DAST/IAST/RASP)
+          After=network.target prometheus.service
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory={{ metrics_dir }}
+          Environment="DD_API_KEY={{ datadog_api_key }}"
+          Environment="DD_APP_KEY={{ datadog_app_key }}"
+          Environment="DD_SITE={{ datadog_site }}"
+          Environment="AIKIDO_TOKEN={{ aikido_token }}"
+          ExecStart={{ metrics_dir }}/venv/bin/python {{ metrics_dir }}/metrics_exporter.py
+          Restart=always
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart Metrics Exporter
+
+    - name: Enable and start metrics exporter
+      systemd:
+        name: security-metrics-exporter
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      ignore_errors: yes
+
+    - name: Initialize manual metrics file
+      copy:
+        dest: "{{ metrics_dir }}/data/manual_metrics.json"
         content: |
           {
-            "current_scenario": "unknown",
+            "scan_phase": 0,
+            "scenario": "unknown",
             "scenario_id": 0,
-            "timestamp": ""
+            "response_times": {
+              "datadog_iast": 0,
+              "aikido_rasp": 0
+            }
           }
         owner: ubuntu
         group: ubuntu
@@ -166,7 +422,7 @@
         force: no
 
     # =======================================================================
-    # APPLICATION SETUP (YOUR STABLE VERSION)
+    # APPLICATION SETUP
     # =======================================================================
     - name: Create application directory
       file:
@@ -193,7 +449,7 @@
         group: ubuntu
         recurse: yes
 
-    - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
+    - name: Create tracer.ts
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
@@ -205,10 +461,7 @@
         group: ubuntu
         mode: '0644'
 
-    # =======================================================================
-    # DOCKERFILE - YOUR EXACT STABLE VERSION
-    # =======================================================================
-    - name: Create Dockerfile
+    - name: Create Dockerfile (Stable Version)
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
@@ -221,7 +474,7 @@
           # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
-          # Install ALL dependencies (needed for TypeScript compilation)
+          # Install ALL dependencies
           RUN npm install
 
           # Install security tools
@@ -230,12 +483,10 @@
           # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
-          # 1. Modify app.ts (main entry point)
+          # Modify TypeScript source files BEFORE compilation
           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
           
-          # 2. Also modify server.ts (in case it's loaded independently)
           RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
@@ -243,21 +494,21 @@
           RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
           RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
 
-          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
+          # Compile TypeScript to JavaScript
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
           
-          # Verify build directory was created
+          # Verify build
           RUN ls -la build/ && \
               echo "=== build/app.js (first 30 lines) ===" && \
               head -30 build/app.js && \
               echo "=== Checking for tracer/aikido in build/app.js ===" && \
               grep -E "tracer|aikido" build/app.js | head -5
 
-          # Build frontend (Angular)
+          # Build frontend
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
-          # --- Production stage ---
+          # Production stage
           FROM node:22-bookworm-slim
           
           RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
@@ -265,10 +516,10 @@
           
           WORKDIR /juice-shop
 
-          # Copy entire application including compiled build/ directory
+          # Copy entire application
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Ensure directories exist with correct permissions
+          # Ensure directories exist
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
@@ -282,16 +533,12 @@
               PORT=3000 \
               NODE_OPTIONS="--max-old-space-size=2048"
           
-          # ✅ This matches your local command: npm start (which runs: node build/app)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    # =======================================================================
-    # DOCKER COMPOSE - YOUR EXACT STABLE VERSION
-    # =======================================================================
-    - name: Create docker-compose.yml
+    - name: Create docker-compose.yml (Base Configuration)
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
@@ -304,17 +551,14 @@
               ports:
                 - "3000:3000"
               environment:
-                # Node environment
                 NODE_ENV: production
                 
-                # DataDog APM Configuration
+                # DataDog APM - Always Active
                 DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
+                DD_SERVICE: ${DD_SERVICE:-juice-shop}
+                DD_VERSION: ${DD_VERSION:-latest}
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
-                
-                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
                 DD_PROFILING_ENABLED: "true"
@@ -322,14 +566,15 @@
                 DD_DATA_STREAMS_ENABLED: "true"
                 DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
                 
-                # DataDog Security (AppSec & IAST)
+                # DataDog IAST - Always Active
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
                 
-                # Aikido Configuration
+                # Aikido RASP - Controlled by .env
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "true"
-                AIKIDO_DEBUG: "true"
+                AIKIDO_BLOCK: ${AIKIDO_BLOCK:-false}
+                AIKIDO_DEBUG: ${AIKIDO_DEBUG:-false}
+                AIKIDO_FEATURE_COLLECT_API_SCHEMA: ${AIKIDO_FEATURE_COLLECT_API_SCHEMA:-false}
                 
               env_file:
                 - .env
@@ -350,7 +595,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create .env file with secrets
+    - name: Create .env file (Default Configuration)
       copy:
         dest: "{{ juice_shop_dir }}/.env"
         content: |
@@ -358,74 +603,212 @@
           AIKIDO_TOKEN={{ aikido_token }}
           AIKIDO_BLOCK=true
           AIKIDO_DEBUG=true
+          AIKIDO_FEATURE_COLLECT_API_SCHEMA=false
           
           # DataDog Configuration
           DD_ENV=dev
+          DD_SERVICE=juice-shop
           DD_VERSION=latest
         owner: ubuntu
         group: ubuntu
         mode: '0600'
       no_log: true
 
-    - name: Create deploy.sh
+    # =======================================================================
+    # SCENARIO SWITCHING SCRIPTS (THE KEY TO CONTAINER REUSE)
+    # =======================================================================
+    - name: Create scenario switch script
       copy:
-        dest: "{{ juice_shop_dir }}/deploy.sh"
+        dest: "{{ juice_shop_dir }}/switch-scenario.sh"
+        content: |
+          #!/bin/bash
+          # Usage: ./switch-scenario.sh [iast-only|iast-rasp]
+          
+          set -e
+          cd "{{ juice_shop_dir }}"
+          
+          SCENARIO="${1:-iast-rasp}"
+          
+          echo "🔄 Switching to scenario: $SCENARIO"
+          echo "======================================"
+          
+          case "$SCENARIO" in
+            iast-only)
+              echo "📋 SCENARIO 1: IAST Only (Detection, No Blocking)"
+              cat > .env <<'EOF'
+          # Aikido Zen RASP - DISABLED FOR SCENARIO 1
+          AIKIDO_TOKEN={{ aikido_token }}
+          AIKIDO_BLOCK=false
+          AIKIDO_DEBUG=false
+          AIKIDO_FEATURE_COLLECT_API_SCHEMA=false
+          
+          # DataDog Configuration
+          DD_ENV=dev
+          DD_SERVICE=juice-shop-iast-only
+          DD_VERSION=scenario1
+          EOF
+              ;;
+            
+            iast-rasp)
+              echo "📋 SCENARIO 2: IAST + RASP (Detection + Blocking)"
+              cat > .env <<'EOF'
+          # Aikido Zen RASP - ENABLED FOR SCENARIO 2
+          AIKIDO_TOKEN={{ aikido_token }}
+          AIKIDO_BLOCK=true
+          AIKIDO_DEBUG=true
+          
+          # DataDog Configuration
+          DD_ENV=dev
+          DD_SERVICE=juice-shop-iast-rasp
+          DD_VERSION=scenario2
+          EOF
+              ;;
+            
+            *)
+              echo "❌ Invalid scenario: $SCENARIO"
+              echo "Usage: $0 [iast-only|iast-rasp]"
+              exit 1
+              ;;
+          esac
+          
+          echo "✅ Environment file updated for $SCENARIO"
+          echo ""
+          echo "🔄 Restarting container with new configuration..."
+          
+          # Stop container (keep image)
+          docker compose stop
+          
+          # Remove container (not image!)
+          docker compose rm -f
+          
+          # Start with new env
+          docker compose up -d
+          
+          echo "⏳ Waiting for container to be ready (30s)..."
+          sleep 30
+          
+          # Verify
+          if docker ps | grep -q juice-shop; then
+            echo "✅ Container running with $SCENARIO configuration"
+            
+            # Show active configuration
+            echo ""
+            echo "🔍 Active Configuration:"
+            docker exec juice-shop env | grep -E "DD_SERVICE|AIKIDO_BLOCK|AIKIDO_DEBUG" | sort
+            
+            # Test health
+            if curl -f -s http://localhost:3000 > /dev/null; then
+              echo ""
+              echo "✅ Application responsive"
+              
+              # Show RASP status
+              AIKIDO_BLOCK=$(docker exec juice-shop env | grep "AIKIDO_BLOCK" | cut -d'=' -f2)
+              if [ "$AIKIDO_BLOCK" = "true" ]; then
+                echo "🛡️  RASP is ACTIVE (blocking mode)"
+              else
+                echo "⚠️  RASP is DISABLED (detection only)"
+              fi
+            fi
+          else
+            echo "❌ Container failed to start"
+            docker compose logs --tail=50
+            exit 1
+          fi
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create build and deploy script
+      copy:
+        dest: "{{ juice_shop_dir }}/build-and-deploy.sh"
         content: |
           #!/bin/bash
           set -e
           cd "{{ juice_shop_dir }}"
           
-          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
+          echo "🚀 Building and Deploying Juice Shop (ONE-TIME BUILD)"
+          echo "======================================================="
           
-          # Stop existing containers
-          docker compose down || true
-          
-          # Remove old images
+          # Clean everything
+          echo "🧹 CLEANUP: Removing old containers and images..."
+          docker compose down -v 2>/dev/null || true
+          docker rm -f juice-shop 2>/dev/null || true
           docker rmi juice-shop-secure:latest 2>/dev/null || true
+          docker system prune -f
           
-          # Build with progress output
-          echo "📦 Building Docker image (this includes TypeScript compilation)..."
+          echo ""
+          echo "📦 BUILDING IMAGE (this takes 5-10 minutes)..."
+          echo "This includes TypeScript compilation and security tool installation"
+          
+          # Build with progress
           docker compose build --no-cache --progress=plain
           
-          # Start containers
-          echo "▶️  Starting containers..."
+          if [ $? -ne 0 ]; then
+            echo "❌ Build failed!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Image built successfully: juice-shop-secure:latest"
+          docker images | grep juice-shop-secure
+          
+          echo ""
+          echo "▶️  Starting container with default configuration..."
           docker compose up -d
           
-          # Wait for container to be healthy
-          echo "⏳ Waiting for application to start..."
+          echo "⏳ Waiting for application (45s)..."
           sleep 45
           
-          # Verify deployment
+          # Verify
           if docker ps | grep -q juice-shop; then
-            echo "✅ Container is running"
-            
-            # Check instrumentation in COMPILED code
             echo ""
-            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
-            echo "======================================"
-            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
+            echo "✅ Deployment successful!"
+            echo ""
+            echo "📊 Container Status:"
+            docker ps | grep juice-shop
             
-            # Check logs
+            echo ""
+            echo "🔍 Verifying instrumentation:"
+            docker exec juice-shop head -20 build/app.js | grep -E "tracer|aikido" || echo "⚠️  Check build/app.js manually"
+            
+            echo ""
+            echo "🔧 Environment Variables:"
+            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
+            
             echo ""
             echo "📊 Application Logs:"
             docker logs juice-shop 2>&1 | tail -30
             
-            # Test application
+            echo ""
+            echo "🧪 Testing application:"
             if curl -f -s http://localhost:3000 > /dev/null; then
-              echo ""
               echo "✅ Application is accessible at http://localhost:3000"
-              echo "✅ Deployment successful!"
-              echo ""
-              echo "🔍 Generate traffic to see traces in DataDog:"
-              echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; done"
             else
-              echo "⚠️  Application not responding yet (may need more time)"
+              echo "⚠️  Application not responding (may need more time)"
             fi
+            
+            echo ""
+            echo "=========================================="
+            echo "🎯 READY FOR TWO-SCENARIO TESTING"
+            echo "=========================================="
+            echo ""
+            echo "Switch scenarios using:"
+            echo "  ./switch-scenario.sh iast-only   # Scenario 1: IAST Only"
+            echo "  ./switch-scenario.sh iast-rasp   # Scenario 2: IAST + RASP"
+            echo ""
+            echo "Verify setup:"
+            echo "  ./verify-instrumentation.sh"
+            echo ""
+            echo "View logs:"
+            echo "  docker logs juice-shop -f"
+            
           else
-            echo "❌ Deployment failed - container not running"
+            echo "❌ Container failed to start"
             docker compose logs
             exit 1
           fi
+        owner: ubuntu
+        group: ubuntu
         mode: '0755'
 
     - name: Create verification script
@@ -444,6 +827,23 @@
           docker ps | grep juice-shop || echo "❌ Container not running"
           
           echo ""
+          echo "🔧 Current Scenario Configuration:"
+          echo "-----------------------------------"
+          docker exec juice-shop env | grep -E "DD_SERVICE|DD_VERSION|AIKIDO_BLOCK|AIKIDO_DEBUG|DD_IAST|DD_APPSEC" | sort
+          
+          AIKIDO_BLOCK=$(docker exec juice-shop env 2>/dev/null | grep "AIKIDO_BLOCK" | cut -d'=' -f2)
+          DD_SERVICE=$(docker exec juice-shop env 2>/dev/null | grep "DD_SERVICE" | cut -d'=' -f2)
+          
+          echo ""
+          if [ "$AIKIDO_BLOCK" = "true" ]; then
+            echo "🛡️  Current Mode: IAST + RASP (Detection + Blocking)"
+            echo "Service: $DD_SERVICE"
+          else
+            echo "⚠️  Current Mode: IAST Only (Detection, No Blocking)"
+            echo "Service: $DD_SERVICE"
+          fi
+          
+          echo ""
           echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
           docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
           
@@ -453,69 +853,152 @@
           
           echo ""
           echo "🔍 Check for instrumentation in compiled code:"
-          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found in build/app.js"
+          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found"
           
           echo ""
           echo "📄 Tracer.ts content:"
           docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
           
           echo ""
-          echo "📄 Compiled build/tracer.js:"
-          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
+          echo "📊 Application Startup Logs:"
+          echo "----------------------------"
+          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Check logs manually: docker logs juice-shop"
           
           echo ""
-          echo "🔧 Environment Variables:"
-          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
-          
-          echo ""
-          echo "📊 Application Startup Logs (looking for AIKIDO and DataDog):"
-          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
-          
-          echo ""
-          echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
-          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
+          echo "🔍 AIKIDO Startup Messages:"
+          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20 || echo "No Aikido messages (check if blocking is enabled)"
           
           echo ""
           echo "📡 DataDog Agent Status on Host:"
-          sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo to see agent status"
+          sudo datadog-agent status 2>&1 | grep -A 10 "APM Agent" || echo "⚠️  Run with sudo to see agent status"
           
           echo ""
-          echo "🚀 Generate traffic to trigger instrumentation:"
-          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          echo "=========================================="
+          echo "🚀 Test Commands"
+          echo "=========================================="
+          echo ""
+          echo "Generate test traffic:"
+          echo "  for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
+          echo ""
+          echo "Check for traces:"
+          echo "  docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
+          echo ""
+          echo "Switch scenarios:"
+          echo "  ./switch-scenario.sh iast-only"
+          echo "  ./switch-scenario.sh iast-rasp"
+        mode: '0755'
+
+    - name: Create cleanup script
+      copy:
+        dest: "{{ juice_shop_dir }}/cleanup.sh"
+        content: |
+          #!/bin/bash
+          echo "🧹 Cleanup: Removing all containers and images"
+          echo "=============================================="
+          
+          cd "{{ juice_shop_dir }}"
+          
+          echo "Stopping containers..."
+          docker compose down -v 2>/dev/null || true
+          
+          echo "Removing containers..."
+          docker rm -f juice-shop 2>/dev/null || true
+          
+          echo "Removing images..."
+          docker rmi juice-shop-secure:latest 2>/dev/null || true
+          docker rmi juice-shop-secure:iast-only 2>/dev/null || true
+          docker rmi juice-shop-secure:iast-rasp 2>/dev/null || true
+          
+          echo "Pruning system..."
+          docker system prune -f
           
           echo ""
-          echo "📊 After generating traffic, check for trace activity:"
-          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
+          echo "✅ Cleanup complete"
+          echo "Run ./build-and-deploy.sh to rebuild"
         mode: '0755'
 
     # =======================================================================
-    # POST-INSTALLATION SUMMARY
+    # POST-INSTALLATION VERIFICATION
     # =======================================================================
+    - name: Wait for services to stabilize
+      pause:
+        seconds: 10
+
+    - name: Verify all services are running
+      shell: |
+        echo "=== Service Status Check ==="
+        systemctl is-active prometheus && echo "✅ Prometheus: Active" || echo "❌ Prometheus: Inactive"
+        systemctl is-active grafana-server && echo "✅ Grafana: Active" || echo "❌ Grafana: Inactive"
+        systemctl is-active datadog-agent && echo "✅ DataDog Agent: Active" || echo "❌ DataDog Agent: Inactive"
+        if systemctl is-active security-metrics-exporter >/dev/null 2>&1; then
+          echo "✅ Metrics Exporter: Active"
+        else
+          echo "⚠️  Metrics Exporter: Not active (will start after first build)"
+        fi
+      register: service_check
+      changed_when: false
+
+    - name: Display service status
+      debug:
+        msg: "{{ service_check.stdout_lines }}"
+
     - name: Display setup completion summary
       debug:
         msg:
           - "=========================================="
-          - "✅ INFRASTRUCTURE READY FOR TWO-SCENARIO TESTING"
+          - "✅ CONTAINER REUSE INFRASTRUCTURE READY"
           - "=========================================="
           - ""
-          - "🔒 Installed Services:"
-          - "  - Docker: Active"
-          - "  - DataDog Agent: Active (APM + IAST)"
+          - "🎯 Innovation: Build Once, Test Twice Strategy"
+          - "   - Single Docker image with BOTH tools"
+          - "   - Instant scenario switching (30s vs 20min)"
+          - "   - Same container, different env variables"
           - ""
-          - "📁 Directories Created:"
-          - "  - Application: {{ juice_shop_dir }}"
-          - "  - Metrics: {{ metrics_dir }}"
+          - "📦 Next Steps:"
+          - "   1. SSH to instance: ssh ubuntu@{{ ansible_host }}"
+          - "   2. cd {{ juice_shop_dir }}"
+          - "   3. ./build-and-deploy.sh  # ONE-TIME BUILD (5-10 min)"
           - ""
-          - "🎯 Ready for:"
-          - "  - Scenario 1: IAST Only (detection, no blocking)"
-          - "  - Scenario 2: IAST + RASP (detection + blocking)"
+          - "🔄 Then Switch Scenarios Instantly:"
+          - "   - ./switch-scenario.sh iast-only   # Scenario 1 (30s)"
+          - "   - ./switch-scenario.sh iast-rasp   # Scenario 2 (30s)"
           - ""
-          - "🚀 Next Step:"
-          - "  Run GitHub Actions pipeline to test both scenarios"
+          - "🔍 Verify Setup:"
+          - "   - ./verify-instrumentation.sh"
+          - "   - docker logs juice-shop"
+          - ""
+          - "📊 Monitoring:"
+          - "   - Prometheus: http://{{ ansible_host }}:9090"
+          - "   - Grafana: http://{{ ansible_host }}:3001 (admin/admin)"
+          - "   - Metrics: http://{{ ansible_host }}:9999/metrics"
+          - ""
+          - "🛡️ Security Tools:"
+          - "   - DataDog IAST: Always active (detection)"
+          - "   - Aikido RASP: Controlled via scenarios (blocking)"
+          - ""
+          - "🚀 Ready for GitHub Actions Pipeline!"
+          - "   - Pipeline will call build-and-deploy.sh once"
+          - "   - Then switch-scenario.sh for each test"
+          - "   - Total time: ~15-20 min (vs 40+ min before)"
           - "=========================================="
 
   handlers:
     - name: Restart DataDog Agent
       systemd:
         name: datadog-agent
+        state: restarted
+
+    - name: Restart Prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+
+    - name: Restart Grafana
+      systemd:
+        name: grafana-server
+        state: restarted
+
+    - name: Restart Metrics Exporter
+      systemd:
+        name: security-metrics-exporter
         state: restarted
