@@ -784,8 +784,8 @@
         docker rmi juice-shop-secure:iast-only 2>/dev/null || true
         docker rmi juice-shop-secure:iast-rasp 2>/dev/null || true
         docker system prune -f
-      become_user: ubuntu
-      ignore_errors: yes
+      become: true
+      ignore_errors: true
 
     - name: Build Docker image ONCE (this takes time, but only happens once)
       shell: |
@@ -793,13 +793,14 @@
         echo "📦 Building Docker image (this will take 3-5 minutes)..."
         docker compose build --no-cache --progress=plain
         echo "✅ Image built successfully: juice-shop-secure:latest"
-      become_user: ubuntu
+      become: true
       register: docker_build
       async: 600  # Allow 10 minutes for build
       poll: 10
 
     - name: Verify Docker image was created
       shell: docker images | grep juice-shop-secure
+      become: true
       register: image_check
       failed_when: image_check.rc != 0
 
