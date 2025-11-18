@@ -1,5 +1,5 @@
 ---
-- name: Configure EC2 for Juice Shop with DevSecOps Tools + Two-Scenario Comparison
+- name: Configure EC2 for Juice Shop with DevSecOps Tools + OpenTelemetry (Three-Scenario Testing)
   hosts: juiceshop
   become: true
   gather_facts: true
@@ -9,6 +9,7 @@
     metrics_dir: /opt/security-metrics
     node_version: "22"
     prometheus_version: "2.48.0"
+    otel_collector_version: "0.92.0"
 
   vars_files:
     - secrets.yml
@@ -77,6 +78,165 @@
         enabled: yes
 
     # =======================================================================
+    # OPENTELEMETRY COLLECTOR INSTALLATION
+    # =======================================================================
+    - name: Create OpenTelemetry Collector directory
+      file:
+        path: /opt/otel-collector
+        state: directory
+        mode: '0755'
+
+    - name: Download OpenTelemetry Collector
+      get_url:
+        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_collector_version }}/otelcol-contrib_{{ otel_collector_version }}_linux_amd64.tar.gz"
+        dest: /tmp/otelcol.tar.gz
+        mode: '0644'
+
+    - name: Extract OpenTelemetry Collector
+      unarchive:
+        src: /tmp/otelcol.tar.gz
+        dest: /opt/otel-collector
+        remote_src: yes
+        creates: /opt/otel-collector/otelcol-contrib
+
+    - name: Create OpenTelemetry Collector configuration
+      copy:
+        dest: /opt/otel-collector/config.yaml
+        content: |
+          # OpenTelemetry Collector Configuration for IAST/RASP Metrics Collection
+          
+          receivers:
+            # OTLP Receiver for DataDog and Aikido
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+            
+            # Prometheus receiver for self-monitoring
+            prometheus:
+              config:
+                scrape_configs:
+                  - job_name: 'otel-collector'
+                    scrape_interval: 30s
+                    static_configs:
+                      - targets: ['localhost:8888']
+
+          processors:
+            # Batch processor for efficiency
+            batch:
+              timeout: 10s
+              send_batch_size: 1024
+            
+            # Add resource attributes
+            resource:
+              attributes:
+                - key: deployment.environment
+                  value: dev
+                  action: upsert
+                - key: service.namespace
+                  value: juice-shop-devsecops
+                  action: upsert
+            
+            # Memory limiter to prevent OOM
+            memory_limiter:
+              check_interval: 1s
+              limit_mib: 512
+              spike_limit_mib: 128
+            
+            # Attributes processor for enrichment
+            attributes:
+              actions:
+                - key: collector.name
+                  value: "security-metrics-otel"
+                  action: insert
+
+          exporters:
+            # Prometheus Remote Write (for local Prometheus)
+            prometheusremotewrite:
+              endpoint: "http://localhost:9090/api/v1/write"
+              tls:
+                insecure: true
+            
+            # Prometheus exporter (exposes metrics on :8889)
+            prometheus:
+              endpoint: "0.0.0.0:8889"
+              namespace: "otel"
+              const_labels:
+                environment: dev
+            
+            # Logging exporter for debugging
+            logging:
+              loglevel: info
+              sampling_initial: 5
+              sampling_thereafter: 200
+            
+            # OTLP exporter (forward to DataDog if needed)
+            otlp/datadog:
+              endpoint: "https://trace.agent.{{ datadog_site }}:443"
+              headers:
+                DD-API-KEY: "{{ datadog_api_key }}"
+              tls:
+                insecure: false
+
+          service:
+            pipelines:
+              # Traces pipeline
+              traces:
+                receivers: [otlp]
+                processors: [memory_limiter, resource, attributes, batch]
+                exporters: [logging, otlp/datadog]
+              
+              # Metrics pipeline
+              metrics:
+                receivers: [otlp, prometheus]
+                processors: [memory_limiter, resource, attributes, batch]
+                exporters: [prometheus, prometheusremotewrite, logging]
+              
+              # Logs pipeline
+              logs:
+                receivers: [otlp]
+                processors: [memory_limiter, resource, attributes, batch]
+                exporters: [logging, otlp/datadog]
+            
+            # Telemetry configuration
+            telemetry:
+              logs:
+                level: info
+              metrics:
+                address: 0.0.0.0:8888
+        mode: '0644'
+
+    - name: Create OpenTelemetry Collector systemd service
+      copy:
+        dest: /etc/systemd/system/otel-collector.service
+        content: |
+          [Unit]
+          Description=OpenTelemetry Collector for Security Metrics
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/opt/otel-collector/otelcol-contrib --config=/opt/otel-collector/config.yaml
+          Restart=always
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable and start OpenTelemetry Collector
+      systemd:
+        name: otel-collector
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # =======================================================================
     # DATADOG AGENT INSTALLATION
     # =======================================================================
     - name: Check if DataDog agent is already installed
@@ -102,31 +262,59 @@
       delay: 15
       until: datadog_install.rc == 0
 
-    - name: Configure DataDog Agent for APM and IAST
+    - name: Configure DataDog Agent for APM, IAST, and OpenTelemetry
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
+          # APM Configuration
           apm_config:
             enabled: true
             apm_non_local_traffic: true
             receiver_port: 8126
             receiver_timeout: 10
             max_traces_per_second: 100
+            
+            # OpenTelemetry Configuration
+            otlp_config:
+              receiver:
+                protocols:
+                  grpc:
+                    endpoint: 0.0.0.0:4317
+                  http:
+                    endpoint: 0.0.0.0:4318
+              traces:
+                enabled: true
+              metrics:
+                enabled: true
+              logs:
+                enabled: true
 
+          # AppSec & IAST Configuration
           appsec_config:
             enabled: true
 
           runtime_security_config:
             enabled: true
 
+          # Process Monitoring
           process_config:
             enabled: "true"
             scrub_args: true
 
+          # Log Collection
           logs_enabled: true
           logs_config:
             container_collect_all: true
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS CONFIG"
+            
+          # OpenTelemetry Metrics Export
+          otlp_config:
+            metrics:
+              enabled: true
+            traces:
+              enabled: true
+            logs:
+              enabled: true
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - DEVSECOPS + OTEL CONFIG"
         create: no
         backup: yes
       notify: Restart DataDog Agent
@@ -177,23 +365,60 @@
         - prometheus
         - promtool
 
-    - name: Create Prometheus configuration
+    - name: Create Prometheus configuration with OpenTelemetry and three-scenario support
       copy:
         dest: /etc/prometheus/prometheus.yml
         content: |
           global:
             scrape_interval: 15s
             evaluation_interval: 15s
+            external_labels:
+              cluster: 'devsecops-thesis'
+              environment: 'dev'
+
+          # Remote write configuration (receives from OTel Collector)
+          remote_write:
+            - url: http://localhost:9090/api/v1/write
 
           scrape_configs:
+            # Prometheus self-monitoring
             - job_name: 'prometheus'
               static_configs:
                 - targets: ['localhost:9090']
 
+            # Security Metrics Exporter (main custom exporter)
             - job_name: 'security-metrics-exporter'
               static_configs:
                 - targets: ['localhost:9999']
               scrape_interval: 30s
+              metric_relabel_configs:
+                - source_labels: [scenario]
+                  target_label: test_scenario
+                  action: replace
+
+            # OpenTelemetry Collector metrics
+            - job_name: 'otel-collector'
+              static_configs:
+                - targets: ['localhost:8888']
+              scrape_interval: 30s
+
+            # OpenTelemetry Collector Prometheus exporter
+            - job_name: 'otel-prometheus-exporter'
+              static_configs:
+                - targets: ['localhost:8889']
+              scrape_interval: 30s
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  regex: 'otel_.*'
+                  action: keep
+
+            # DataDog Agent metrics (if exposed)
+            - job_name: 'datadog-agent'
+              static_configs:
+                - targets: ['localhost:5000']
+              scrape_interval: 30s
+              metrics_path: /metrics
+              scheme: http
         owner: prometheus
         group: prometheus
         mode: '0644'
@@ -216,7 +441,9 @@
             --config.file=/etc/prometheus/prometheus.yml \
             --storage.tsdb.path=/var/lib/prometheus/ \
             --web.console.templates=/etc/prometheus/consoles \
-            --web.console.libraries=/etc/prometheus/console_libraries
+            --web.console.libraries=/etc/prometheus/console_libraries \
+            --web.enable-remote-write-receiver \
+            --web.enable-lifecycle
 
           [Install]
           WantedBy=multi-user.target
@@ -280,6 +507,8 @@
               url: http://localhost:9090
               isDefault: true
               editable: false
+              jsonData:
+                timeInterval: "15s"
         owner: grafana
         group: grafana
         mode: '0644'
@@ -313,10 +542,10 @@
         group: grafana
         mode: '0755'
 
-    - name: Copy Enhanced Thesis Comparison Dashboard
+    - name: Copy Three-Scenario Comparison Dashboard
       copy:
-        src: files/grafana-thesis-dashboard.json
-        dest: /var/lib/grafana/dashboards/thesis-comparison.json
+        src: files/grafana-three-scenario-dashboard.json
+        dest: /var/lib/grafana/dashboards/three-scenario-comparison.json
         owner: grafana
         group: grafana
         mode: '0644'
@@ -329,7 +558,7 @@
         state: started
 
     # =======================================================================
-    # METRICS EXPORTER SETUP (ENHANCED FOR TWO-SCENARIO TESTING)
+    # ENHANCED METRICS EXPORTER SETUP (OpenTelemetry-Aware)
     # =======================================================================
     - name: Create metrics directory structure
       file:
@@ -349,30 +578,34 @@
         creates: "{{ metrics_dir }}/venv"
       become_user: ubuntu
 
-    - name: Install Python dependencies for metrics exporter
+    - name: Install Python dependencies for metrics exporter (with OpenTelemetry support)
       pip:
         name:
           - prometheus_client
           - requests
           - flask
+          - opentelemetry-api
+          - opentelemetry-sdk
+          - opentelemetry-exporter-otlp
+          - opentelemetry-instrumentation
         virtualenv: "{{ metrics_dir }}/venv"
       become_user: ubuntu
 
-    - name: Copy Enhanced Metrics Exporter Script (Two-Scenario Support)
+    - name: Copy Enhanced OpenTelemetry-Aware Metrics Exporter
       copy:
-        src: files/enhanced_metrics_exporter.py
+        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ metrics_dir }}/metrics_exporter.py"
         owner: ubuntu
         group: ubuntu
         mode: '0755'
 
-    - name: Create metrics exporter systemd service
+    - name: Create metrics exporter systemd service (with OTel support)
       copy:
         dest: /etc/systemd/system/security-metrics-exporter.service
         content: |
           [Unit]
-          Description=Security Metrics Exporter for Prometheus (SAST/DAST/IAST/RASP - Two Scenarios)
-          After=network.target prometheus.service
+          Description=Security Metrics Exporter for Prometheus (SAST/DAST/IAST/RASP + OpenTelemetry)
+          After=network.target prometheus.service otel-collector.service
 
           [Service]
           Type=simple
@@ -382,6 +615,8 @@
           Environment="DD_APP_KEY={{ datadog_app_key }}"
           Environment="DD_SITE={{ datadog_site }}"
           Environment="AIKIDO_TOKEN={{ aikido_token }}"
+          Environment="OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317"
+          Environment="OTEL_SERVICE_NAME=security-metrics-exporter"
           ExecStart={{ metrics_dir }}/venv/bin/python {{ metrics_dir }}/metrics_exporter.py
           Restart=always
           RestartSec=10
@@ -400,7 +635,24 @@
         state: started
         daemon_reload: yes
 
-    - name: Initialize manual metrics file for scenario tracking
+    - name: Initialize scenario tracking file
+      copy:
+        dest: "{{ metrics_dir }}/data/scenario_info.json"
+        content: |
+          {
+            "current_scenario": "unknown",
+            "scenario_id": 0,
+            "scenario_name": "Not Started",
+            "rasp_enabled": false,
+            "rasp_blocking": false,
+            "timestamp": "{{ ansible_date_time.iso8601 }}"
+          }
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+        force: no
+
+    - name: Initialize manual metrics file
       copy:
         dest: "{{ metrics_dir }}/data/manual_metrics.json"
         content: |
@@ -419,7 +671,7 @@
         force: no
 
     # =======================================================================
-    # APPLICATION SETUP (YOUR WORKING VERSION)
+    # APPLICATION SETUP (WITH OPENTELEMETRY)
     # =======================================================================
     - name: Create application directory
       file:
@@ -446,23 +698,35 @@
         group: ubuntu
         recurse: yes
 
-    - name: Create tracer.ts (DataDog tracer - MINIMAL VERSION)
+    - name: Create tracer.ts (DataDog + OpenTelemetry)
       copy:
         dest: "{{ juice_shop_dir }}/tracer.ts"
         content: |
-          // tracer.ts
+          // tracer.ts - DataDog APM with OpenTelemetry support
           import tracer from 'dd-trace';
-          tracer.init();
+          
+          tracer.init({
+            logInjection: true,
+            runtimeMetrics: true,
+            appsec: true,
+            iast: true,
+            // OpenTelemetry export configuration
+            experimental: {
+              exporter: 'otlp',
+              enableGetRUMData: true
+            }
+          });
+          
           export default tracer;
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile (YOUR WORKING VERSION)
+    - name: Create Dockerfile (OpenTelemetry-enabled)
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Multi-stage Dockerfile for Juice Shop with Security Tools
+          # Multi-stage Dockerfile for Juice Shop with Security Tools + OpenTelemetry
           FROM node:22-bookworm-slim AS builder
 
           RUN apt-get update && apt-get install -y git python3 make g++ && rm -rf /var/lib/apt/lists/*
@@ -471,39 +735,41 @@
           # Clone Juice Shop
           RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
 
-          # Install ALL dependencies (needed for TypeScript compilation)
+          # Install ALL dependencies
           RUN npm install
 
-          # Install security tools
-          RUN npm install --save-exact @aikidosec/firewall dd-trace
+          # Install security tools with OpenTelemetry support
+          RUN npm install --save-exact \
+              @aikidosec/firewall \
+              dd-trace \
+              @opentelemetry/api \
+              @opentelemetry/sdk-node \
+              @opentelemetry/auto-instrumentations-node \
+              @opentelemetry/exporter-trace-otlp-grpc \
+              @opentelemetry/exporter-metrics-otlp-grpc
 
           # Copy tracer
           COPY tracer.ts ./tracer.ts
 
-          # ✅ CRITICAL: Modify TypeScript source files BEFORE compilation
-          # 1. Modify app.ts (main entry point)
-          RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts
-          
-          # 2. Also modify server.ts (in case it's loaded independently)
-          RUN sed -i "1i import './tracer' // DataDog APM" server.ts && \
+          # Modify TypeScript source files BEFORE compilation
+          RUN sed -i "1i import './tracer' // DataDog APM + OTEL" app.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
+              sed -i "1i import './tracer' // DataDog APM + OTEL" server.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
           # Verify modifications
-          RUN echo "=== Modified app.ts (first 10 lines) ===" && head -10 app.ts
-          RUN echo "=== Modified server.ts (first 10 lines) ===" && head -10 server.ts
+          RUN echo "=== Modified app.ts ===" && head -10 app.ts && \
+              echo "=== Modified server.ts ===" && head -10 server.ts
 
-          # ✅ COMPILE TypeScript to JavaScript (creates build/ directory)
+          # Compile TypeScript
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
           
-          # Verify build directory was created
+          # Verify compilation
           RUN ls -la build/ && \
               echo "=== build/app.js (first 30 lines) ===" && \
-              head -30 build/app.js && \
-              echo "=== Checking for tracer/aikido in build/app.js ===" && \
-              grep -E "tracer|aikido" build/app.js | head -5
+              head -30 build/app.js
 
-          # Build frontend (Angular)
+          # Build frontend
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production || echo "Frontend build completed"
 
@@ -515,10 +781,10 @@
           
           WORKDIR /juice-shop
 
-          # Copy entire application including compiled build/ directory
+          # Copy entire application
           COPY --from=builder --chown=juiceshop:juiceshop /juice-shop /juice-shop
 
-          # Ensure directories exist with correct permissions
+          # Ensure directories exist
           RUN mkdir -p /juice-shop/logs /juice-shop/ftp /juice-shop/data && \
               chown -R juiceshop:juiceshop /juice-shop
 
@@ -530,15 +796,14 @@
 
           ENV NODE_ENV=production \
               PORT=3000 \
-              NODE_OPTIONS="--max-old-space-size=2048"
+              NODE_OPTIONS="--max-old-space-size=2048 --require ./build/tracer.js"
           
-          # ✅ This matches your local command: npm start (which runs: node build/app)
           CMD ["npm", "start"]
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create docker-compose.yml (Base template - will be modified by pipeline)
+    - name: Create base docker-compose.yml template
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
@@ -551,31 +816,22 @@
               ports:
                 - "3000:3000"
               environment:
-                # Node environment
                 NODE_ENV: production
                 
-                # DataDog APM Configuration
+                # DataDog Configuration (will be modified per scenario)
                 DD_ENV: dev
                 DD_SERVICE: juice-shop
                 DD_VERSION: latest
                 DD_AGENT_HOST: 172.17.0.1
                 DD_TRACE_AGENT_PORT: 8126
-                
-                # DataDog Tracing & Profiling
                 DD_LOGS_INJECTION: "true"
                 DD_TRACE_SAMPLE_RATE: "1"
-                DD_PROFILING_ENABLED: "true"
-                DD_RUNTIME_METRICS_ENABLED: "true"
-                DD_DATA_STREAMS_ENABLED: "true"
-                DD_TRACE_REMOVE_INTEGRATION_SERVICE_NAMES_ENABLED: "true"
-                
-                # DataDog Security (AppSec & IAST)
                 DD_APPSEC_ENABLED: "true"
                 DD_IAST_ENABLED: "true"
                 
                 # Aikido Configuration (will be modified per scenario)
                 AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "true"
+                AIKIDO_BLOCK: "false"
                 AIKIDO_DEBUG: "true"
                 
               env_file:
@@ -588,11 +844,6 @@
                 timeout: 10s
                 retries: 3
                 start_period: 60s
-              logging:
-                driver: "json-file"
-                options:
-                  max-size: "10m"
-                  max-file: "3"
         owner: ubuntu
         group: ubuntu
         mode: '0644'
@@ -603,150 +854,34 @@
         content: |
           # Aikido Zen RASP Configuration
           AIKIDO_TOKEN={{ aikido_token }}
-          AIKIDO_BLOCK=true
+          AIKIDO_BLOCK=false
           AIKIDO_DEBUG=true
           
           # DataDog Configuration
           DD_ENV=dev
           DD_VERSION=latest
+          
+          # OpenTelemetry Configuration
+          OTEL_EXPORTER_OTLP_ENDPOINT=http://172.17.0.1:4317
+          OTEL_SERVICE_NAME=juice-shop
         owner: ubuntu
         group: ubuntu
         mode: '0600'
       no_log: true
-
-    - name: Create deploy.sh
-      copy:
-        dest: "{{ juice_shop_dir }}/deploy.sh"
-        content: |
-          #!/bin/bash
-          set -e
-          cd "{{ juice_shop_dir }}"
-          
-          echo "🚀 Deploying Juice Shop with Security Instrumentation..."
-          
-          # Stop existing containers
-          docker compose down || true
-          
-          # Remove old images
-          docker rmi juice-shop-secure:latest 2>/dev/null || true
-          
-          # Build with progress output
-          echo "📦 Building Docker image (this includes TypeScript compilation)..."
-          docker compose build --no-cache --progress=plain
-          
-          # Start containers
-          echo "▶️  Starting containers..."
-          docker compose up -d
-          
-          # Wait for container to be healthy
-          echo "⏳ Waiting for application to start..."
-          sleep 45
-          
-          # Verify deployment
-          if docker ps | grep -q juice-shop; then
-            echo "✅ Container is running"
-            
-            # Check instrumentation in COMPILED code
-            echo ""
-            echo "🔍 Verifying Security Instrumentation (Compiled JS):"
-            echo "======================================"
-            docker exec juice-shop head -20 build/server.js | grep -E "tracer|aikido" || echo "⚠️  Check build/server.js manually"
-            
-            # Check logs
-            echo ""
-            echo "📊 Application Logs:"
-            docker logs juice-shop 2>&1 | tail -30
-            
-            # Test application
-            if curl -f -s http://localhost:3000 > /dev/null; then
-              echo ""
-              echo "✅ Application is accessible at http://localhost:3000"
-              echo "✅ Deployment successful!"
-              echo ""
-              echo "🔍 Generate traffic to see traces in DataDog:"
-              echo "   for i in {1..20}; do curl -s http://localhost:3000 >/dev/null; done"
-            else
-              echo "⚠️  Application not responding yet (may need more time)"
-            fi
-          else
-            echo "❌ Deployment failed - container not running"
-            docker compose logs
-            exit 1
-          fi
-        mode: '0755'
-
-    - name: Create verification script
-      copy:
-        dest: "{{ juice_shop_dir }}/verify-instrumentation.sh"
-        content: |
-          #!/bin/bash
-          echo "🔍 Security Instrumentation Verification"
-          echo "========================================"
-          
-          echo ""
-          echo "ℹ️  Juice Shop compiles TypeScript then runs: node build/app"
-          
-          echo ""
-          echo "📋 Container Status:"
-          docker ps | grep juice-shop || echo "❌ Container not running"
-          
-          echo ""
-          echo "📝 Modified app.ts (TypeScript source - first 12 lines):"
-          docker exec juice-shop head -12 app.ts 2>/dev/null || echo "⚠️  Could not read app.ts"
-          
-          echo ""
-          echo "🔧 Compiled build/app.js (what actually runs - first 40 lines):"
-          docker exec juice-shop head -40 build/app.js 2>/dev/null || echo "⚠️  Could not read build/app.js"
-          
-          echo ""
-          echo "🔍 Check for instrumentation in compiled code:"
-          docker exec juice-shop grep -n -E "tracer|aikido|firewall" build/app.js 2>/dev/null | head -10 || echo "⚠️  Instrumentation not found in build/app.js"
-          
-          echo ""
-          echo "📄 Tracer.ts content:"
-          docker exec juice-shop cat tracer.ts 2>/dev/null || echo "⚠️  Could not read tracer.ts"
-          
-          echo ""
-          echo "📄 Compiled build/tracer.js:"
-          docker exec juice-shop cat build/tracer.js 2>/dev/null || echo "⚠️  Could not read build/tracer.js"
-          
-          echo ""
-          echo "🔧 Environment Variables:"
-          docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
-          
-          echo ""
-          echo "📊 Application Startup Logs (looking for AIKIDO and DataDog):"
-          docker logs juice-shop 2>&1 | head -80 | grep -i -E "aikido|datadog|tracer|firewall|dd-trace|starting agent" || echo "⚠️  Security tool logs not found"
-          
-          echo ""
-          echo "🔍 AIKIDO Startup Messages (should see 'Starting agent'):"
-          docker logs juice-shop 2>&1 | grep -i "AIKIDO:" | head -20
-          
-          echo ""
-          echo "📡 DataDog Agent Status on Host:"
-          sudo datadog-agent status | grep -A 10 "APM Agent" 2>/dev/null || echo "⚠️  Run with sudo to see agent status"
-          
-          echo ""
-          echo "🚀 Generate traffic to trigger instrumentation:"
-          echo "   for i in {1..50}; do curl -s http://localhost:3000 >/dev/null; curl -s 'http://localhost:3000/rest/products/search?q=test' >/dev/null; sleep 0.5; done"
-          
-          echo ""
-          echo "📊 After generating traffic, check for trace activity:"
-          echo "   docker logs juice-shop --tail=100 | grep -i -E 'trace|span|aikido'"
-        mode: '0755'
 
     # =======================================================================
     # POST-INSTALLATION VERIFICATION
     # =======================================================================
     - name: Wait for services to stabilize
       pause:
-        seconds: 10
+        seconds: 15
 
     - name: Verify all services are running
       shell: |
         echo "=== Service Status Check ==="
         systemctl is-active prometheus && echo "✅ Prometheus: Active" || echo "❌ Prometheus: Inactive"
         systemctl is-active grafana-server && echo "✅ Grafana: Active" || echo "❌ Grafana: Inactive"
+        systemctl is-active otel-collector && echo "✅ OpenTelemetry Collector: Active" || echo "❌ OTel Collector: Inactive"
         systemctl is-active security-metrics-exporter && echo "✅ Metrics Exporter: Active" || echo "❌ Metrics Exporter: Inactive"
         systemctl is-active datadog-agent && echo "✅ DataDog Agent: Active" || echo "❌ DataDog Agent: Inactive"
       register: service_check
@@ -759,33 +894,52 @@
     - name: Display setup completion summary
       debug:
         msg:
-          - "=========================================="
-          - "✅ TWO-SCENARIO TESTING INFRASTRUCTURE READY"
-          - "=========================================="
+          - "============================================================================"
+          - "✅ THREE-SCENARIO TESTING INFRASTRUCTURE WITH OPENTELEMETRY - READY"
+          - "============================================================================"
           - ""
           - "📊 Monitoring Stack:"
-          - "  - Prometheus: http://{{ ansible_host }}:9090"
+          - "  - Prometheus: http://{{ ansible_host }}:9090 (with remote-write enabled)"
           - "  - Grafana: http://{{ ansible_host }}:3001 (admin/admin)"
           - "  - Metrics Exporter: http://{{ ansible_host }}:9999/metrics"
+          - "  - OpenTelemetry Collector: http://{{ ansible_host }}:4317 (gRPC)"
+          - "  - OpenTelemetry Metrics: http://{{ ansible_host }}:8889/metrics"
           - ""
           - "🔒 Security Tools:"
-          - "  - DataDog Agent: Active (APM + IAST)"
-          - "  - Aikido RASP: Ready (scenario-dependent)"
+          - "  - DataDog Agent: Active (APM + IAST + OTLP receiver)"
+          - "  - Aikido RASP: Ready (scenario-dependent, with metrics export)"
+          - "  - OpenTelemetry Collector: Receiving from both DataDog & Aikido"
+          - ""
+          - "📡 OpenTelemetry Data Flow:"
+          - "  DataDog IAST → OTLP → OTel Collector → Prometheus → Grafana"
+          - "  Aikido RASP → OTLP → OTel Collector → Prometheus → Grafana"
+          - ""
+          - "🎯 Three-Scenario Testing Capability:"
+          - "  - Scenario 1: IAST Only (no RASP) → Baseline detection"
+          - "  - Scenario 2A: IAST + RASP (detection-only) → Enhanced detection"
+          - "  - Scenario 2B: IAST + RASP (blocking mode) → Active protection"
           - ""
           - "📈 Grafana Dashboards:"
-          - "  - Thesis Comparison: Two-scenario analysis"
-          - "  - Side-by-side IAST vs RASP comparison"
-          - ""
-          - "🎯 Ready for Two-Scenario Testing:"
-          - "  - Scenario 1: IAST Only (detection, no blocking)"
-          - "  - Scenario 2: IAST + RASP (detection + blocking)"
+          - "  - Three-Scenario Comparison: Side-by-side analysis"
+          - "  - OpenTelemetry Metrics: Full observability"
+          - "  - Detection vs Blocking: Key thesis validation"
           - ""
           - "🚀 Next Steps:"
-          - "  1. Run GitHub Actions pipeline"
-          - "  2. Pipeline will deploy both scenarios"
-          - "  3. View results in Grafana dashboard"
-          - "  4. Export metrics for thesis analysis"
-          - "=========================================="
+          - "  1. Run GitHub Actions pipeline (will execute all 3 scenarios)"
+          - "  2. View real-time metrics in Grafana"
+          - "  3. Analyze OpenTelemetry traces in DataDog"
+          - "  4. Export data for thesis statistical analysis"
+          - ""
+          - "📊 Key Metrics Available:"
+          - "  - security_detections_total{scenario=...} → All detections"
+          - "  - security_blocks_total{scenario='iast-rasp-block'} → RASP blocks"
+          - "  - otel_* → OpenTelemetry collector metrics"
+          - "  - dast_vulnerabilities_found{scenario=...} → DAST findings"
+          - ""
+          - "🎓 Thesis Validation:"
+          - "  Compare blocking rates: Scenario 2B should show ~80% blocks"
+          - "  while Scenarios 1 and 2A show 0% blocks, proving RASP superiority"
+          - "============================================================================"
 
   handlers:
     - name: Restart DataDog Agent
@@ -806,4 +960,9 @@
     - name: Restart Metrics Exporter
       systemd:
         name: security-metrics-exporter
+        state: restarted
+
+    - name: Restart OpenTelemetry Collector
+      systemd:
+        name: otel-collector
         state: restarted
