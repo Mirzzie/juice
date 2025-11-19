@@ -336,14 +336,18 @@ jobs:
               exit 1
             fi
             
-            # Kill any remaining background processes
-            jobs -p | xargs -r kill 2>/dev/null || true
-            
-            # Explicit exit
+            # Ensure clean exit
             exit 0
           BUILD
 
-          echo "✅ SSH session completed successfully"
+          # Check SSH exit status
+          SSH_EXIT=$?
+          if [ $SSH_EXIT -eq 0 ]; then
+            echo "✅ SSH session completed successfully"
+          else
+            echo "❌ SSH session failed with exit code $SSH_EXIT"
+            exit 1
+          fi
 
       - name: Verify Deployment Health
         run: |
@@ -476,6 +480,8 @@ jobs:
               echo "❌ Configuration failed"
               exit 1
             fi
+            
+            exit 0
           SCENARIO
 
       - name: Run DAST Testing - Scenario 1
@@ -608,6 +614,8 @@ jobs:
               echo "❌ Configuration failed"
               exit 1
             fi
+            
+            exit 0
           SCENARIO
 
       - name: Run DAST Testing - Scenario 2A
@@ -740,6 +748,8 @@ jobs:
               echo "❌ Configuration failed"
               exit 1
             fi
+            
+            exit 0
           SCENARIO
 
       - name: Run DAST Testing - Scenario 2B (Blocking Mode)
