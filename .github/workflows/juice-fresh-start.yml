@@ -198,8 +198,9 @@ jobs:
           EOF
 
       - name: Build Juice Shop Container (One-Time Build)
+        timeout-minutes: 35
         run: |
-          ssh ec2 << 'BUILD'
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 ec2 << 'BUILD'
             set -e
             cd /opt/juice-shop
             
@@ -215,11 +216,6 @@ jobs:
             docker compose build --no-cache 2>&1 | tee /tmp/initial-build.log &
             BUILD_PID=$!
             
-            # Monitor build progress
-            TAIL_PID=""
-            (tail -f /tmp/initial-build.log 2>/dev/null | grep -E "Step|Successfully|ERROR" &)
-            TAIL_PID=$!
-            
             # Wait for build to complete (30 minute timeout)
             TIMEOUT=1800
             ELAPSED=0
@@ -230,7 +226,6 @@ jobs:
               
               if [ $ELAPSED -ge $TIMEOUT ]; then
                 kill $BUILD_PID 2>/dev/null || true
-                kill $TAIL_PID 2>/dev/null || true
                 echo "❌ Build timeout after ${TIMEOUT}s"
                 exit 1
               fi
@@ -238,7 +233,6 @@ jobs:
             
             wait $BUILD_PID
             BUILD_EXIT=$?
-            kill $TAIL_PID 2>/dev/null || true
             
             if [ $BUILD_EXIT -ne 0 ]; then
               echo "❌ Build failed!"
@@ -256,7 +250,7 @@ jobs:
             echo "   - Aikido RASP: DISABLED"
             
             # Update docker-compose.yml for default state
-            cat > docker-compose.yml <<EOF
+            cat > docker-compose.yml << 'COMPOSE_EOF'
           services:
             juice-shop:
               build: .
@@ -293,7 +287,7 @@ jobs:
                 timeout: 10s
                 retries: 3
                 start_period: 60s
-          EOF
+          COMPOSE_EOF
             
             # Start application
             docker compose up -d
@@ -320,15 +314,15 @@ jobs:
               fi
               
               # Create tracking file
-              cat > /opt/security-metrics/data/deployment_info.json <<TRACK
+              cat > /opt/security-metrics/data/deployment_info.json << 'TRACK_EOF'
           {
             "deployment_status": "success",
-            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deployment_time": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
             "image": "juice-shop-secure:latest",
             "default_state": "iast-only",
             "ready_for_testing": true
           }
-          TRACK
+          TRACK_EOF
               
               echo ""
               echo "=========================================="
@@ -341,7 +335,15 @@ jobs:
               docker compose logs --tail=100
               exit 1
             fi
+            
+            # Kill any remaining background processes
+            jobs -p | xargs -r kill 2>/dev/null || true
+            
+            # Explicit exit
+            exit 0
           BUILD
+
+          echo "✅ SSH session completed successfully"
 
       - name: Verify Deployment Health
         run: |
