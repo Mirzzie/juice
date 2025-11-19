@@ -867,7 +867,7 @@
           
           echo ""
           echo "📋 Container Status:"
-          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          docker ps --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}\t{{ '{{' }}.Ports{{ '}}' }}"
           
           echo ""
           echo "🔧 Security Tool Status:"
