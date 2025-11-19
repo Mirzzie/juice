@@ -104,7 +104,7 @@
       changed_when: false
 
     - name: Install Python packages for metrics exporter inside venv
-      pip:
+      ansible.builtin.pip:
         name:
           - prometheus-client
           - opentelemetry-api
@@ -114,8 +114,6 @@
           - opentelemetry-exporter-prometheus
           - psutil
           - requests
-        virtualenv: /opt/metrics-venv
-        virtualenv_site_packages: no
         executable: /opt/metrics-venv/bin/pip
         state: present
 
