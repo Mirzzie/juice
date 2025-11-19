@@ -84,9 +84,26 @@
         enabled: yes
 
     # =======================================================================
-    # PYTHON DEPENDENCIES FOR METRICS EXPORTER
+    # PYTHON DEPENDENCIES FOR METRICS EXPORTER (fixed: use venv per PEP-668)
     # =======================================================================
-    - name: Install Python packages for metrics exporter
+    - name: Ensure metrics venv directory exists
+      file:
+        path: /opt/metrics-venv
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create virtual environment for metrics exporter
+      command: python3 -m venv /opt/metrics-venv
+      args:
+        creates: /opt/metrics-venv/bin/activate
+
+    - name: Upgrade pip/setuptools/wheel inside venv
+      command: /opt/metrics-venv/bin/python -m pip install --upgrade pip setuptools wheel
+      changed_when: false
+
+    - name: Install Python packages for metrics exporter inside venv
       pip:
         name:
           - prometheus-client
@@ -97,7 +114,9 @@
           - opentelemetry-exporter-prometheus
           - psutil
           - requests
-        executable: pip3
+        virtualenv: /opt/metrics-venv
+        virtualenv_site_packages: no
+        executable: /opt/metrics-venv/bin/pip
         state: present
 
     # =======================================================================
@@ -246,7 +265,7 @@
                   endpoint: 0.0.0.0:4317
                 http:
                   endpoint: 0.0.0.0:4318
-            
+          
             prometheus:
               config:
                 scrape_configs:
@@ -259,7 +278,7 @@
             batch:
               timeout: 10s
               send_batch_size: 1024
-            
+          
             attributes:
               actions:
                 - key: environment
@@ -288,12 +307,12 @@
               const_labels:
                 environment: dev
                 monitored_by: otel_collector
-            
+          
             otlp:
               endpoint: "datadog-agent:4317"
               tls:
                 insecure: true
-            
+          
             logging:
               loglevel: info
 
@@ -373,7 +392,7 @@
         group: ubuntu
         mode: '0644'
       with_fileglob:
-        - grafana-three-scenario-dashboard.json
+        - files/grafana-three-scenario-dashboard.json
       ignore_errors: true
 
     # =======================================================================
@@ -403,10 +422,10 @@
         group: ubuntu
         recurse: yes
 
-    # Copy the metrics exporter script if it exists
+    # Copy the metrics exporter script if it exists (fixed src path -> files/)
     - name: Copy enhanced metrics exporter
       copy:
-        src: enhanced_metrics_exporter_otel.py
+        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ juice_shop_dir }}/enhanced_metrics_exporter_otel.py"
         owner: ubuntu
         group: ubuntu
