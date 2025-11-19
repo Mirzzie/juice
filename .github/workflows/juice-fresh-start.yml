@@ -1,889 +1,157 @@
-name: DevSecOps Pipeline - Fresh Start (Full Deployment + Testing)
+name: Juice Shop Fresh Start
 
 on:
-  workflow_dispatch:
-    inputs:
-      run_full_deployment:
-        description: "Run full infrastructure + Juice Shop deployment"
-        required: false
-        type: boolean
-        default: true
-      run_scenarios:
-        description: "Run testing scenarios after deployment"
-        required: false
-        type: choice
-        options:
-          - all
-          - iast-only
-          - iast-rasp-detect
-          - iast-rasp-block
-          - none
-        default: all
+  push:
+    branches:
+      - dev-test
+    paths:
+      - 'docker-compose.yml'
+      - 'Dockerfile'
+      - '.github/workflows/juice-fresh-start.yml'
+  pull_request:
+    branches:
+      - dev-test
 
 env:
-  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-  ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+  DOCKER_BUILDKIT: 1
+  BUILDKIT_PROGRESS: plain
 
 jobs:
-  # =========================================================================
-  # JOB 1: SAST - Semgrep
-  # =========================================================================
-  sast-semgrep:
-    name: 🔍 SAST - Semgrep
+  fresh-deployment:
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
+    timeout-minutes: 45
+
     steps:
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run Semgrep Scan
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Clean Docker environment
         run: |
-          semgrep scan --config=auto --json --output=semgrep-results.json || true
-          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+          docker system prune -af --volumes
+          docker network prune -f
 
-      - name: Upload to Semgrep Dashboard
-        if: always()
-        run: semgrep ci
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-        continue-on-error: true
-
-      - name: Upload Semgrep Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-results
-          path: |
-            semgrep-results.json
-            semgrep-results.sarif
-
-  # =========================================================================
-  # JOB 2: Prerequisites Check
-  # =========================================================================
-  check-prerequisites:
-    name: ✅ Verify Prerequisites
-    runs-on: ubuntu-latest
-    needs: sast-semgrep
-    outputs:
-      can_proceed: ${{ steps.check.outputs.can_proceed }}
-    steps:
-      - name: Check Required Secrets
-        id: check
+      - name: Configure DataDog credentials
         run: |
-          MISSING_SECRETS=()
-          if [ -z "${{ secrets.EC2_INSTANCE_IP }}" ]; then
-            MISSING_SECRETS+=("EC2_INSTANCE_IP")
-          fi
-          if [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ]; then
-            MISSING_SECRETS+=("EC2_SSH_PRIVATE_KEY")
-          fi
-          if [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ]; then
-            MISSING_SECRETS+=("ANSIBLE_VAULT_PASSWORD")
-          fi
-          if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
-            echo "::error::Missing secrets: ${MISSING_SECRETS[*]}"
-            echo "can_proceed=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "✅ All secrets configured"
-          echo "can_proceed=true" >> $GITHUB_OUTPUT
+          echo "DD_API_KEY=${{ secrets.DD_API_KEY }}" >> $GITHUB_ENV
+          echo "DD_APP_KEY=${{ secrets.DD_APP_KEY }}" >> $GITHUB_ENV
+          echo "DD_SITE=${{ secrets.DD_SITE }}" >> $GITHUB_ENV
 
-  # =========================================================================
-  # JOB 3: Configure Infrastructure with OpenTelemetry
-  # =========================================================================
-  configure-infrastructure:
-    name: ⚙️ Configure Infrastructure (Fresh Instance)
-    runs-on: ubuntu-latest
-    needs: check-prerequisites
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      github.event.inputs.run_full_deployment == 'true'
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Ansible
-        run: pip install ansible boto3 botocore
-
-      - name: Setup SSH Key
+      - name: Configure Aikido credentials
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          echo "AIKIDO_TOKEN=${{ secrets.AIKIDO_TOKEN }}" >> $GITHUB_ENV
 
-      - name: Wait for SSH
+      - name: Build Docker images
         run: |
+          docker compose -f docker-compose.yml build --no-cache
+
+      - name: Start services
+        run: |
+          docker compose -f docker-compose.yml up -d
+          sleep 45
+
+      - name: Verify service health
+        run: |
+          echo "Checking Juice Shop health..."
           for i in {1..30}; do
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-               -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-               "echo 'SSH ready'" 2>/dev/null; then
-              echo "✅ SSH ready"
-              exit 0
+            if curl -f http://localhost:3000 > /dev/null 2>&1; then
+              echo "✅ Juice Shop is healthy"
+              break
             fi
-            echo "Attempt $i/30..."
+            echo "Waiting for Juice Shop... (attempt $i/30)"
             sleep 10
           done
-          exit 1
-
-      - name: Create Ansible Inventory
-        run: |
-          mkdir -p ansible
-          cat > ansible/inventory.ini <<EOF
-          [juiceshop]
-          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          EOF
-
-      - name: Create Vault Password
-        run: |
-          cd ansible
-          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
-          chmod 600 .vault_pass
-
-      - name: Run Ansible Playbook (Full Infrastructure Setup)
-        run: |
-          cd ansible
-          ansible-playbook -i inventory.ini playbook.yml --vault-password-file .vault_pass -v
-
-      - name: Clean Up Vault
-        if: always()
-        run: rm -f ansible/.vault_pass
-
-  # =========================================================================
-  # JOB 4: Initial Juice Shop Deployment
-  # =========================================================================
-  initial-deployment:
-    name: 🚀 Initial Juice Shop Deployment
-    runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-infrastructure]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      needs.configure-infrastructure.result == 'success' &&
-      github.event.inputs.run_full_deployment == 'true'
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH with Keepalive
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName ${{ env.EC2_INSTANCE_IP }}
-            User ubuntu
-            IdentityFile ~/.ssh/id_rsa
-            ServerAliveInterval 30
-            ServerAliveCountMax 120
-            TCPKeepAlive yes
-          EOF
-
-      - name: Build Juice Shop Container (One-Time Build)
-        run: |
-          ssh ec2 << 'BUILD'
-            set -e
-            cd /opt/juice-shop
-            
-            echo "🏗️  INITIAL JUICE SHOP BUILD - STARTING"
-            echo "========================================"
-            
-            # Clean any previous containers
-            docker compose down -v 2>/dev/null || true
-            docker rm -f juice-shop 2>/dev/null || true
-            
-            # Build the image (this takes ~10 minutes)
-            echo "⏳ Building Docker image (this will take several minutes)..."
-            docker compose build --no-cache 2>&1 | tee /tmp/initial-build.log &
-            BUILD_PID=$!
-            
-            # Monitor build progress
-            TAIL_PID=""
-            (tail -f /tmp/initial-build.log 2>/dev/null | grep -E "Step|Successfully|ERROR" &)
-            TAIL_PID=$!
-            
-            # Wait for build to complete (30 minute timeout)
-            TIMEOUT=1800
-            ELAPSED=0
-            while kill -0 $BUILD_PID 2>/dev/null; do
-              sleep 30
-              ELAPSED=$((ELAPSED + 30))
-              echo "⏱️  Build in progress... ${ELAPSED}s / ${TIMEOUT}s"
-              
-              if [ $ELAPSED -ge $TIMEOUT ]; then
-                kill $BUILD_PID 2>/dev/null || true
-                kill $TAIL_PID 2>/dev/null || true
-                echo "❌ Build timeout after ${TIMEOUT}s"
-                exit 1
-              fi
-            done
-            
-            wait $BUILD_PID
-            BUILD_EXIT=$?
-            kill $TAIL_PID 2>/dev/null || true
-            
-            if [ $BUILD_EXIT -ne 0 ]; then
-              echo "❌ Build failed!"
-              tail -100 /tmp/initial-build.log
-              exit 1
-            fi
-            
-            echo "✅ Docker image built successfully!"
-            docker images | grep juice-shop-secure || echo "⚠️  Image not found in listing"
-            
-            # Deploy in default configuration (IAST enabled, RASP disabled)
-            echo ""
-            echo "🚀 Deploying application in default state..."
-            echo "   - DataDog IAST: ENABLED"
-            echo "   - Aikido RASP: DISABLED"
-            
-            # Update docker-compose.yml for default state
-            cat > docker-compose.yml <<EOF
-          services:
-            juice-shop:
-              build: .
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                
-                # DataDog Configuration - ENABLED
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                
-                # Aikido Configuration - DISABLED (default state)
-                AIKIDO_BLOCK: "false"
-                AIKIDO_DEBUG: "false"
-                
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          EOF
-            
-            # Start application
-            docker compose up -d
-            
-            echo "⏳ Waiting 90s for application startup..."
-            sleep 90
-            
-            # Verify deployment
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Juice Shop deployed successfully!"
-              echo ""
-              echo "📊 Container Status:"
-              docker ps --filter "name=juice-shop" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-              echo ""
-              echo "🔍 Recent Logs:"
-              docker logs juice-shop 2>&1 | tail -30
-              echo ""
-              
-              # Health check
-              if curl -f http://localhost:3000 >/dev/null 2>&1; then
-                echo "✅ Health check passed - Application is responding"
-              else
-                echo "⚠️  Warning: Health check failed, but container is running"
-              fi
-              
-              # Create tracking file
-              cat > /opt/security-metrics/data/deployment_info.json <<TRACK
-          {
-            "deployment_status": "success",
-            "deployment_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "image": "juice-shop-secure:latest",
-            "default_state": "iast-only",
-            "ready_for_testing": true
-          }
-          TRACK
-              
-              echo ""
-              echo "=========================================="
-              echo "✅ INITIAL DEPLOYMENT COMPLETE"
-              echo "=========================================="
-              echo "🎯 Ready for scenario testing!"
-              
-            else
-              echo "❌ Deployment failed - container not running"
-              docker compose logs --tail=100
-              exit 1
-            fi
-          BUILD
-
-      - name: Verify Deployment Health
-        run: |
-          echo "🏥 Running comprehensive health checks..."
           
-          # Test application endpoint
-          if curl -f http://${{ env.EC2_INSTANCE_IP }}:3000 >/dev/null 2>&1; then
-            echo "✅ Application HTTP endpoint: OK"
+          echo "Checking Prometheus health..."
+          for i in {1..12}; do
+            if curl -f http://localhost:9090/-/healthy > /dev/null 2>&1; then
+              echo "✅ Prometheus is healthy"
+              break
+            fi
+            echo "Waiting for Prometheus... (attempt $i/12)"
+            sleep 5
+          done
+          
+          echo "Checking Grafana health..."
+          for i in {1..12}; do
+            if curl -f http://localhost:3001/api/health > /dev/null 2>&1; then
+              echo "✅ Grafana is healthy"
+              break
+            fi
+            echo "Waiting for Grafana... (attempt $i/12)"
+            sleep 5
+          done
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          
+          # Test Juice Shop
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Juice Shop responding"
           else
-            echo "❌ Application HTTP endpoint: FAILED"
+            echo "❌ Juice Shop not responding (HTTP $RESPONSE)"
             exit 1
           fi
           
-          # Test Prometheus endpoint
-          if curl -f http://${{ env.EC2_INSTANCE_IP }}:9090/-/healthy >/dev/null 2>&1; then
-            echo "✅ Prometheus: OK"
+          # Test Prometheus
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9090/-/healthy)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Prometheus responding"
           else
-            echo "⚠️  Prometheus: CHECK MANUALLY"
+            echo "❌ Prometheus not responding (HTTP $RESPONSE)"
+            exit 1
           fi
           
-          # Test Grafana endpoint
-          if curl -f http://${{ env.EC2_INSTANCE_IP }}:3001/api/health >/dev/null 2>&1; then
-            echo "✅ Grafana: OK"
+          # Test Grafana
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/api/health)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Grafana responding"
           else
-            echo "⚠️  Grafana: CHECK MANUALLY"
-          fi
-          
-          echo ""
-          echo "✅ All critical health checks passed!"
-          echo "🎯 System ready for three-scenario testing"
-
-  # =========================================================================
-  # JOB 5: SCENARIO 1 - IAST Only
-  # =========================================================================
-  scenario1-iast-only:
-    name: 🔬 Scenario 1 - IAST Only (No RASP)
-    runs-on: ubuntu-latest
-    needs: [check-prerequisites, initial-deployment]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      needs.initial-deployment.result == 'success' &&
-      (github.event.inputs.run_scenarios == 'all' || github.event.inputs.run_scenarios == 'iast-only')
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH with Keepalive
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName ${{ env.EC2_INSTANCE_IP }}
-            User ubuntu
-            IdentityFile ~/.ssh/id_rsa
-            ServerAliveInterval 30
-            ServerAliveCountMax 120
-            TCPKeepAlive yes
-          EOF
-
-      - name: Configure Application - IAST Only
-        run: |
-          ssh ec2 << 'SCENARIO'
-            set -e
-            cd /opt/juice-shop
-            
-            echo "🔬 SCENARIO 1: DataDog IAST ON, Aikido RASP OFF"
-            echo "=============================================="
-            
-            # Update scenario tracking
-            cat > /opt/security-metrics/data/scenario_info.json <<EOF
-          {
-            "current_scenario": "iast-only",
-            "scenario_id": 1,
-            "scenario_name": "IAST Only - Detection Only",
-            "rasp_enabled": false,
-            "rasp_blocking": false,
-            "iast_enabled": true,
-            "start_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-            
-            # Update docker-compose.yml
-            cat > docker-compose.yml <<EOF
-          services:
-            juice-shop:
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                AIKIDO_BLOCK: "false"
-                AIKIDO_DEBUG: "false"
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          EOF
-            
-            docker compose down
-            docker compose up -d
-            
-            sleep 45
-            
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Scenario 1 configured - IAST ONLY mode"
-              docker logs juice-shop 2>&1 | tail -15
-            else
-              echo "❌ Configuration failed"
-              exit 1
-            fi
-          SCENARIO
-
-      - name: Run DAST Testing - Scenario 1
-        run: |
-          echo "🧪 Running DAST tests for Scenario 1 (IAST Only)"
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario1-baseline.json -r scenario1-baseline.html || true
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario1-full.json -r scenario1-full.html -m 5 -T 180 || true
-
-          echo "🎯 Launching attacks (expecting 0% BLOCKS - detection only)..."
-          for i in {1..15}; do
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert($i)</script>" || true
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1" || true
-            sleep 2
-          done
-
-          echo "✅ Scenario 1 complete - Check Grafana for IAST detections (0 blocks expected)"
-
-      - name: Upload Scenario 1 Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: scenario1-iast-only-results
-          path: |
-            scenario1-*.json
-            scenario1-*.html
-
-  # =========================================================================
-  # JOB 6: SCENARIO 2A - IAST + RASP (Detection Only)
-  # =========================================================================
-  scenario2a-iast-rasp-detect:
-    name: 🔍 Scenario 2A - IAST + RASP (Detection)
-    runs-on: ubuntu-latest
-    needs: [check-prerequisites, scenario1-iast-only]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      needs.scenario1-iast-only.result == 'success' &&
-      (github.event.inputs.run_scenarios == 'all' || github.event.inputs.run_scenarios == 'iast-rasp-detect')
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH with Keepalive
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName ${{ env.EC2_INSTANCE_IP }}
-            User ubuntu
-            IdentityFile ~/.ssh/id_rsa
-            ServerAliveInterval 30
-            ServerAliveCountMax 120
-            TCPKeepAlive yes
-          EOF
-
-      - name: Configure Application - IAST + RASP Detection
-        run: |
-          ssh ec2 << 'SCENARIO'
-            set -e
-            cd /opt/juice-shop
-            
-            echo "🔍 SCENARIO 2A: IAST + RASP (Detection Only)"
-            echo "============================================"
-            
-            cat > /opt/security-metrics/data/scenario_info.json <<EOF
-          {
-            "current_scenario": "iast-rasp-detect",
-            "scenario_id": 2,
-            "scenario_name": "IAST + RASP - Detection Only",
-            "rasp_enabled": true,
-            "rasp_blocking": false,
-            "iast_enabled": true,
-            "start_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-            
-            cat > docker-compose.yml <<EOF
-          services:
-            juice-shop:
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                AIKIDO_BLOCK: "false"
-                AIKIDO_DEBUG: "true"
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          EOF
-            
-            docker compose down
-            docker compose up -d
-            
-            sleep 45
-            
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Scenario 2A configured - RASP DETECTION mode"
-              docker logs juice-shop 2>&1 | grep -i "aikido" | tail -10
-            else
-              echo "❌ Configuration failed"
-              exit 1
-            fi
-          SCENARIO
-
-      - name: Run DAST Testing - Scenario 2A
-        run: |
-          echo "🧪 Running DAST tests for Scenario 2A (RASP Detection)"
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario2a-baseline.json -r scenario2a-baseline.html || true
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario2a-full.json -r scenario2a-full.html -m 5 -T 180 || true
-
-          echo "🎯 Launching attacks (expecting 0% BLOCKS - detection mode)..."
-          for i in {1..15}; do
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert($i)</script>" || true
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1" || true
-            sleep 2
-          done
-
-          echo "✅ Scenario 2A complete - Check Grafana for IAST + RASP detections (0 blocks)"
-
-      - name: Upload Scenario 2A Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: scenario2a-iast-rasp-detect-results
-          path: |
-            scenario2a-*.json
-            scenario2a-*.html
-
-  # =========================================================================
-  # JOB 7: SCENARIO 2B - IAST + RASP (Blocking Mode)
-  # =========================================================================
-  scenario2b-iast-rasp-block:
-    name: 🛡️ Scenario 2B - IAST + RASP (Blocking)
-    runs-on: ubuntu-latest
-    needs: [check-prerequisites, scenario2a-iast-rasp-detect]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      needs.scenario2a-iast-rasp-detect.result == 'success' &&
-      (github.event.inputs.run_scenarios == 'all' || github.event.inputs.run_scenarios == 'iast-rasp-block')
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH with Keepalive
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
-
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName ${{ env.EC2_INSTANCE_IP }}
-            User ubuntu
-            IdentityFile ~/.ssh/id_rsa
-            ServerAliveInterval 30
-            ServerAliveCountMax 120
-            TCPKeepAlive yes
-          EOF
-
-      - name: Configure Application - IAST + RASP Blocking
-        run: |
-          ssh ec2 << 'SCENARIO'
-            set -e
-            cd /opt/juice-shop
-            
-            echo "🛡️  SCENARIO 2B: IAST + RASP (Blocking Mode)"
-            echo "============================================"
-            
-            cat > /opt/security-metrics/data/scenario_info.json <<EOF
-          {
-            "current_scenario": "iast-rasp-block",
-            "scenario_id": 3,
-            "scenario_name": "IAST + RASP - Active Blocking",
-            "rasp_enabled": true,
-            "rasp_blocking": true,
-            "iast_enabled": true,
-            "start_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-            
-            cat > docker-compose.yml <<EOF
-          services:
-            juice-shop:
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                AIKIDO_BLOCK: "true"
-                AIKIDO_DEBUG: "true"
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-          EOF
-            
-            docker compose down
-            docker compose up -d
-            
-            sleep 45
-            
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Scenario 2B configured - RASP BLOCKING mode"
-              docker logs juice-shop 2>&1 | grep -i "aikido\|block" | tail -10
-            else
-              echo "❌ Configuration failed"
-              exit 1
-            fi
-          SCENARIO
-
-      - name: Run DAST Testing - Scenario 2B (Blocking Mode)
-        run: |
-          echo "🧪 Running DAST tests for Scenario 2B (RASP Blocking)"
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario2b-baseline.json -r scenario2b-baseline.html || true
-
-          docker run --rm -v $(pwd):/zap/wrk:rw \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py -t http://${{ env.EC2_INSTANCE_IP }}:3000 \
-            -J scenario2b-full.json -r scenario2b-full.html -m 5 -T 180 || true
-
-          echo "🎯 Launching attacks (expecting HIGH BLOCK RATE ~80%)..."
-          BLOCKED_COUNT=0
-          TOTAL_ATTEMPTS=30
-
-          for i in $(seq 1 $TOTAL_ATTEMPTS); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>")
-            if [ "$HTTP_CODE" == "403" ] || [ "$HTTP_CODE" == "418" ]; then
-              BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "✅ Attack $i: BLOCKED (HTTP $HTTP_CODE)"
-            else
-              echo "⚠️  Attack $i: Passed (HTTP $HTTP_CODE)"
-            fi
-            
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=' OR '1'='1")
-            if [ "$HTTP_CODE" == "403" ] || [ "$HTTP_CODE" == "418" ]; then
-              BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
-              echo "✅ Attack $i: BLOCKED (HTTP $HTTP_CODE)"
-            else
-              echo "⚠️  Attack $i: Passed (HTTP $HTTP_CODE)"
-            fi
-            
-            sleep 2
-          done
-
-          BLOCK_RATE=$((BLOCKED_COUNT * 100 / (TOTAL_ATTEMPTS * 2)))
-          echo ""
-          echo "📊 BLOCKING STATISTICS:"
-          echo "   Total Attack Attempts: $((TOTAL_ATTEMPTS * 2))"
-          echo "   Blocked: $BLOCKED_COUNT"
-          echo "   Block Rate: ${BLOCK_RATE}%"
-          echo ""
-
-          if [ $BLOCK_RATE -ge 60 ]; then
-            echo "✅ Scenario 2B complete - RASP blocking working effectively (${BLOCK_RATE}%)"
-          else
-            echo "⚠️  Warning: Block rate below expected (${BLOCK_RATE}% < 60%)"
+            echo "❌ Grafana not responding (HTTP $RESPONSE)"
+            exit 1
           fi
 
-      - name: Upload Scenario 2B Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: scenario2b-iast-rasp-block-results
-          path: |
-            scenario2b-*.json
-            scenario2b-*.html
-
-  # =========================================================================
-  # JOB 8: Generate Comprehensive Comparison Report
-  # =========================================================================
-  generate-comparison:
-    name: 📊 Generate Three-Scenario Comparison
-    runs-on: ubuntu-latest
-    needs:
-      [
-        scenario1-iast-only,
-        scenario2a-iast-rasp-detect,
-        scenario2b-iast-rasp-block,
-      ]
-    if: always()
-    steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-
-      - name: Generate Comprehensive Summary
+      - name: Display container logs
+        if: failure()
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          # 🔒 Fresh Start Deployment + Three-Scenario Testing Complete
+          echo "=== Docker Compose Services ==="
+          docker compose -f docker-compose.yml ps
+          echo ""
+          echo "=== Juice Shop Logs ==="
+          docker compose -f docker-compose.yml logs juice-shop
+          echo ""
+          echo "=== Prometheus Logs ==="
+          docker compose -f docker-compose.yml logs prometheus
+          echo ""
+          echo "=== Grafana Logs ==="
+          docker compose -f docker-compose.yml logs grafana
 
-          **Pipeline Run:** #${{ github.run_number }}  
-          **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+      - name: Generate deployment report
+        run: |
+          echo "## Fresh Deployment Report" > deployment-report.md
+          echo "**Date:** $(date)" >> deployment-report.md
+          echo "**Branch:** ${GITHUB_REF_NAME}" >> deployment-report.md
+          echo "**Commit:** ${GITHUB_SHA}" >> deployment-report.md
+          echo "" >> deployment-report.md
+          echo "### Services Status" >> deployment-report.md
+          docker compose -f docker-compose.yml ps >> deployment-report.md
+          echo "" >> deployment-report.md
+          echo "### Docker Images" >> deployment-report.md
+          docker images | grep -E 'juice|prometheus|grafana' >> deployment-report.md || true
 
-          ## Deployment Summary
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-report-${{ github.run_number }}
+          path: deployment-report.md
 
-          ✅ **Infrastructure:** Fully deployed from scratch  
-          ✅ **Juice Shop Build:** One-time build completed (~10 minutes)  
-          ✅ **Initial State:** IAST enabled, RASP disabled  
-          ✅ **Testing:** All three scenarios executed  
-
-          ## Test Scenarios Executed
-
-          | Scenario | Configuration | RASP Mode | Expected Blocks | Status |
-          |----------|--------------|-----------|----------------|--------|
-          | **Scenario 1** | IAST Only | N/A | 0% | ${{ needs.scenario1-iast-only.result }} |
-          | **Scenario 2A** | IAST + RASP | Detection Only | 0% | ${{ needs.scenario2a-iast-rasp-detect.result }} |
-          | **Scenario 2B** | IAST + RASP | Blocking Mode | ~80% | ${{ needs.scenario2b-iast-rasp-block.result }} |
-
-          ## Key Findings Summary
-
-          ### Scenario 1: IAST Only (Baseline)
-          - ✅ **Detection:** IAST active
-          - ❌ **Blocking:** None (0%)
-          - 📊 **Result:** Vulnerabilities detected but NOT prevented
-          - 🎯 **Purpose:** Establish detection-only baseline
-
-          ### Scenario 2A: IAST + RASP (Detection Only)
-          - ✅ **Detection:** IAST + RASP active
-          - ❌ **Blocking:** Disabled (0%)
-          - 📊 **Result:** Enhanced detection from both tools
-          - 🎯 **Purpose:** Compare detection capabilities without blocking
-
-          ### Scenario 2B: IAST + RASP (Blocking Mode)
-          - ✅ **Detection:** IAST + RASP active
-          - ✅ **Blocking:** Enabled (~80% expected)
-          - 📊 **Result:** Attacks detected AND actively prevented
-          - 🎯 **Purpose:** Demonstrate RASP protection capability
-
-          ## Data Analysis Locations
-
-          1. 📊 **Grafana Dashboard:** http://${{ secrets.EC2_INSTANCE_IP }}:3001
-             - View "IAST vs RASP Three-Scenario Comparison"
-             - Real-time metrics and historical trends
-
-          2. 📈 **Prometheus:** http://${{ secrets.EC2_INSTANCE_IP }}:9090
-             - Query raw OpenTelemetry metrics
-             - Custom metric exploration
-
-          3. 🔍 **DataDog IAST Dashboard**
-             - IAST vulnerability detections across all scenarios
-
-          4. 🛡️ **Aikido Dashboard**
-             - RASP detection and blocking events
-
-          ## System Status
-
-          - 🚀 **Juice Shop:** Running on port 3000
-          - 📊 **Prometheus:** Running on port 9090
-          - 📈 **Grafana:** Running on port 3001
-          - 🔧 **OpenTelemetry Collector:** Active
-          - 📡 **DataDog Agent:** Active
-          - 🛡️ **Security Metrics Exporter:** Active
-
-          ---
-
-          **🎓 Thesis Validation:** Fresh deployment complete. All three scenarios executed successfully.
-          Use daily testing workflow for routine tests without full rebuild.
-          EOF
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml down -v
+          docker system prune -af
