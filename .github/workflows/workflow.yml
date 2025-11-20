@@ -1,24 +1,19 @@
-name: DevSecOps Pipeline - Deploy & Security Scans with Metrics
+name: DevSecOps Pipeline - Deploy & Security Scans
 
 on:
   push:
-    branches: [main, dev-test]
+    branches: [main, dev]
   pull_request:
-    branches: [main, dev-test]
+    branches: [main, dev]
   workflow_dispatch:
     inputs:
       skip_ansible:
         description: "Skip Ansible configuration (if already configured)"
         required: false
         type: boolean
-        default: false
+        default: true
       run_full_security_scan:
         description: "Run full security scan (including DAST)"
-        required: false
-        type: boolean
-        default: true
-      enable_metrics:
-        description: "Enable Prometheus/Grafana metrics collection"
         required: false
         type: boolean
         default: true
@@ -107,10 +102,10 @@ jobs:
           echo "can_proceed=true" >> $GITHUB_OUTPUT
 
   # =========================================================================
-  # JOB 3: Configure Instance (With Monitoring Stack)
+  # JOB 3: Configure Instance (Optional)
   # =========================================================================
   configure-instance:
-    name: ⚙️ Configure Instance with Ansible (Including Monitoring)
+    name: ⚙️ Configure Instance with Ansible
     runs-on: ubuntu-latest
     needs: check-prerequisites
     if: |
@@ -156,7 +151,7 @@ jobs:
           mkdir -p ansible
           cat > ansible/inventory.ini <<EOF
           [juiceshop]
-          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_EC2_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
           EOF
 
       - name: Create Vault Password File
@@ -169,8 +164,7 @@ jobs:
         run: |
           cd ansible
           ansible-playbook -i inventory.ini playbook.yml \
-            --vault-password-file .vault_pass \
-            --extra-vars "enable_metrics=${{ github.event.inputs.enable_metrics }}" -v
+            --vault-password-file .vault_pass -v
 
       - name: Clean Up Vault Password
         if: always()
@@ -185,24 +179,13 @@ jobs:
             docker compose version
             sudo datadog-agent status | head -20 || true
             ls -la /opt/juice-shop/
-            
-            # Check monitoring stack if enabled
-            if docker ps | grep -q prometheus; then
-              echo "✅ Prometheus is running"
-            fi
-            if docker ps | grep -q grafana; then
-              echo "✅ Grafana is running"
-            fi
-            if docker ps | grep -q otel-collector; then
-              echo "✅ OpenTelemetry Collector is running"
-            fi
           ENDSSH
 
   # =========================================================================
-  # JOB 4: Build and Deploy Application with Metrics
+  # JOB 4: Build and Deploy Application
   # =========================================================================
   build-and-deploy:
-    name: 🚀 Build & Deploy Application with Observability
+    name: 🚀 Build & Deploy Application
     runs-on: ubuntu-latest
     needs: [check-prerequisites, configure-instance]
     if: |
@@ -238,7 +221,7 @@ jobs:
             echo "✅ Instance is ready for deployment"
           ENDSSH
 
-      - name: Deploy Application Stack
+      - name: Deploy Application
         run: |
           ssh -i ~/.ssh/id_rsa -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
             ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH' || true
@@ -269,32 +252,18 @@ jobs:
             
             echo "✅ Build completed successfully"
             
-            echo "▶️  Starting application stack..."
+            echo "▶️  Starting containers..."
             docker compose up -d
             
-            echo "⏳ Waiting for application to start (60 seconds)..."
-            sleep 60
+            echo "⏳ Waiting for application to start (45 seconds)..."
+            sleep 45
             
-            # Verify all containers are running
             if docker ps | grep -q juice-shop; then
-              echo "✅ Application container is running"
+              echo "✅ Container is running"
             else
-              echo "❌ Application container failed to start"
-              docker compose logs juice-shop
+              echo "❌ Container failed to start"
+              docker compose logs
               exit 1
-            fi
-            
-            # Check monitoring stack if enabled
-            if [ "${{ github.event.inputs.enable_metrics }}" = "true" ]; then
-              if docker ps | grep -q prometheus; then
-                echo "✅ Prometheus is collecting metrics"
-              fi
-              if docker ps | grep -q grafana; then
-                echo "✅ Grafana dashboards available"
-              fi
-              if docker ps | grep -q otel-collector; then
-                echo "✅ OpenTelemetry Collector is processing telemetry"
-              fi
             fi
             
             # Wait for application to respond
@@ -309,50 +278,48 @@ jobs:
             echo "⚠️ Application may need more time to start"
           ENDSSH
 
-      - name: Verify Security Instrumentation & Metrics Collection
+          # Verify deployment in a separate connection
+          sleep 5
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
+            if docker ps | grep -q juice-shop; then
+              echo "✅ Deployment verified - container is running"
+              exit 0
+            else
+              echo "❌ Container not running after deployment"
+              exit 1
+            fi
+          VERIFY
+
+      - name: Verify Security Instrumentation
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
             cd /opt/juice-shop
             
             echo ""
             echo "========================================"
-            echo "🔍 Security & Observability Verification"
+            echo "🔍 Security Instrumentation Verification"
             echo "========================================"
+            echo "ℹ️  Juice Shop uses ts-node (runs .ts files directly)"
             
             # Check TypeScript source modifications
             echo ""
             echo "📝 Modified server.ts (first 15 lines):"
             docker exec juice-shop head -15 server.ts
             
+            # Check tracer
+            echo ""
+            echo "📄 Tracer.ts:"
+            docker exec juice-shop cat tracer.ts
+            
             # Check environment variables
             echo ""
             echo "🔧 Security Environment Variables:"
-            docker exec juice-shop env | grep -E "DD_|AIKIDO_|OTEL_" | sort
+            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
             
             # Check initial logs
             echo ""
             echo "📊 Initial Application Logs:"
             docker logs juice-shop 2>&1 | tail -50
-            
-            # Check metrics endpoints if enabled
-            if [ "${{ github.event.inputs.enable_metrics }}" = "true" ]; then
-              echo ""
-              echo "📈 Metrics Verification:"
-              
-              # Check Prometheus targets
-              echo "Prometheus targets:"
-              curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[].labels' 2>/dev/null || echo "Waiting for Prometheus..."
-              
-              # Check OpenTelemetry metrics
-              echo ""
-              echo "OpenTelemetry metrics endpoint:"
-              curl -s http://localhost:8888/metrics | head -20 2>/dev/null || echo "Waiting for OTel Collector..."
-              
-              # Check Grafana
-              echo ""
-              echo "Grafana status:"
-              curl -s http://localhost:3001/api/health 2>/dev/null || echo "Waiting for Grafana..."
-            fi
             
             # DataDog agent status
             echo ""
@@ -360,70 +327,30 @@ jobs:
             sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  Check agent status manually"
           ENDSSH
 
-      - name: Generate Test Traffic with Metrics Collection
+      - name: Generate Test Traffic
         run: |
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "🚀 Generating test traffic for instrumentation and metrics..."
-            
-            # Run the Python metrics exporter in background if exists
-            if [ -f "/opt/juice-shop/enhanced_metrics_exporter_otel.py" ]; then
-              echo "Starting metrics exporter..."
-              cd /opt/juice-shop
-              nohup python3 enhanced_metrics_exporter_otel.py > metrics_exporter.log 2>&1 &
-              EXPORTER_PID=$!
-              echo "Metrics exporter started with PID: $EXPORTER_PID"
-            fi
-            
-            # Generate diverse traffic patterns
-            for scenario in "baseline" "attack" "spike"; do
-              echo "Running scenario: $scenario"
-              case $scenario in
-                baseline)
-                  for i in {1..20}; do
-                    curl -s http://localhost:3000 > /dev/null
-                    curl -s "http://localhost:3000/rest/products/search?q=apple" > /dev/null
-                    sleep 0.5
-                  done
-                  ;;
-                attack)
-                  for i in {1..10}; do
-                    # SQL Injection attempts
-                    curl -s "http://localhost:3000/rest/products/search?q=' OR '1'='1" > /dev/null
-                    # XSS attempts
-                    curl -s "http://localhost:3000/rest/products/search?q=<script>alert(1)</script>" > /dev/null
-                    # Path traversal
-                    curl -s "http://localhost:3000/public/../../../etc/passwd" > /dev/null
-                    sleep 1
-                  done
-                  ;;
-                spike)
-                  for i in {1..50}; do
-                    curl -s http://localhost:3000 > /dev/null &
-                  done
-                  wait
-                  ;;
-              esac
-              echo "Scenario $scenario completed"
-              sleep 5
+            echo "🚀 Generating test traffic to trigger instrumentation..."
+            for i in {1..10}; do
+              curl -s http://localhost:3000 > /dev/null
+              curl -s "http://localhost:3000/rest/products/search?q=test" > /dev/null
+              sleep 1
             done
-            
-            echo "✅ Test traffic generation completed"
+            echo "✅ Test traffic generated"
             
             # Show logs after traffic
             echo ""
             echo "📊 Logs after traffic generation:"
-            docker logs juice-shop --tail=30 2>&1 | grep -i -E "datadog|aikido|trace|otel|metric" || echo "Check logs manually"
+            docker logs juice-shop --tail=30 2>&1 | grep -i -E "datadog|aikido|trace" || echo "Check logs manually"
           ENDSSH
 
       - name: Generate Deployment Summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## 🚀 Deployment Summary with Observability
+          ## 🚀 Deployment Summary
 
           **Instance IP:** \`${{ env.EC2_INSTANCE_IP }}\`  
           **Application URL:** http://${{ env.EC2_INSTANCE_IP }}:3000  
-          **Grafana Dashboard:** http://${{ env.EC2_INSTANCE_IP }}:3001 (admin/admin)  
-          **Prometheus:** http://${{ env.EC2_INSTANCE_IP }}:9090  
           **Deployment Status:** ✅ Success
 
           ### Security Instrumentation Status:
@@ -435,48 +362,24 @@ jobs:
           | **Semgrep** | SAST | ✅ Complete | Pre-deployment scan |
           | **OWASP ZAP** | DAST | ⏳ Pending | Scheduled next |
 
-          ### Observability Stack:
-
-          | Component | Port | Status | Purpose |
-          |-----------|------|--------|---------|
-          | **Prometheus** | 9090 | ✅ Active | Metrics collection |
-          | **Grafana** | 3001 | ✅ Active | Visualization |
-          | **OpenTelemetry** | 4317/4318 | ✅ Active | Telemetry collection |
-          | **Metrics Exporter** | 8889 | ✅ Active | Custom metrics |
-
           ### Environment Variables Set:
           - \`DD_ENV=dev\`
           - \`DD_APPSEC_ENABLED=true\`
           - \`DD_IAST_ENABLED=true\`
+          - \`DD_LOGS_INJECTION=true\`
+          - \`DD_PROFILING_ENABLED=true\`
           - \`AIKIDO_TOKEN=***\` (from secrets)
           - \`AIKIDO_DEBUG=true\`
-          - \`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317\`
-          - \`OTEL_SERVICE_NAME=juice-shop\`
-          - \`OTEL_METRICS_EXPORTER=otlp\`
 
-          ### Key Metrics Being Collected:
-          - **Security Metrics:** Attack detection rate, blocking rate, false positives
-          - **Performance Metrics:** Response time, throughput, latency percentiles
-          - **Resource Metrics:** CPU usage, memory consumption, network I/O
-          - **Application Metrics:** Request rate, error rate, duration
-
-          ### Dashboards & Monitoring:
+          ### Security Dashboards:
           - 🔍 [Semgrep Findings](https://semgrep.dev/orgs/-/findings)
           - 🛡️ [Aikido Dashboard](https://app.aikido.dev)
           - 📊 [DataDog IAST](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
-          - 📈 [Grafana Metrics](http://${{ env.EC2_INSTANCE_IP }}:3001/d/iast-vs-rasp/iast-vs-rasp-comparison)
 
           ### Verification Commands:
           \`\`\`bash
           # SSH into instance
           ssh -i your-key.pem ubuntu@${{ env.EC2_INSTANCE_IP }}
-
-          # Check metrics collection
-          curl http://localhost:9090/api/v1/query?query=up
-          curl http://localhost:8888/metrics
-
-          # View Grafana dashboards
-          open http://${{ env.EC2_INSTANCE_IP }}:3001
 
           # Check instrumentation
           cd /opt/juice-shop
@@ -484,20 +387,17 @@ jobs:
 
           # View logs
           docker logs juice-shop -f
-          docker logs prometheus -f
-          docker logs grafana -f
           \`\`\`
 
           ### Next Steps:
-          1. ✅ Access Grafana: http://${{ env.EC2_INSTANCE_IP }}:3001 (admin/admin)
-          2. ✅ Import IAST vs RASP comparison dashboard
-          3. ⏳ Wait 5-10 minutes for metrics to populate
-          4. 📊 Monitor security effectiveness metrics
-          5. 🔍 Run attack simulations to compare IAST vs RASP
+          1. ✅ Access application: http://${{ env.EC2_INSTANCE_IP }}:3000
+          2. ⏳ Wait 5-10 minutes for traces to appear in DataDog
+          3. 🔍 Monitor security dashboards for vulnerabilities
+          4. 📊 DAST scan will run automatically next
           EOF
 
   # =========================================================================
-  # JOB 5: DAST - OWASP ZAP with Metrics Export
+  # JOB 5: DAST - OWASP ZAP
   # =========================================================================
   dast-owasp-zap:
     name: 🕷️ DAST - OWASP ZAP Security Scan
@@ -540,7 +440,7 @@ jobs:
           fail_action: false
         continue-on-error: true
 
-      - name: OWASP ZAP Full Scan with Metrics
+      - name: OWASP ZAP Full Scan
         uses: zaproxy/action-full-scan@v0.8.0
         with:
           target: "http://${{ env.EC2_INSTANCE_IP }}:3000"
@@ -548,18 +448,6 @@ jobs:
           cmd_options: "-a -j -m 5 -T 120"
           allow_issue_writing: false
           fail_action: false
-        continue-on-error: true
-
-      - name: Export DAST Metrics
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            # Export DAST findings as metrics
-            if [ -f "/opt/juice-shop/enhanced_metrics_exporter_otel.py" ]; then
-              echo "Updating metrics with DAST findings..."
-              # Signal the metrics exporter about DAST completion
-              echo "DAST_COMPLETE=$(date +%s)" >> /opt/juice-shop/scan_status.txt
-            fi
-          ENDSSH
         continue-on-error: true
 
       - name: Upload ZAP Results
@@ -573,173 +461,75 @@ jobs:
             report_md.md
 
   # =========================================================================
-  # JOB 6: IAST & Metrics Analysis
+  # JOB 6: IAST - DataDog
   # =========================================================================
-  iast-metrics-analysis:
-    name: 📊 IAST Analysis & Metrics Collection
+  iast-datadog-verification:
+    name: 📊 IAST - DataDog Runtime Analysis
     runs-on: ubuntu-latest
     needs: [check-prerequisites, build-and-deploy]
     if: needs.build-and-deploy.result == 'success'
     steps:
-      - name: Generate Attack Traffic for Comparison
+      - name: Generate Traffic for IAST Analysis
         run: |
-          echo "Generating comprehensive attack patterns for IAST vs RASP comparison..."
-
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            cd /opt/juice-shop
-            
-            # Export attack scenarios for metrics
-            cat > attack_scenarios.sh << 'SCRIPT'
-            #!/bin/bash
-            
-            echo "Starting IAST vs RASP comparison attack scenarios..."
-            
-            # Track metrics
-            ATTACKS_TOTAL=0
-            ATTACKS_BLOCKED=0
-            
-            # Scenario 1: SQL Injection attacks
-            echo "[$(date)] Scenario 1: SQL Injection"
-            for i in {1..20}; do
-              response=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/rest/products/search?q=' OR '1'='1--")
-              ATTACKS_TOTAL=$((ATTACKS_TOTAL + 1))
-              if [ "$response" = "403" ] || [ "$response" = "400" ]; then
-                ATTACKS_BLOCKED=$((ATTACKS_BLOCKED + 1))
-              fi
-              sleep 0.5
-            done
-            
-            # Scenario 2: XSS attacks
-            echo "[$(date)] Scenario 2: Cross-Site Scripting"
-            for i in {1..20}; do
-              response=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/Feedbacks \
-                -H "Content-Type: application/json" \
-                -d '{"comment":"<script>alert(document.cookie)</script>","rating":5}')
-              ATTACKS_TOTAL=$((ATTACKS_TOTAL + 1))
-              if [ "$response" = "403" ] || [ "$response" = "400" ]; then
-                ATTACKS_BLOCKED=$((ATTACKS_BLOCKED + 1))
-              fi
-              sleep 0.5
-            done
-            
-            # Scenario 3: Path Traversal
-            echo "[$(date)] Scenario 3: Path Traversal"
-            for i in {1..10}; do
-              response=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/public/../../../etc/passwd")
-              ATTACKS_TOTAL=$((ATTACKS_TOTAL + 1))
-              if [ "$response" = "403" ] || [ "$response" = "400" ]; then
-                ATTACKS_BLOCKED=$((ATTACKS_BLOCKED + 1))
-              fi
-              sleep 0.5
-            done
-            
-            # Scenario 4: Command Injection
-            echo "[$(date)] Scenario 4: Command Injection"
-            for i in {1..10}; do
-              response=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/rest/products/search?q=test;cat /etc/passwd")
-              ATTACKS_TOTAL=$((ATTACKS_TOTAL + 1))
-              if [ "$response" = "403" ] || [ "$response" = "400" ]; then
-                ATTACKS_BLOCKED=$((ATTACKS_BLOCKED + 1))
-              fi
-              sleep 0.5
-            done
-            
-            # Export metrics
-            echo "ATTACKS_TOTAL=$ATTACKS_TOTAL" > attack_metrics.txt
-            echo "ATTACKS_BLOCKED=$ATTACKS_BLOCKED" >> attack_metrics.txt
-            echo "BLOCK_RATE=$(echo "scale=2; $ATTACKS_BLOCKED * 100 / $ATTACKS_TOTAL" | bc)%" >> attack_metrics.txt
-            
-            echo "Attack scenarios completed. Total: $ATTACKS_TOTAL, Blocked: $ATTACKS_BLOCKED"
-            SCRIPT
-            
-            chmod +x attack_scenarios.sh
-            ./attack_scenarios.sh
-            
-            # Display attack metrics
-            cat attack_metrics.txt
-          ENDSSH
-
-          echo "✅ Attack traffic generation completed for IAST vs RASP comparison"
-
-      - name: Collect and Analyze Metrics
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "📊 Collecting metrics from all sources..."
-            
-            # Query Prometheus for key metrics
-            echo "Querying Prometheus metrics..."
-            
-            # Response time percentiles
-            curl -s "http://localhost:9090/api/v1/query?query=histogram_quantile(0.95,rate(http_request_duration_seconds_bucket[5m]))" | jq '.data.result'
-            
-            # Request rate
-            curl -s "http://localhost:9090/api/v1/query?query=rate(http_requests_total[5m])" | jq '.data.result'
-            
-            # Error rate
-            curl -s "http://localhost:9090/api/v1/query?query=rate(http_requests_total{status=~'5..'}[5m])" | jq '.data.result'
-            
-            # Security events from IAST
-            curl -s "http://localhost:9090/api/v1/query?query=security_vulnerabilities_detected_total" | jq '.data.result'
-            
-            # RASP blocking metrics
-            curl -s "http://localhost:9090/api/v1/query?query=security_attacks_blocked_total" | jq '.data.result'
-            
-            echo "✅ Metrics collection completed"
-          ENDSSH
+          echo "Generating diverse traffic for DataDog IAST analysis..."
+          for i in {1..50}; do
+            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" > /dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" > /dev/null || true
+            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/api/Challenges > /dev/null || true
+            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/admin/application-version > /dev/null || true
+            curl -X POST -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login \
+              -d '{"email":"admin@juice-sh.op","password":"admin123"}' \
+              -H "Content-Type: application/json" > /dev/null || true
+            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/1/reviews" > /dev/null || true
+            sleep 1
+          done
+          echo "✅ Generated 350+ requests for IAST analysis"
 
       - name: Verify DataDog Integration
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## 📊 IAST vs RASP Metrics Analysis
+          ## 📊 DataDog IAST Analysis
 
-          **Status:** Metrics collection active  
-          **Grafana Dashboard:** [View Comparison](http://${{ env.EC2_INSTANCE_IP }}:3001/d/iast-vs-rasp/comparison)
-          **Prometheus:** [Query Interface](http://${{ env.EC2_INSTANCE_IP }}:9090)
+          **Status:** Traffic generated successfully  
+          **Requests Generated:** 350+  
+          **Dashboard:** [View IAST Results](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
 
-          ### Key Performance Indicators:
-          - ⏱️ **Response Time:** P95 latency comparison
-          - 🛡️ **Detection Rate:** Vulnerabilities found by IAST
-          - 🚫 **Blocking Rate:** Attacks blocked by RASP
-          - 📈 **Throughput:** Requests per second impact
-          - 💻 **Resource Usage:** CPU/Memory overhead
+          ### Analysis Timeline:
+          - ⏱️ Traces appear: ~2-5 minutes
+          - 🔍 Vulnerability detection: ~5-10 minutes
+          - ✅ Complete analysis: ~15 minutes
 
-          ### Comparison Metrics:
-          1. **IAST (DataDog)**
-             - Detection during runtime
-             - No blocking capability
-             - Lower performance overhead
-             - Detailed vulnerability context
-
-          2. **RASP (Aikido)**
-             - Real-time attack blocking
-             - Higher security effectiveness
-             - Moderate performance impact
-             - Immediate threat mitigation
-
-          ### Access Points:
-          - Grafana: http://${{ env.EC2_INSTANCE_IP }}:3001 (admin/admin)
-          - Prometheus: http://${{ env.EC2_INSTANCE_IP }}:9090
-          - Application: http://${{ env.EC2_INSTANCE_IP }}:3000
+          ### What to Look For:
+          1. **APM Traces** - Verify requests are being traced
+          2. **Security Signals** - Check for detected vulnerabilities
+          3. **IAST Findings** - Look for code-level vulnerability analysis
+          4. **Attack Attempts** - XSS and SQL injection attempts logged
           EOF
 
   # =========================================================================
-  # JOB 7: Security & Metrics Report
+  # JOB 7: Security Report
   # =========================================================================
-  security-metrics-report:
-    name: 📋 Generate Security & Observability Report
+  security-report:
+    name: 📋 Generate Security Report
     runs-on: ubuntu-latest
     needs:
-      [sast-semgrep, build-and-deploy, dast-owasp-zap, iast-metrics-analysis]
+      [
+        sast-semgrep,
+        build-and-deploy,
+        dast-owasp-zap,
+        iast-datadog-verification,
+      ]
     if: always()
     steps:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
 
-      - name: Generate Comprehensive Report
+      - name: Generate Comprehensive Security Report
         run: |
-          cat > security-metrics-report.md << 'EOF'
-          # 🔒 DevSecOps Security & Observability Report
+          cat > security-report.md << 'EOF'
+          # 🔒 DevSecOps Security Scan Report
 
           **Pipeline Run:** #${{ github.run_number }}  
           **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
@@ -755,34 +545,56 @@ jobs:
           |----------------|------|--------|-----------|
           | **Semgrep** | SAST | ${{ needs.sast-semgrep.result }} | [View](https://semgrep.dev/orgs/-/findings) |
           | **Aikido Zen** | RASP | Active | [View](https://app.aikido.dev) |
-          | **DataDog** | IAST | ${{ needs.iast-metrics-analysis.result }} | [View](https://app.us5.datadoghq.com/security/appsec) |
+          | **DataDog** | IAST | ${{ needs.iast-datadog-verification.result }} | [View](https://app.us5.datadoghq.com/security/appsec) |
           | **OWASP ZAP** | DAST | ${{ needs.dast-owasp-zap.result }} | [Artifacts](https://github.com/${{ github.repository }}/actions/artifacts) |
 
           ---
 
-          ## 📈 Observability Stack
+          ## 🛡️ Security Tools Configuration
 
-          | Component | Port | Purpose | Access |
-          |-----------|------|---------|--------|
-          | **Grafana** | 3001 | Visualization | http://${{ env.EC2_INSTANCE_IP }}:3001 |
-          | **Prometheus** | 9090 | Metrics Storage | http://${{ env.EC2_INSTANCE_IP }}:9090 |
-          | **OpenTelemetry** | 4317/4318 | Telemetry Collection | Internal |
-          | **Custom Exporter** | 8889 | Security Metrics | Internal |
+          ### DataDog APM & IAST
+          - ✅ Tracer initialized in `server.ts`
+          - ✅ Environment variables configured
+          - ✅ Agent communication: `172.17.0.1:8126`
+          - ✅ IAST enabled with 100% sampling
+          - ✅ AppSec WAF enabled
+
+          ### Aikido Zen RASP
+          - ✅ Firewall loaded via `require('@aikidosec/firewall')`
+          - ✅ Running in non-blocking mode
+          - ✅ Debug logging enabled
+          - ✅ Token configured from secrets
+
+          ### Semgrep SAST
+          - ✅ Pre-deployment code scanning
+          - ✅ Auto-configuration enabled
+          - ✅ Results uploaded to GitHub Security
+
+          ### OWASP ZAP DAST
+          - ✅ Baseline scan completed
+          - ✅ Full scan completed
+          - ✅ Results available as artifacts
 
           ---
 
-          ## 🎯 IAST vs RASP Comparison Metrics
+          ## 🔍 Key Findings
 
-          ### Detection Capabilities
-          - **IAST**: Identifies vulnerabilities during runtime without blocking
-          - **RASP**: Detects and blocks attacks in real-time
+          Review detailed findings in respective dashboards:
 
-          ### Performance Impact
-          - **IAST**: ~5-10% overhead (monitoring only)
-          - **RASP**: ~15-25% overhead (active protection)
+          1. **SAST (Semgrep)**: Pre-deployment code vulnerabilities
+          2. **RASP (Aikido)**: Runtime attack blocking and detection
+          3. **IAST (DataDog)**: Code-level vulnerability analysis during runtime
+          4. **DAST (ZAP)**: External penetration testing results
 
-          ### Key Metrics Dashboard
-          Access the full comparison at: http://${{ env.EC2_INSTANCE_IP }}:3001/d/iast-vs-rasp
+          ---
+
+          ## 📈 Next Steps
+
+          1. ✅ Review all security dashboards
+          2. 🔍 Investigate high/critical findings
+          3. 🛠️ Apply necessary patches
+          4. 📊 Monitor ongoing security metrics
+          5. 🔄 Schedule regular security scans
 
           ---
 
@@ -790,16 +602,30 @@ jobs:
 
           - [Semgrep Documentation](https://semgrep.dev/docs/)
           - [Aikido Zen Docs](https://docs.aikido.dev/)
-          - [DataDog IAST Guide](https://docs.datadoghq.com/security/application_security/)
-          - [Prometheus Docs](https://prometheus.io/docs/)
-          - [Grafana Docs](https://grafana.com/docs/)
+          - [DataDog IAST Guide](https://docs.datadoghq.com/security/application_security/how-appsec-works/)
+          - [OWASP ZAP Docs](https://www.zaproxy.org/docs/)
 
           EOF
 
-          cat security-metrics-report.md >> $GITHUB_STEP_SUMMARY
+          cat security-report.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Security Report
         uses: actions/upload-artifact@v4
         with:
-          name: security-metrics-report
-          path: security-metrics-report.md
+          name: security-report
+          path: security-report.md
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-report.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+        continue-on-error: true
