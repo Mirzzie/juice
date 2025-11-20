@@ -2,9 +2,9 @@ name: DevSecOps Pipeline - Deploy & Security Scans
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev-test]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev-test]
   workflow_dispatch:
     inputs:
       skip_ansible:
