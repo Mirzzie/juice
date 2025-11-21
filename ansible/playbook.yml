@@ -513,3 +513,9 @@
         owner: ubuntu
         group: ubuntu
         mode: '0644'
+
+  handlers:
+    - name: Restart DataDog Agent
+      systemd:
+        name: datadog-agent
+        state: restarted
