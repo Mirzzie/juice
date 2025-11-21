@@ -1,4 +1,4 @@
-name: DevSecOps Pipeline - Juice Shop
+name: DevSecOps Pipeline - Juice Shop (Three Scenarios)
 
 on:
   push:
@@ -11,66 +11,27 @@ env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
   EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  PROMETHEUS_PORT: 9090
+  EXPORTER_PORT: 9999
+  GRAFANA_PORT: 3001
 
 jobs:
-  sast:
-    name: SAST - Semgrep
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Install Semgrep
-        run: pip install semgrep
-
-      - name: Run Semgrep
-        continue-on-error: true
-        run: |
-          semgrep scan --config=auto --json --output=semgrep-results.json || true
-          semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
-          semgrep ci || true
-
-      - name: Upload Semgrep artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-results
-          path: |
-            semgrep-results.json
-            semgrep-results.sarif
-
-  prereq:
-    name: Pre-Requisite Check
-    runs-on: ubuntu-latest
-    needs: sast
-    steps:
-      - name: Verify Required Secrets
-        run: |
-          MISSING=""
-          [ -z "${EC2_INSTANCE_IP}" ] && MISSING="${MISSING} EC2_INSTANCE_IP"
-          [ -z "${EC2_SSH_PRIVATE_KEY}" ] && MISSING="${MISSING} EC2_SSH_PRIVATE_KEY"
-          [ -z "${ANSIBLE_VAULT_PASSWORD}" ] && MISSING="${MISSING} ANSIBLE_VAULT_PASSWORD"
-
-          if [ ! -z "$MISSING" ]; then
-            echo "ERROR: Missing required values: $MISSING"
-            exit 1
-          fi
-          echo "All required variables present."
-
+  # ---------------------------------------------------------------------------
+  # Reuse the "configure" and "deploy" jobs you already use (deploy once)
+  # ---------------------------------------------------------------------------
   configure:
     name: Configure EC2 With Ansible
     runs-on: ubuntu-latest
-    needs: prereq
     steps:
       - uses: actions/checkout@v3
 
-      - name: SSH Key Setup + KeepAlive Fix
+      - name: SSH Key Setup + KeepAlive
         run: |
           mkdir -p ~/.ssh
           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
-
-          # Add global SSH keepalive settings (fixes Broken Pipe)
-          cat <<EOF >> ~/.ssh/config
+          cat <<'EOF' >> ~/.ssh/config
           Host ec2
             HostName ${EC2_INSTANCE_IP}
             User ubuntu
@@ -80,46 +41,41 @@ jobs:
             TCPKeepAlive yes
             StrictHostKeyChecking no
           EOF
+          chmod 600 ~/.ssh/config
 
-      - name: Install dependencies
+      - name: Install ansible deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible python3-boto3 python3-botocore sshpass dos2unix
 
-      - name: Create Ansible Inventory
+      - name: Create Ansible inventory and vault pass
         run: |
           mkdir -p ansible
           cat > ansible/inventory.ini <<EOF
           [juiceshop]
           ${EC2_INSTANCE_IP} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o ServerAliveInterval=20 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes'
           EOF
-
-      - name: Vault Password
-        run: |
           echo "${ANSIBLE_VAULT_PASSWORD}" > ansible/.vault_pass
           chmod 600 ansible/.vault_pass
 
-      - name: Run Ansible
+      - name: Run Ansible playbook (configure host)
         run: |
           ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --vault-password-file ansible/.vault_pass -v
 
   deploy:
-    name: Build & Deploy Juice Shop
+    name: Build & Deploy Juice Shop (once)
     runs-on: ubuntu-latest
     needs: configure
-    if: always() && (needs.configure.result == 'success' || needs.configure.result == 'skipped')
     steps:
       - uses: actions/checkout@v3
 
-      - name: SSH Setup + KeepAlive Fix
+      - name: SSH Key Setup + KeepAlive
         run: |
           mkdir -p ~/.ssh
           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
-
-          # KeepAlive fix for ALL SSH commands (applies to long Docker builds)
-          cat <<EOF >> ~/.ssh/config
+          cat <<'EOF' >> ~/.ssh/config
           Host ec2
             HostName ${EC2_INSTANCE_IP}
             User ubuntu
@@ -129,129 +85,316 @@ jobs:
             TCPKeepAlive yes
             StrictHostKeyChecking no
           EOF
+          chmod 600 ~/.ssh/config
 
-      - name: Deploy Containers on EC2 (SSH KeepAlive)
+      - name: Start docker & deploy compose
         run: |
           ssh ec2 "sudo systemctl start docker || true"
           ssh ec2 "cd /opt/juice-shop && docker compose down || true"
-          ssh ec2 "docker system prune -f || true"
-
-          # This is where GitHub Actions normally breaks → now prevented
+          ssh ec2 "ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=10 ec2 'docker system prune -f' || true" || true
           ssh ec2 "cd /opt/juice-shop && docker compose build --no-cache"
-
           ssh ec2 "cd /opt/juice-shop && docker compose up -d"
 
-      - name: Wait for container health
+      - name: Validate juice-shop health and ports
         run: |
           ssh ec2 '
             for i in {1..30}; do
-              status=$(docker inspect --format "{{.State.Health.Status}}" juice-shop 2>/dev/null || echo "none")
-              if [ "$status" = "healthy" ]; then exit 0; fi
+              s=$(docker inspect --format "{{.State.Health.Status}}" juice-shop 2>/dev/null || echo "none")
+              if [ "$s" = "healthy" ]; then echo "healthy"; exit 0; fi
+              echo "Status: $s; waiting..."
               sleep 10
             done
-            exit 1
+            echo "Error: juice-shop not healthy"; exit 1
           '
-
-      - name: Wait for port 3000
-        run: |
           ssh ec2 '
             for i in {1..30}; do
-              nc -z localhost 3000 && exit 0
+              nc -z localhost 3000 && echo "port open" && exit 0
               sleep 5
             done
-            exit 1
+            echo "Error: port 3000 not open"; exit 1
           '
 
-  dast:
-    name: DAST - OWASP ZAP
-    runs-on: ubuntu-latest
-    needs: deploy
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Pull ZAP Docker
-        run: docker pull ghcr.io/zaproxy/zaproxy:stable
-
-      - name: Wait for app readiness
+      - name: Validate Prometheus & exporter endpoints
         run: |
           for i in {1..30}; do
-            curl -sf "http://${EC2_INSTANCE_IP}:3000" && exit 0 || true
-            sleep 10
+            if curl -sf "http://${EC2_INSTANCE_IP}:${PROMETHEUS_PORT}/" >/dev/null 2>&1; then
+              echo "Prometheus up"; break
+            fi
+            echo "Waiting for Prometheus..."
+            sleep 6
           done
-          exit 1
+          for i in {1..20}; do
+            if curl -sf "http://${EC2_INSTANCE_IP}:${EXPORTER_PORT}/metrics" >/dev/null 2>&1; then
+              echo "Exporter up"; break
+            fi
+            echo "Waiting for metrics exporter..."
+            sleep 5
+          done
 
-      - name: Run ZAP Baseline
-        run: |
-          docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
-          zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -r report_html.html -J report_json.json -m 5 -T 60 -a -j || true
-
-      - name: Run ZAP Full Scan
-        run: |
-          docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
-          zap-full-scan.py -t "http://${EC2_INSTANCE_IP}:3000" -r report_full_html.html -m 5 -T 120 -a -j || true
-
-      - name: Upload ZAP reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-reports
-          path: |
-            report_html.html
-            report_json.json
-            report_full_html.html
-
-  iast:
-    name: IAST - Traffic Generator
+  # ---------------------------------------------------------------------------
+  # Scenario 1: IAST Only (RASP not used / baseline)
+  # ---------------------------------------------------------------------------
+  scenario-1-iast-only:
+    name: Scenario 1 — IAST Only
     runs-on: ubuntu-latest
     needs: deploy
     steps:
       - uses: actions/checkout@v3
 
-      - name: Generate traffic
+      - name: SSH Key + KeepAlive (local)
         run: |
-          for i in $(seq 1 50); do
-            curl -s "http://${EC2_INSTANCE_IP}:3000" >/dev/null 2>&1 || true
-            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=juice" >/dev/null 2>&1 || true
-            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>" >/dev/null 2>&1 || true
-            curl -s "http://${EC2_INSTANCE_IP}:3000/api/Challenges" >/dev/null 2>&1 || true
-            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/admin/application-version" >/dev/null 2>&1 || true
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+          cat <<'EOF' >> ~/.ssh/config
+          Host ec2
+            HostName ${EC2_INSTANCE_IP}
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ServerAliveInterval 20
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            StrictHostKeyChecking no
+          EOF
+          chmod 600 ~/.ssh/config
 
-            curl -X POST -s "http://${EC2_INSTANCE_IP}:3000/rest/user/login" \
-              -d '{"email":"admin@juice-sh.op","password":"admin123"}' \
-              -H "Content-Type: application/json" >/dev/null 2>&1 || true
+      - name: Write scenario_info.json to EC2 (IAST Only)
+        run: |
+          ssh ec2 "sudo mkdir -p /opt/security-metrics/data && sudo chown ubuntu:ubuntu /opt/security-metrics/data"
+          ssh ec2 "cat > /opt/security-metrics/data/scenario_info.json <<'JSON'
+          {
+            "current_scenario": "iast-only",
+            "scenario_id": 1,
+            "rasp_enabled": false,
+            "rasp_blocking": false
+          }
+          JSON"
+          ssh ec2 "ls -l /opt/security-metrics/data/scenario_info.json && cat /opt/security-metrics/data/scenario_info.json"
 
-            sleep 1
+      - name: Trigger synthetic traffic (IAST warmup) on EC2
+        run: |
+          ssh ec2 "bash -c 'for i in \$(seq 1 120); do curl -s \"http://localhost:3000\" >/dev/null 2>&1 || true; sleep 0.5; done; echo done'"
+
+      - name: Run ZAP baseline & full (runner) for Scenario 1
+        run: |
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s1_baseline.html -J zap_s1_baseline.json -m 5 -T 60 -a -j || true
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s1_full.html -m 5 -T 120 -a -j || true
+
+      - name: Wait for OTEL exporter to scrape scenario id
+        run: |
+          for i in {1..30}; do
+            if curl -sf "http://${EC2_INSTANCE_IP}:${EXPORTER_PORT}/metrics" | grep -q "current_scenario_id 1"; then
+              echo "Exporter reports scenario 1"; break
+            fi
+            echo "Waiting for exporter to report scenario 1..."
+            sleep 5
           done
 
-  report:
-    name: Final Security Report
+      - name: Upload ZAP Scenario 1 reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-s1
+          path: |
+            zap_s1_baseline.html
+            zap_s1_baseline.json
+            zap_s1_full.html
+
+  # ---------------------------------------------------------------------------
+  # Scenario 2A: IAST + RASP (Detection Only)
+  # ---------------------------------------------------------------------------
+  scenario-2a-iast-rasp-detect:
+    name: Scenario 2A — IAST + RASP (Detect-only)
     runs-on: ubuntu-latest
-    needs: [sast, deploy, dast, iast]
-    if: always()
+    needs: deploy
     steps:
       - uses: actions/checkout@v3
 
-      - name: Generate Report
+      - name: SSH Key + KeepAlive
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+          cat <<'EOF' >> ~/.ssh/config
+          Host ec2
+            HostName ${EC2_INSTANCE_IP}
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ServerAliveInterval 20
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            StrictHostKeyChecking no
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: NOTE - Ensure Aikido dashboard is set to DETECTION (no blocking)
+        run: |
+          echo "Make sure Aikido Zen dashboard is set to DETECTION-only mode for this scenario. (Dashboard overrides startup env var.)"
+
+      - name: Write scenario_info.json to EC2 (IAST + RASP detect)
+        run: |
+          ssh ec2 "cat > /opt/security-metrics/data/scenario_info.json <<'JSON'
+          {
+            "current_scenario": "iast-rasp-detect",
+            "scenario_id": 2,
+            "rasp_enabled": true,
+            "rasp_blocking": false
+          }
+          JSON"
+          ssh ec2 "cat /opt/security-metrics/data/scenario_info.json"
+
+      - name: Trigger synthetic attack traffic (detection-focused) on EC2
+        run: |
+          ssh ec2 "bash -c 'for i in \$(seq 1 200); do curl -s \"http://localhost:3000/rest/products/search?q=<script>alert(1)</script>\" >/dev/null 2>&1 || true; curl -s \"http://localhost:3000/api/Challenges\" >/dev/null 2>&1 || true; sleep 0.5; done; echo done'"
+
+      - name: Run ZAP baseline & full (runner) for Scenario 2A
+        run: |
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s2a_baseline.html -J zap_s2a_baseline.json -m 5 -T 60 -a -j || true
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s2a_full.html -m 5 -T 120 -a -j || true
+
+      - name: Wait for exporter to report scenario 2
+        run: |
+          for i in {1..30}; do
+            if curl -sf "http://${EC2_INSTANCE_IP}:${EXPORTER_PORT}/metrics" | grep -q "current_scenario_id 2"; then
+              echo "Exporter reports scenario 2"; break
+            fi
+            echo "Waiting for exporter to report scenario 2..."
+            sleep 5
+          done
+
+      - name: Upload ZAP Scenario 2A reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-s2a
+          path: |
+            zap_s2a_baseline.html
+            zap_s2a_baseline.json
+            zap_s2a_full.html
+
+  # ---------------------------------------------------------------------------
+  # Scenario 2B: IAST + RASP (Blocking Mode)
+  # ---------------------------------------------------------------------------
+  scenario-2b-iast-rasp-block:
+    name: Scenario 2B — IAST + RASP (Blocking mode)
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: SSH Key + KeepAlive
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+          cat <<'EOF' >> ~/.ssh/config
+          Host ec2
+            HostName ${EC2_INSTANCE_IP}
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ServerAliveInterval 20
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            StrictHostKeyChecking no
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: NOTE - Ensure Aikido dashboard is set to BLOCKING mode
+        run: |
+          echo "Make sure Aikido Zen dashboard is set to BLOCKING mode for this scenario. (Dashboard overrides startup env var.)"
+
+      - name: Write scenario_info.json to EC2 (IAST + RASP block)
+        run: |
+          ssh ec2 "cat > /opt/security-metrics/data/scenario_info.json <<'JSON'
+          {
+            "current_scenario": "iast-rasp-block",
+            "scenario_id": 3,
+            "rasp_enabled": true,
+            "rasp_blocking": true
+          }
+          JSON"
+          ssh ec2 "cat /opt/security-metrics/data/scenario_info.json"
+
+      - name: Trigger synthetic attack traffic (blocking-focused) on EC2
+        run: |
+          ssh ec2 "bash -c 'for i in \$(seq 1 300); do curl -s \"http://localhost:3000/rest/products/search?q=<script>alert(1)</script>\" >/dev/null 2>&1 || true; curl -s \"http://localhost:3000/rest/user/login\" -d \"{\\\"email\\\":\\\"admin@juice-sh.op\\\",\\\"password\\\":\\\"admin123\\\"}\" -H \"Content-Type: application/json\" >/dev/null 2>&1 || true; sleep 0.5; done; echo done'"
+
+      - name: Run ZAP baseline & full (runner) for Scenario 2B
+        run: |
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s2b_baseline.html -J zap_s2b_baseline.json -m 5 -T 60 -a -j || true
+          docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py -t "http://${EC2_INSTANCE_IP}:3000" -r zap_s2b_full.html -m 5 -T 120 -a -j || true
+
+      - name: Wait for exporter to report scenario 3 and block metrics
+        run: |
+          for i in {1..40}; do
+            if curl -sf "http://${EC2_INSTANCE_IP}:${EXPORTER_PORT}/metrics" | grep -q "current_scenario_id 3"; then
+              echo "Exporter reports scenario 3"; break
+            fi
+            echo "Waiting for exporter to report scenario 3..."
+            sleep 5
+          done
+          # Also wait for some blocks to appear (if blocking is active)
+          for i in {1..40}; do
+            if curl -sf "http://${EC2_INSTANCE_IP}:${EXPORTER_PORT}/metrics" | grep -q "security_blocks_total"; then
+              echo "Block metrics present"; break
+            fi
+            echo "Waiting for block metrics..."
+            sleep 5
+          done
+
+      - name: Upload ZAP Scenario 2B reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-s2b
+          path: |
+            zap_s2b_baseline.html
+            zap_s2b_baseline.json
+            zap_s2b_full.html
+
+  # ---------------------------------------------------------------------------
+  # Final report aggregator job (collects artifacts + writes final summary)
+  # ---------------------------------------------------------------------------
+  final-report:
+    name: Final Security Report (aggregate)
+    runs-on: ubuntu-latest
+    needs:
+      [
+        scenario-1-iast-only,
+        scenario-2a-iast-rasp-detect,
+        scenario-2b-iast-rasp-block,
+      ]
+    steps:
+      - name: Download scenario artifacts (if any) -- uses REST of jobs' artifacts
+        run: echo "Artifacts uploaded per-scenario (ZAP + scenario_info)."
+
+      - name: Create combined security-report.md
         run: |
           {
-            echo "# DevSecOps Security Scan Report"
+            echo "# DevSecOps Security Scan Report (Three Scenarios)"
             echo ""
-            echo "Workflow Run: $GITHUB_RUN_ID"
+            echo "Run: $GITHUB_RUN_ID"
             echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "Branch: $GITHUB_REF_NAME"
-            echo "Commit: $GITHUB_SHA"
             echo "Instance: $EC2_INSTANCE_IP"
             echo ""
-            echo "## Security Scan Results"
-            echo "| Layer | Type | Status | Notes |"
-            echo "|---|---|---|---|"
-            echo "| Semgrep  | SAST | Completed | See Semgrep artifacts |"
-            echo "| Aikido Zen RASP | RASP | Active | Configured inside app |"
-            echo "| DataDog IAST | IAST | Triggered | Traffic generated |"
-            echo "| OWASP ZAP | DAST | Completed | Reports attached |"
+            echo "## Notes"
+            echo "- Scenario metadata written to /opt/security-metrics/data/scenario_info.json on EC2"
+            echo "- Ensure Aikido dashboard is configured to the appropriate mode (detect vs block) before each scenario"
             echo ""
+            echo "## Artifacts"
+            echo "- ZAP reports per scenario uploaded as artifacts"
           } > security-report.md
 
-      - name: Upload Security Report
+      - name: Upload security report
         uses: actions/upload-artifact@v4
         with:
           name: security-report

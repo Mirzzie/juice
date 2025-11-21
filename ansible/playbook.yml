@@ -77,7 +77,7 @@
         state: started
         enabled: yes
 
-    - name: Ensure metrics venv directory exists
+    - name: Ensure python virtual environment exists for metrics exporter
       file:
         path: /opt/metrics-venv
         state: directory
@@ -90,11 +90,11 @@
       args:
         creates: /opt/metrics-venv/bin/activate
 
-    - name: Upgrade pip/setuptools/wheel in venv
+    - name: Upgrade pip, setuptools and wheel in venv
       command: /opt/metrics-venv/bin/python -m pip install --upgrade pip setuptools wheel
       changed_when: false
 
-    - name: Install required Python packages in venv
+    - name: Install required Python packages in metrics venv
       ansible.builtin.pip:
         name:
           - prometheus-client
@@ -131,7 +131,7 @@
       register: datadog_install
       until: datadog_install.rc == 0
 
-    - name: Configure DataDog Agent for APM and IAST
+    - name: Configure DataDog Agent for APM, IAST, RASP and OpenTelemetry
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
@@ -156,7 +156,6 @@
           logs_config:
             container_collect_all: true
 
-          # OpenTelemetry integration
           otlp_config:
             receiver:
               protocols:
@@ -175,6 +174,14 @@
         state: started
         enabled: yes
 
+    - name: Ensure security metrics directory exists for scenarios
+      file:
+        path: /opt/security-metrics/data
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
     - name: Create monitoring directories
       file:
         path: "{{ item }}"
@@ -190,7 +197,7 @@
         - "{{ monitoring_dir }}/grafana/provisioning/dashboards"
         - "{{ monitoring_dir }}/otel-collector"
 
-    - name: Create Prometheus configuration
+    - name: Create Prometheus configuration file
       copy:
         dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
         content: |
@@ -226,7 +233,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create OpenTelemetry Collector configuration
+    - name: Create OpenTelemetry Collector configuration file with security attribute enrichment
       copy:
         dest: "{{ monitoring_dir }}/otel-collector/otel-collector-config.yaml"
         content: |
@@ -311,6 +318,30 @@
         group: ubuntu
         mode: '0644'
 
+    - name: Copy provisioned Grafana dashboards JSON
+      copy:
+        src: files/grafana-three-scenario-dashboard.json
+        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/three-scenario-dashboard.json"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Create Grafana dashboard provisioning YAML
+      copy:
+        content: |
+          apiVersion: 1
+          providers:
+            - name: 'Scenario Dashboards'
+              orgId: 1
+              folder: ''
+              type: file
+              options:
+                path: /etc/grafana/provisioning/dashboards
+        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards.yaml"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
     - name: Ensure juice-shop directory exists with correct ownership
       file:
         path: "{{ juice_shop_dir }}"
@@ -364,7 +395,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create fixed otel-init.js for OpenTelemetry
+    - name: Create fixed otel-init.js for OpenTelemetry (with resource constructor fix)
       copy:
         dest: "{{ juice_shop_dir }}/otel-init.js"
         content: |
@@ -376,14 +407,12 @@
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc');
           const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 
-          const resource = Resource.default().merge(
-            new Resource({
-              [SemanticResourceAttributes.SERVICE_NAME]: 'juice-shop',
-              [SemanticResourceAttributes.SERVICE_VERSION]: 'latest',
-              'deployment.environment': 'dev',
-              'security.monitoring': 'enabled'
-            })
-          );
+          const resource = new Resource({
+            [SemanticResourceAttributes.SERVICE_NAME]: 'juice-shop',
+            [SemanticResourceAttributes.SERVICE_VERSION]: 'latest',
+            'deployment.environment': 'dev',
+            'security.monitoring': 'enabled'
+          });
 
           const traceExporter = new OTLPTraceExporter({
             endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
@@ -408,12 +437,11 @@
           sdk.start()
             .then(() => console.log("OpenTelemetry SDK successfully started"))
             .catch((err) => console.error("OpenTelemetry SDK failed to start", err));
-
         owner: ubuntu
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile with OpenTelemetry instrumentation
+    - name: Create Dockerfile with OpenTelemetry instrumentation and DataDog + Aikido integration
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
@@ -660,6 +688,7 @@
               extra_hosts:
                 - "host.docker.internal:host-gateway"
         mode: '0644'
+      when: enable_metrics != "true"
 
     - name: Fix ownership for docker-compose.yml without monitoring
       file:
@@ -684,8 +713,7 @@
         group: ubuntu
       no_log: true
 
-
-    - name: Create deploy.sh
+    - name: Create deploy.sh script
       copy:
         dest: "{{ juice_shop_dir }}/deploy.sh"
         mode: '0755'
