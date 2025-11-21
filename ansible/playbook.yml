@@ -514,6 +514,47 @@
         group: ubuntu
         mode: '0644'
 
+    - name: Create docker-compose.yml with monitoring stack and Juice Shop service
+      copy:
+        dest: "{{ juice_shop_dir }}/docker-compose.yml"
+        content: |
+          version: '3.8'
+
+          services:
+            juice-shop:
+              build: .
+              image: juice-shop-secure:latest
+              container_name: juice-shop
+              restart: unless-stopped
+              ports:
+                - "3000:3000"
+              environment:
+                NODE_ENV: production
+                OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:{{ otel_grpc_port }}
+                # Include other environment variables as needed
+              volumes: []
+              networks:
+                - monitoring
+
+            otel-collector:
+              image: otel/opentelemetry-collector-contrib:latest
+              container_name: otel-collector
+              restart: unless-stopped
+              command: ["--config=/etc/otel-collector-config.yaml"]
+              volumes:
+                - {{ monitoring_dir }}/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+              ports:
+                - "{{ otel_grpc_port }}:{{ otel_grpc_port }}"
+                - "{{ otel_http_port }}:{{ otel_http_port }}"
+                - "{{ otel_metrics_port }}:8888"
+                - "{{ otel_prometheus_port }}:{{ otel_prometheus_port }}"
+              networks:
+                - monitoring
+
+          networks:
+            monitoring:
+              driver: bridge
+
   handlers:
     - name: Restart DataDog Agent
       systemd:
