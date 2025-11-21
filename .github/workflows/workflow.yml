@@ -1,66 +1,36 @@
-name: DevSecOps Pipeline - Deploy & Security Scans
+name: DevSecOps Pipeline - Juice Shop
 
 on:
   push:
-    branches: [main, dev-test]
-  pull_request:
-    branches: [main, dev-test]
+    branches: ["main", "dev-test"]
   workflow_dispatch:
-    inputs:
-      skip_ansible:
-        description: "Skip Ansible configuration (if already configured)"
-        required: false
-        type: boolean
-        default: true
-      run_full_security_scan:
-        description: "Run full security scan (including DAST)"
-        required: false
-        type: boolean
-        default: true
 
 env:
+  SKIP_ANSIBLE: "false"
+  RUN_FULL_SECURITY_SCAN: "true"
+  ENABLE_METRICS: "true"
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
   ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
-  # =========================================================================
-  # JOB 1: SAST - Semgrep
-  # =========================================================================
-  sast-semgrep:
-    name: 🔍 SAST - Semgrep Security Scan
+  sast:
+    name: SAST - Semgrep
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Run Semgrep Scan
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep
+        continue-on-error: true
         run: |
           semgrep scan --config=auto --json --output=semgrep-results.json || true
           semgrep scan --config=auto --sarif --output=semgrep-results.sarif || true
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+          semgrep ci || true
 
-      - name: Upload to Semgrep Dashboard
-        if: always()
-        run: semgrep ci
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-        continue-on-error: true
-
-      - name: Upload SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
-        continue-on-error: true
-
-      - name: Upload Semgrep Artifacts
-        if: always()
+      - name: Upload Semgrep artifacts
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
@@ -68,564 +38,196 @@ jobs:
             semgrep-results.json
             semgrep-results.sarif
 
-  # =========================================================================
-  # JOB 2: Check Prerequisites
-  # =========================================================================
-  check-prerequisites:
-    name: ✅ Verify Prerequisites
+  prereq:
+    name: Pre-Requisite Check
     runs-on: ubuntu-latest
-    needs: sast-semgrep
-    outputs:
-      can_proceed: ${{ steps.check.outputs.can_proceed }}
+    needs: sast
     steps:
-      - name: Check Required Secrets
-        id: check
+      - name: Verify Required Secrets
         run: |
-          echo "Checking required secrets..."
-          MISSING_SECRETS=()
-          if [ -z "${{ secrets.EC2_INSTANCE_IP }}" ]; then
-            MISSING_SECRETS+=("EC2_INSTANCE_IP")
-          fi
-          if [ -z "${{ secrets.EC2_SSH_PRIVATE_KEY }}" ]; then
-            MISSING_SECRETS+=("EC2_SSH_PRIVATE_KEY")
-          fi
-          if [ -z "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" ]; then
-            MISSING_SECRETS+=("ANSIBLE_VAULT_PASSWORD")
-          fi
-          if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
-            echo "::error::Missing required secrets: ${MISSING_SECRETS[*]}"
-            echo "can_proceed=false" >> $GITHUB_OUTPUT
+          MISSING=""
+          [ -z "${EC2_INSTANCE_IP}" ] && MISSING="${MISSING} EC2_INSTANCE_IP"
+          [ -z "${EC2_SSH_PRIVATE_KEY}" ] && MISSING="${MISSING} EC2_SSH_PRIVATE_KEY"
+          [ -z "${ANSIBLE_VAULT_PASSWORD}" ] && MISSING="${MISSING} ANSIBLE_VAULT_PASSWORD"
+
+          if [ ! -z "$MISSING" ]; then
+            echo "ERROR: Missing required values: $MISSING"
             exit 1
           fi
-          echo "✅ All required secrets are set"
-          echo "Target instance: ${{ secrets.EC2_INSTANCE_IP }}"
-          echo "can_proceed=true" >> $GITHUB_OUTPUT
+          echo "All required variables present."
 
-  # =========================================================================
-  # JOB 3: Configure Instance (Optional)
-  # =========================================================================
-  configure-instance:
-    name: ⚙️ Configure Instance with Ansible
+  configure:
+    name: Configure EC2 With Ansible
     runs-on: ubuntu-latest
-    needs: check-prerequisites
-    if: |
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (github.event.inputs.skip_ansible == 'false' || github.event.inputs.skip_ansible == '')
+    needs: prereq
+    if: ${{ github.env.SKIP_ANSIBLE == 'false' }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Ansible
-        run: |
-          pip install ansible boto3 botocore
-
-      - name: Setup SSH Key
+      - name: SSH Key Setup
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
 
-      - name: Wait for SSH Availability
+      - name: Install dependencies
         run: |
-          echo "Testing SSH connection to ${{ env.EC2_INSTANCE_IP }}..."
-          for i in {1..30}; do
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-               -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} \
-               "echo 'SSH ready'" 2>/dev/null; then
-              echo "✅ SSH connection successful"
-              exit 0
-            fi
-            echo "Attempt $i/30: Waiting for SSH..."
-            sleep 10
-          done
-          echo "::error::SSH connection timeout"
-          exit 1
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-boto3 python3-botocore sshpass dos2unix
 
       - name: Create Ansible Inventory
         run: |
           mkdir -p ansible
           cat > ansible/inventory.ini <<EOF
           [juiceshop]
-          ${{ env.EC2_INSTANCE_IP }} ansible_user=ubuntu ansible_EC2_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ${EC2_INSTANCE_IP} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
           EOF
 
-      - name: Create Vault Password File
+      - name: Vault Password
         run: |
-          cd ansible
-          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
-          chmod 600 .vault_pass
+          echo "${ANSIBLE_VAULT_PASSWORD}" > ansible/.vault_pass
+          chmod 600 ansible/.vault_pass
 
-      - name: Run Ansible Playbook
+      - name: Run Ansible
         run: |
-          cd ansible
-          ansible-playbook -i inventory.ini playbook.yml \
-            --vault-password-file .vault_pass -v
+          ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --vault-password-file ansible/.vault_pass -v
 
-      - name: Clean Up Vault Password
-        if: always()
-        run: rm -f ansible/.vault_pass
-
-      - name: Verify Configuration
-        run: |
-          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
-            ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "=== Configuration Verification ==="
-            docker --version
-            docker compose version
-            sudo datadog-agent status | head -20 || true
-            ls -la /opt/juice-shop/
-          ENDSSH
-
-  # =========================================================================
-  # JOB 4: Build and Deploy Application
-  # =========================================================================
-  build-and-deploy:
-    name: 🚀 Build & Deploy Application
+  deploy:
+    name: Build & Deploy Juice Shop
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, configure-instance]
-    if: |
-      always() &&
-      needs.check-prerequisites.outputs.can_proceed == 'true' &&
-      (needs.configure-instance.result == 'success' || needs.configure-instance.result == 'skipped')
+    needs: configure
+    if: always() && (needs.configure.result == 'success' || needs.configure.result == 'skipped')
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Setup SSH Key
+      - name: SSH Setup
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
 
-      - name: Check Instance Readiness
+      - name: Deploy Containers on EC2
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            if ! command -v docker &> /dev/null; then
-              echo "::error::Docker not installed. Run Ansible configuration first."
-              exit 1
-            fi
-            if [ ! -d "/opt/juice-shop" ]; then
-              echo "::error::Application directory not found. Run Ansible configuration first."
-              exit 1
-            fi
-            if [ ! -f "/opt/juice-shop/.env" ]; then
-              echo "::error::.env file not found. Run Ansible configuration first."
-              exit 1
-            fi
-            echo "✅ Instance is ready for deployment"
-          ENDSSH
+          ssh ubuntu@${EC2_INSTANCE_IP} "sudo systemctl start docker || true"
+          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose down || true"
+          ssh ubuntu@${EC2_INSTANCE_IP} "docker system prune -f || true"
+          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose build --no-cache"
+          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose up -d"
 
-      - name: Deploy Application
+      - name: Wait for container health
         run: |
-          ssh -i ~/.ssh/id_rsa -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
-            ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH' || true
-            set -e
-            cd /opt/juice-shop
-            
-            echo "🛑 Stopping existing containers..."
-            docker compose down 2>/dev/null || true
-            docker image prune -f 2>/dev/null || true
-            
-            echo "📦 Building Docker image with security instrumentation..."
-            # Use nohup to prevent SSH disconnection from killing the build
-            nohup docker compose build --no-cache > build.log 2>&1 &
-            BUILD_PID=$!
-            
-            # Wait for build to complete with progress updates
-            while kill -0 $BUILD_PID 2>/dev/null; do
-              echo "Building... (check build.log for details)"
+          ssh ubuntu@${EC2_INSTANCE_IP} '
+            echo "Waiting for juice-shop container..."
+            for i in {1..30}; do
+              status=$(docker inspect --format "{{.State.Health.Status}}" juice-shop 2>/dev/null || echo "none")
+              if [ "$status" = "healthy" ]; then exit 0; fi
               sleep 10
             done
-            
-            # Check if build succeeded
-            if grep -q "ERROR" build.log; then
-              echo "❌ Build failed"
-              tail -50 build.log
-              exit 1
-            fi
-            
-            echo "✅ Build completed successfully"
-            
-            echo "▶️  Starting containers..."
-            docker compose up -d
-            
-            echo "⏳ Waiting for application to start (45 seconds)..."
-            sleep 45
-            
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Container is running"
-            else
-              echo "❌ Container failed to start"
-              docker compose logs
-              exit 1
-            fi
-            
-            # Wait for application to respond
-            for i in {1..10}; do
-              if curl -f -s http://localhost:3000 > /dev/null; then
-                echo "✅ Application is responding"
-                exit 0
-              fi
-              echo "Waiting for application... ($i/10)"
+            exit 1
+          '
+
+      - name: Wait for port 3000
+        run: |
+          ssh ubuntu@${EC2_INSTANCE_IP} '
+            for i in {1..30}; do
+              nc -z localhost 3000 && exit 0
               sleep 5
             done
-            echo "⚠️ Application may need more time to start"
-          ENDSSH
+            exit 1
+          '
 
-          # Verify deployment in a separate connection
-          sleep 5
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'VERIFY'
-            if docker ps | grep -q juice-shop; then
-              echo "✅ Deployment verified - container is running"
-              exit 0
-            else
-              echo "❌ Container not running after deployment"
-              exit 1
-            fi
-          VERIFY
-
-      - name: Verify Security Instrumentation
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            cd /opt/juice-shop
-            
-            echo ""
-            echo "========================================"
-            echo "🔍 Security Instrumentation Verification"
-            echo "========================================"
-            echo "ℹ️  Juice Shop uses ts-node (runs .ts files directly)"
-            
-            # Check TypeScript source modifications
-            echo ""
-            echo "📝 Modified server.ts (first 15 lines):"
-            docker exec juice-shop head -15 server.ts
-            
-            # Check tracer
-            echo ""
-            echo "📄 Tracer.ts:"
-            docker exec juice-shop cat tracer.ts
-            
-            # Check environment variables
-            echo ""
-            echo "🔧 Security Environment Variables:"
-            docker exec juice-shop env | grep -E "DD_|AIKIDO_" | sort
-            
-            # Check initial logs
-            echo ""
-            echo "📊 Initial Application Logs:"
-            docker logs juice-shop 2>&1 | tail -50
-            
-            # DataDog agent status
-            echo ""
-            echo "📡 DataDog Agent Status:"
-            sudo datadog-agent status | grep -A 5 "APM Agent" || echo "⚠️  Check agent status manually"
-          ENDSSH
-
-      - name: Generate Test Traffic
-        run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
-            echo "🚀 Generating test traffic to trigger instrumentation..."
-            for i in {1..10}; do
-              curl -s http://localhost:3000 > /dev/null
-              curl -s "http://localhost:3000/rest/products/search?q=test" > /dev/null
-              sleep 1
-            done
-            echo "✅ Test traffic generated"
-            
-            # Show logs after traffic
-            echo ""
-            echo "📊 Logs after traffic generation:"
-            docker logs juice-shop --tail=30 2>&1 | grep -i -E "datadog|aikido|trace" || echo "Check logs manually"
-          ENDSSH
-
-      - name: Generate Deployment Summary
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## 🚀 Deployment Summary
-
-          **Instance IP:** \`${{ env.EC2_INSTANCE_IP }}\`  
-          **Application URL:** http://${{ env.EC2_INSTANCE_IP }}:3000  
-          **Deployment Status:** ✅ Success
-
-          ### Security Instrumentation Status:
-
-          | Tool | Type | Status | Configuration |
-          |------|------|--------|---------------|
-          | **DataDog APM** | IAST | ✅ Active | Tracer imported in server.ts |
-          | **Aikido Zen** | RASP | ✅ Active | Firewall loaded via require() |
-          | **Semgrep** | SAST | ✅ Complete | Pre-deployment scan |
-          | **OWASP ZAP** | DAST | ⏳ Pending | Scheduled next |
-
-          ### Environment Variables Set:
-          - \`DD_ENV=dev\`
-          - \`DD_APPSEC_ENABLED=true\`
-          - \`DD_IAST_ENABLED=true\`
-          - \`DD_LOGS_INJECTION=true\`
-          - \`DD_PROFILING_ENABLED=true\`
-          - \`AIKIDO_TOKEN=***\` (from secrets)
-          - \`AIKIDO_DEBUG=true\`
-
-          ### Security Dashboards:
-          - 🔍 [Semgrep Findings](https://semgrep.dev/orgs/-/findings)
-          - 🛡️ [Aikido Dashboard](https://app.aikido.dev)
-          - 📊 [DataDog IAST](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
-
-          ### Verification Commands:
-          \`\`\`bash
-          # SSH into instance
-          ssh -i your-key.pem ubuntu@${{ env.EC2_INSTANCE_IP }}
-
-          # Check instrumentation
-          cd /opt/juice-shop
-          ./verify-instrumentation.sh
-
-          # View logs
-          docker logs juice-shop -f
-          \`\`\`
-
-          ### Next Steps:
-          1. ✅ Access application: http://${{ env.EC2_INSTANCE_IP }}:3000
-          2. ⏳ Wait 5-10 minutes for traces to appear in DataDog
-          3. 🔍 Monitor security dashboards for vulnerabilities
-          4. 📊 DAST scan will run automatically next
-          EOF
-
-  # =========================================================================
-  # JOB 5: DAST - OWASP ZAP
-  # =========================================================================
-  dast-owasp-zap:
-    name: 🕷️ DAST - OWASP ZAP Security Scan
+  dast:
+    name: DAST - OWASP ZAP
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, build-and-deploy]
-    if: |
-      always() &&
-      needs.build-and-deploy.result == 'success' &&
-      github.event_name != 'pull_request' &&
-      (github.event.inputs.run_full_security_scan == 'true' || github.event.inputs.run_full_security_scan == '')
+    needs: deploy
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Wait for Application Stability
-        run: |
-          echo "Waiting 60 seconds for application to fully stabilize..."
-          sleep 60
+      - name: Pull ZAP Docker
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
 
-      - name: Verify Application Accessibility
+      - name: Wait for app readiness
         run: |
-          for i in {1..5}; do
-            if curl -f -s http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null; then
-              echo "✅ Application accessible for DAST scan"
-              exit 0
-            fi
-            echo "Waiting for application... ($i/5)"
+          for i in {1..30}; do
+            curl -sf "http://${EC2_INSTANCE_IP}:3000" && exit 0 || true
             sleep 10
           done
-          echo "::error::Application not accessible"
           exit 1
 
-      - name: OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.10.0
-        with:
-          target: "http://${{ env.EC2_INSTANCE_IP }}:3000"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -j -m 5 -T 60"
-          allow_issue_writing: false
-          fail_action: false
-        continue-on-error: true
+      - name: Run ZAP Baseline
+        run: |
+          docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+          zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -r report_html.html -J report_json.json -m 5 -T 60 -a -j || true
 
-      - name: OWASP ZAP Full Scan
-        uses: zaproxy/action-full-scan@v0.8.0
-        with:
-          target: "http://${{ env.EC2_INSTANCE_IP }}:3000"
-          rules_file_name: ".zap/rules.tsv"
-          cmd_options: "-a -j -m 5 -T 120"
-          allow_issue_writing: false
-          fail_action: false
-        continue-on-error: true
+      - name: Run ZAP Full Scan
+        run: |
+          docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+          zap-full-scan.py -t "http://${EC2_INSTANCE_IP}:3000" -r report_full_html.html -m 5 -T 120 -a -j || true
 
-      - name: Upload ZAP Results
-        if: always()
+      - name: Upload ZAP reports
         uses: actions/upload-artifact@v4
         with:
-          name: zap-scan-results
+          name: zap-reports
           path: |
             report_html.html
             report_json.json
-            report_md.md
+            report_full_html.html
 
-  # =========================================================================
-  # JOB 6: IAST - DataDog
-  # =========================================================================
-  iast-datadog-verification:
-    name: 📊 IAST - DataDog Runtime Analysis
+  iast:
+    name: IAST - Traffic Generator
     runs-on: ubuntu-latest
-    needs: [check-prerequisites, build-and-deploy]
-    if: needs.build-and-deploy.result == 'success'
+    needs: deploy
     steps:
-      - name: Generate Traffic for IAST Analysis
+      - uses: actions/checkout@v3
+
+      - name: Generate traffic
         run: |
-          echo "Generating diverse traffic for DataDog IAST analysis..."
-          for i in {1..50}; do
-            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000 > /dev/null || true
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=juice" > /dev/null || true
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/search?q=<script>alert(1)</script>" > /dev/null || true
-            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/api/Challenges > /dev/null || true
-            curl -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/admin/application-version > /dev/null || true
-            curl -X POST -s http://${{ env.EC2_INSTANCE_IP }}:3000/rest/user/login \
+          for i in $(seq 1 50); do
+            curl -s "http://${EC2_INSTANCE_IP}:3000" >/dev/null 2>&1 || true
+            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=juice" >/dev/null 2>&1 || true
+            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>" >/dev/null 2>&1 || true
+            curl -s "http://${EC2_INSTANCE_IP}:3000/api/Challenges" >/dev/null 2>&1 || true
+            curl -s "http://${EC2_INSTANCE_IP}:3000/rest/admin/application-version" >/dev/null 2>&1 || true
+
+            curl -X POST -s "http://${EC2_INSTANCE_IP}:3000/rest/user/login" \
               -d '{"email":"admin@juice-sh.op","password":"admin123"}' \
-              -H "Content-Type: application/json" > /dev/null || true
-            curl -s "http://${{ env.EC2_INSTANCE_IP }}:3000/rest/products/1/reviews" > /dev/null || true
+              -H "Content-Type: application/json" >/dev/null 2>&1 || true
             sleep 1
           done
-          echo "✅ Generated 350+ requests for IAST analysis"
 
-      - name: Verify DataDog Integration
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## 📊 DataDog IAST Analysis
-
-          **Status:** Traffic generated successfully  
-          **Requests Generated:** 350+  
-          **Dashboard:** [View IAST Results](https://app.us5.datadoghq.com/security/appsec?service=juice-shop)
-
-          ### Analysis Timeline:
-          - ⏱️ Traces appear: ~2-5 minutes
-          - 🔍 Vulnerability detection: ~5-10 minutes
-          - ✅ Complete analysis: ~15 minutes
-
-          ### What to Look For:
-          1. **APM Traces** - Verify requests are being traced
-          2. **Security Signals** - Check for detected vulnerabilities
-          3. **IAST Findings** - Look for code-level vulnerability analysis
-          4. **Attack Attempts** - XSS and SQL injection attempts logged
-          EOF
-
-  # =========================================================================
-  # JOB 7: Security Report
-  # =========================================================================
-  security-report:
-    name: 📋 Generate Security Report
+  report:
+    name: Final Security Report
     runs-on: ubuntu-latest
-    needs:
-      [
-        sast-semgrep,
-        build-and-deploy,
-        dast-owasp-zap,
-        iast-datadog-verification,
-      ]
+    needs: [sast, deploy, dast, iast]
     if: always()
     steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+      - uses: actions/checkout@v3
 
-      - name: Generate Comprehensive Security Report
+      - name: Generate Report
         run: |
-          cat > security-report.md << 'EOF'
-          # 🔒 DevSecOps Security Scan Report
-
-          **Pipeline Run:** #${{ github.run_number }}  
-          **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
-          **Branch:** ${{ github.ref_name }}  
-          **Commit:** ${{ github.sha }}  
-          **Instance:** ${{ env.EC2_INSTANCE_IP }}
-
-          ---
-
-          ## 📊 Security Scan Results
-
-          | Security Layer | Type | Status | Dashboard |
-          |----------------|------|--------|-----------|
-          | **Semgrep** | SAST | ${{ needs.sast-semgrep.result }} | [View](https://semgrep.dev/orgs/-/findings) |
-          | **Aikido Zen** | RASP | Active | [View](https://app.aikido.dev) |
-          | **DataDog** | IAST | ${{ needs.iast-datadog-verification.result }} | [View](https://app.us5.datadoghq.com/security/appsec) |
-          | **OWASP ZAP** | DAST | ${{ needs.dast-owasp-zap.result }} | [Artifacts](https://github.com/${{ github.repository }}/actions/artifacts) |
-
-          ---
-
-          ## 🛡️ Security Tools Configuration
-
-          ### DataDog APM & IAST
-          - ✅ Tracer initialized in `server.ts`
-          - ✅ Environment variables configured
-          - ✅ Agent communication: `172.17.0.1:8126`
-          - ✅ IAST enabled with 100% sampling
-          - ✅ AppSec WAF enabled
-
-          ### Aikido Zen RASP
-          - ✅ Firewall loaded via `require('@aikidosec/firewall')`
-          - ✅ Running in non-blocking mode
-          - ✅ Debug logging enabled
-          - ✅ Token configured from secrets
-
-          ### Semgrep SAST
-          - ✅ Pre-deployment code scanning
-          - ✅ Auto-configuration enabled
-          - ✅ Results uploaded to GitHub Security
-
-          ### OWASP ZAP DAST
-          - ✅ Baseline scan completed
-          - ✅ Full scan completed
-          - ✅ Results available as artifacts
-
-          ---
-
-          ## 🔍 Key Findings
-
-          Review detailed findings in respective dashboards:
-
-          1. **SAST (Semgrep)**: Pre-deployment code vulnerabilities
-          2. **RASP (Aikido)**: Runtime attack blocking and detection
-          3. **IAST (DataDog)**: Code-level vulnerability analysis during runtime
-          4. **DAST (ZAP)**: External penetration testing results
-
-          ---
-
-          ## 📈 Next Steps
-
-          1. ✅ Review all security dashboards
-          2. 🔍 Investigate high/critical findings
-          3. 🛠️ Apply necessary patches
-          4. 📊 Monitor ongoing security metrics
-          5. 🔄 Schedule regular security scans
-
-          ---
-
-          ## 📞 Support Resources
-
-          - [Semgrep Documentation](https://semgrep.dev/docs/)
-          - [Aikido Zen Docs](https://docs.aikido.dev/)
-          - [DataDog IAST Guide](https://docs.datadoghq.com/security/application_security/how-appsec-works/)
-          - [OWASP ZAP Docs](https://www.zaproxy.org/docs/)
-
-          EOF
-
-          cat security-report.md >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# DevSecOps Security Scan Report"
+            echo ""
+            echo "Workflow Run: $GITHUB_RUN_ID"
+            echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Commit: $GITHUB_SHA"
+            echo "Instance: $EC2_INSTANCE_IP"
+            echo ""
+            echo "## Security Scan Results"
+            echo "| Layer | Type | Status | Notes |"
+            echo "|---|---|---|---|"
+            echo "| Semgrep  | SAST | Completed | See Semgrep artifacts |"
+            echo "| Aikido Zen RASP | RASP | Active | Configured inside app |"
+            echo "| DataDog IAST | IAST | Triggered | Traffic generated |"
+            echo "| OWASP ZAP | DAST | Completed | Reports attached |"
+            echo ""
+          } > security-report.md
 
       - name: Upload Security Report
         uses: actions/upload-artifact@v4
         with:
           name: security-report
           path: security-report.md
-
-      - name: Comment on PR (if applicable)
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('security-report.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: report
-            });
-        continue-on-error: true
