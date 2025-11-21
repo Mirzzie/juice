@@ -11,7 +11,7 @@
     docker_compose_version: "2.23.0"
     grafana_port: 3001
     prometheus_port: 9090
-    otel_grpc_port: 4317
+    otel_grpc_port: 43170            # UPDATED PORT
     otel_http_port: 4318
     otel_metrics_port: 8888
     otel_prometheus_port: 8889
@@ -131,7 +131,7 @@
       register: datadog_install
       until: datadog_install.rc == 0
 
-    - name: Configure DataDog Agent for APM, IAST, RASP and OpenTelemetry
+    - name: Configure DataDog Agent for APM, IAST and OpenTelemetry
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
@@ -233,7 +233,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create OpenTelemetry Collector configuration file with security attribute enrichment
+    - name: Create OpenTelemetry Collector configuration file with updated OTLP gRPC port
       copy:
         dest: "{{ monitoring_dir }}/otel-collector/otel-collector-config.yaml"
         content: |
@@ -241,9 +241,9 @@
             otlp:
               protocols:
                 grpc:
-                  endpoint: 0.0.0.0:4317
+                  endpoint: 0.0.0.0:{{ otel_grpc_port }}
                 http:
-                  endpoint: 0.0.0.0:4318
+                  endpoint: 0.0.0.0:{{ otel_http_port }}
 
             prometheus:
               config:
@@ -288,7 +288,7 @@
                 monitored_by: otel_collector
 
             otlp:
-              endpoint: "datadog-agent:4317"
+              endpoint: "datadog-agent:{{ otel_grpc_port }}"
               tls:
                 insecure: true
 
@@ -318,7 +318,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Copy provisioned Grafana dashboards JSON
+    - name: Copy Grafana dashboard JSON for scenario visualization
       copy:
         src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/three-scenario-dashboard.json"
@@ -342,7 +342,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Ensure juice-shop directory exists with correct ownership
+    - name: Ensure juice-shop directory exists with ownership
       file:
         path: "{{ juice_shop_dir }}"
         state: directory
@@ -395,7 +395,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create fixed otel-init.js for OpenTelemetry (with resource constructor fix)
+    - name: Create fixed otel-init.js for OpenTelemetry with correct resource constructor
       copy:
         dest: "{{ juice_shop_dir }}/otel-init.js"
         content: |
@@ -415,11 +415,11 @@
           });
 
           const traceExporter = new OTLPTraceExporter({
-            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
+            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:43170'
           });
 
           const metricExporter = new OTLPMetricExporter({
-            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
+            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:43170'
           });
 
           const metricReader = new PeriodicExportingMetricReader({
@@ -441,7 +441,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create Dockerfile with OpenTelemetry instrumentation and DataDog + Aikido integration
+    - name: Create Dockerfile with OpenTelemetry, DataDog, and Aikido instrumentation
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
@@ -455,22 +455,22 @@
           RUN npm install
 
           RUN npm install --save-exact \
-              @aikidosec/firewall \
-              dd-trace \
-              @opentelemetry/api \
-              @opentelemetry/auto-instrumentations-node \
-              @opentelemetry/exporter-metrics-otlp-grpc \
-              @opentelemetry/exporter-trace-otlp-grpc \
-              @opentelemetry/instrumentation \
-              @opentelemetry/instrumentation-express \
-              @opentelemetry/instrumentation-http \
-              @opentelemetry/resources \
-              @opentelemetry/sdk-metrics \
-              @opentelemetry/sdk-node \
-              @opentelemetry/sdk-trace-base \
-              @opentelemetry/sdk-trace-node \
-              @opentelemetry/semantic-conventions \
-              prom-client
+            @aikidosec/firewall \
+            dd-trace \
+            @opentelemetry/api \
+            @opentelemetry/auto-instrumentations-node \
+            @opentelemetry/exporter-metrics-otlp-grpc \
+            @opentelemetry/exporter-trace-otlp-grpc \
+            @opentelemetry/instrumentation \
+            @opentelemetry/instrumentation-express \
+            @opentelemetry/instrumentation-http \
+            @opentelemetry/resources \
+            @opentelemetry/sdk-metrics \
+            @opentelemetry/sdk-node \
+            @opentelemetry/sdk-trace-base \
+            @opentelemetry/sdk-trace-node \
+            @opentelemetry/semantic-conventions \
+            prom-client
 
           COPY tracer.ts ./tracer.ts
           COPY otel-init.js ./otel-init.js
@@ -513,303 +513,3 @@
         owner: ubuntu
         group: ubuntu
         mode: '0644'
-
-    - name: Create docker-compose.yml with monitoring stack
-      copy:
-        dest: "{{ juice_shop_dir }}/docker-compose.yml"
-        content: |
-          version: '3.8'
-
-          services:
-            juice-shop:
-              build: .
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_LOGS_INJECTION: "true"
-                DD_TRACE_SAMPLE_RATE: "1"
-                DD_PROFILING_ENABLED: "true"
-                DD_RUNTIME_METRICS_ENABLED: "true"
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "${AIKIDO_BLOCK:-true}"
-                AIKIDO_DEBUG: "${AIKIDO_DEBUG:-true}"
-                OTEL_SERVICE_NAME: juice-shop
-                OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-                OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-                OTEL_TRACES_EXPORTER: otlp
-                OTEL_METRICS_EXPORTER: otlp
-                OTEL_LOGS_EXPORTER: otlp
-                OTEL_RESOURCE_ATTRIBUTES: "service.name=juice-shop,service.version=latest,deployment.environment=dev"
-              env_file:
-                - .env
-              networks:
-                - monitoring
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:3000"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 60s
-              logging:
-                driver: "json-file"
-                options:
-                  max-size: "10m"
-                  max-file: "3"
-              depends_on:
-                - otel-collector
-
-            otel-collector:
-              image: otel/opentelemetry-collector-contrib:latest
-              container_name: otel-collector
-              restart: unless-stopped
-              command: ["--config=/etc/otel-collector-config.yaml"]
-              volumes:
-                - {{ monitoring_dir }}/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
-              ports:
-                - "{{ otel_grpc_port }}:4317"
-                - "{{ otel_http_port }}:4318"
-                - "{{ otel_metrics_port }}:8888"
-                - "{{ otel_prometheus_port }}:{{ otel_prometheus_port }}"
-              networks:
-                - monitoring
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-
-            prometheus:
-              image: prom/prometheus:latest
-              container_name: prometheus
-              restart: unless-stopped
-              command:
-                - '--config.file=/etc/prometheus/prometheus.yml'
-                - '--storage.tsdb.path=/prometheus'
-                - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-                - '--web.console.templates=/usr/share/prometheus/consoles'
-                - '--storage.tsdb.retention.time=30d'
-                - '--web.enable-lifecycle'
-              volumes:
-                - {{ monitoring_dir }}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-                - prometheus_data:/prometheus
-              ports:
-                - "{{ prometheus_port }}:9090"
-              networks:
-                - monitoring
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-
-            grafana:
-              image: grafana/grafana:latest
-              container_name: grafana
-              restart: unless-stopped
-              environment:
-                - GF_SECURITY_ADMIN_USER=admin
-                - GF_SECURITY_ADMIN_PASSWORD=admin
-                - GF_SERVER_HTTP_PORT={{ grafana_port }}
-                - GF_INSTALL_PLUGINS=grafana-piechart-panel,redis-datasource
-                - GF_USERS_ALLOW_SIGN_UP=false
-              volumes:
-                - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
-                - grafana_data:/var/lib/grafana
-              ports:
-                - "{{ grafana_port }}:{{ grafana_port }}"
-              networks:
-                - monitoring
-              depends_on:
-                - prometheus
-                - otel-collector
-
-            node-exporter:
-              image: prom/node-exporter:latest
-              container_name: node-exporter
-              restart: unless-stopped
-              command:
-                - '--path.procfs=/host/proc'
-                - '--path.sysfs=/host/sys'
-                - '--path.rootfs=/host'
-                - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-              volumes:
-                - /proc:/host/proc:ro
-                - /sys:/host/sys:ro
-                - /:/host:ro
-              ports:
-                - "9100:9100"
-              networks:
-                - monitoring
-
-          networks:
-            monitoring:
-              driver: bridge
-
-          volumes:
-            prometheus_data:
-            grafana_data:
-
-      when: enable_metrics == "true"
-
-    - name: Create docker-compose.yml without monitoring
-      copy:
-        dest: "{{ juice_shop_dir }}/docker-compose.yml"
-        content: |
-          version: '3.8'
-          services:
-            juice-shop:
-              build: .
-              image: juice-shop-secure:latest
-              container_name: juice-shop
-              restart: unless-stopped
-              ports:
-                - "3000:3000"
-              environment:
-                NODE_ENV: production
-                DD_ENV: dev
-                DD_SERVICE: juice-shop
-                DD_VERSION: latest
-                DD_AGENT_HOST: 172.17.0.1
-                DD_TRACE_AGENT_PORT: 8126
-                DD_APPSEC_ENABLED: "true"
-                DD_IAST_ENABLED: "true"
-                AIKIDO_TOKEN: ${AIKIDO_TOKEN}
-                AIKIDO_BLOCK: "true"
-                AIKIDO_DEBUG: "true"
-              env_file:
-                - .env
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
-        mode: '0644'
-      when: enable_metrics != "true"
-
-    - name: Fix ownership for docker-compose.yml without monitoring
-      file:
-        path: "{{ juice_shop_dir }}/docker-compose.yml"
-        owner: ubuntu
-        group: ubuntu
-        mode: '0644'
-      when: enable_metrics != "true"
-
-    - name: Create .env file with secrets
-      copy:
-        dest: "{{ juice_shop_dir }}/.env"
-        content: |
-          AIKIDO_TOKEN={{ aikido_token }}
-          AIKIDO_BLOCK=true
-          AIKIDO_DEBUG=true
-          DD_ENV=dev
-          DD_VERSION=latest
-          METRICS_ENABLED={{ enable_metrics }}
-        mode: '0600'
-        owner: ubuntu
-        group: ubuntu
-      no_log: true
-
-    - name: Create deploy.sh script
-      copy:
-        dest: "{{ juice_shop_dir }}/deploy.sh"
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          set -e
-          cd "{{ juice_shop_dir }}"
-
-          echo "🚀 Deploying Juice Shop with Security Instrumentation and Monitoring..."
-
-          docker compose down || true
-          docker system prune -f 2>/dev/null || true
-
-          echo "📦 Building Docker images..."
-          docker compose build --no-cache --progress=plain
-
-          echo "▶️  Starting application and monitoring stack..."
-          docker compose up -d
-
-          echo "⏳ Waiting for all services to start (90 seconds)..."
-          sleep 90
-
-          echo "🔍 Verifying deployment:"
-
-          if docker ps | grep -q juice-shop; then
-            echo "✅ Application is running"
-          fi
-
-          if [ "{{ enable_metrics }}" = "true" ]; then
-            if docker ps | grep -q prometheus; then
-              echo "✅ Prometheus is running on port {{ prometheus_port }}"
-            fi
-            if docker ps | grep -q grafana; then
-              echo "✅ Grafana is running on port {{ grafana_port }}"
-              echo "   Access at: http://$(hostname -I | awk '{print $1}'):{{ grafana_port }}"
-              echo "   Login: admin/admin"
-            fi
-            if docker ps | grep -q otel-collector; then
-              echo "✅ OpenTelemetry Collector is running"
-            fi
-          fi
-
-          echo "✅ Deployment successful!"
-          echo "📊 Access Points:"
-          echo "   Application: http://$(hostname -I | awk '{print $1}'):3000"
-          if [ "{{ enable_metrics }}" = "true" ]; then
-            echo "   Grafana: http://$(hostname -I | awk '{print $1}'):{{ grafana_port }}"
-            echo "   Prometheus: http://$(hostname -I | awk '{print $1}'):{{ prometheus_port }}"
-          fi
-
-    - name: Create verification script
-      copy:
-        dest: "{{ juice_shop_dir }}/verify-instrumentation.sh"
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          echo "🔍 Security Instrumentation & Monitoring Verification"
-          echo "======================================================"
-
-          echo "📋 Container Status:"
-          docker ps --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}\t{{ '{{' }}.Ports{{ '}}' }}"
-
-          echo "🔧 Security Tool Status:"
-
-          echo -n "DataDog IAST: "
-          if docker exec juice-shop env | grep -q "DD_IAST_ENABLED=true"; then
-            echo "✅ Enabled"
-          else
-            echo "❌ Disabled"
-          fi
-
-          echo -n "Aikido RASP: "
-          if docker exec juice-shop env | grep -q "AIKIDO_TOKEN"; then
-            echo "✅ Configured"
-          else
-            echo "❌ Not configured"
-          fi
-
-          if [ "{{ enable_metrics }}" = "true" ]; then
-            echo "📊 Metrics Collection:"
-
-            echo "Prometheus targets:"
-            curl -s http://localhost:{{ prometheus_port }}/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.job): \(.health)"' 2>/dev/null || echo "   Prometheus not ready yet"
-
-            echo "OpenTelemetry status:"
-            curl -s http://localhost:{{ otel_metrics_port }}/metrics | head -5 2>/dev/null || echo "   OTel Collector not ready yet"
-
-            echo "Grafana status:"
-            curl -s -o /dev/null -w "   HTTP Status: %{http_code}\n" http://localhost:{{ grafana_port }}/api/health 2>/dev/null
-          fi
-
-          echo "📡 DataDog Agent Status:"
-          sudo datadog-agent status | grep -A 5 "APM Agent" 2>/dev/null || echo "Check manually with: sudo datadog-agent status"
-
-  handlers:
-    - name: Restart DataDog Agent
-      systemd:
-        name: datadog-agent
-        state: restarted
