@@ -11,7 +11,7 @@
     docker_compose_version: "2.23.0"
     grafana_port: 3001
     prometheus_port: 9090
-    otel_grpc_port: 43170            # UPDATED PORT
+    otel_grpc_port: 43170
     otel_http_port: 43180
     otel_metrics_port: 8888
     otel_prometheus_port: 8889
@@ -233,7 +233,7 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create OpenTelemetry Collector configuration file with updated OTLP gRPC port
+    - name: Create OpenTelemetry Collector configuration file
       copy:
         dest: "{{ monitoring_dir }}/otel-collector/otel-collector-config.yaml"
         content: |
@@ -395,21 +395,22 @@
         group: ubuntu
         mode: '0644'
 
-    - name: Create fixed otel-init.js for OpenTelemetry with correct resource constructor
+    - name: Create fixed otel-init.js for OpenTelemetry with correct resource usage
       copy:
         dest: "{{ juice_shop_dir }}/otel-init.js"
         content: |
           const { NodeSDK } = require('@opentelemetry/sdk-node');
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-          const { Resource } = require('@opentelemetry/resources');
-          const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+          // FIX: Use resourceFromAttributes helper instead of Resource constructor
+          const { resourceFromAttributes } = require('@opentelemetry/resources');
           const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-grpc');
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc');
           const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 
-          const resource = new Resource({
-            [SemanticResourceAttributes.SERVICE_NAME]: 'juice-shop',
-            [SemanticResourceAttributes.SERVICE_VERSION]: 'latest',
+          // FIX: Create resource using helper and string literals for keys to avoid import issues
+          const resource = resourceFromAttributes({
+            'service.name': 'juice-shop',
+            'service.version': 'latest',
             'deployment.environment': 'dev',
             'security.monitoring': 'enabled'
           });
@@ -434,9 +435,8 @@
             instrumentations: [getNodeAutoInstrumentations()]
           });
 
-          sdk.start()
-            .then(() => console.log("OpenTelemetry SDK successfully started"))
-            .catch((err) => console.error("OpenTelemetry SDK failed to start", err));
+          sdk.start();
+          console.log("OpenTelemetry SDK successfully started");
         owner: ubuntu
         group: ubuntu
         mode: '0644'
