@@ -376,19 +376,21 @@
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc');
           const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 
-          const resource = new Resource({
-            [SemanticResourceAttributes.SERVICE_NAME]: 'juice-shop',
-            [SemanticResourceAttributes.SERVICE_VERSION]: 'latest',
-            'deployment.environment': 'dev',
-            'security.monitoring': 'enabled'
-          });
+          const resource = Resource.default().merge(
+            new Resource({
+              [SemanticResourceAttributes.SERVICE_NAME]: 'juice-shop',
+              [SemanticResourceAttributes.SERVICE_VERSION]: 'latest',
+              'deployment.environment': 'dev',
+              'security.monitoring': 'enabled'
+            })
+          );
 
           const traceExporter = new OTLPTraceExporter({
-            url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
+            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
           });
 
           const metricExporter = new OTLPMetricExporter({
-            url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
+            endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://otel-collector:4317'
           });
 
           const metricReader = new PeriodicExportingMetricReader({
