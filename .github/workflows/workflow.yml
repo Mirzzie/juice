@@ -62,12 +62,24 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: SSH Key Setup
+      - name: SSH Key Setup + KeepAlive Fix
         run: |
           mkdir -p ~/.ssh
           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+
+          # Add global SSH keepalive settings (fixes Broken Pipe)
+          cat <<EOF >> ~/.ssh/config
+          Host ec2
+            HostName ${EC2_INSTANCE_IP}
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ServerAliveInterval 20
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            StrictHostKeyChecking no
+          EOF
 
       - name: Install dependencies
         run: |
@@ -79,7 +91,7 @@ jobs:
           mkdir -p ansible
           cat > ansible/inventory.ini <<EOF
           [juiceshop]
-          ${EC2_INSTANCE_IP} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ${EC2_INSTANCE_IP} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_ssh_common_args='-o ServerAliveInterval=20 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes'
           EOF
 
       - name: Vault Password
@@ -99,25 +111,39 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: SSH Setup
+      - name: SSH Setup + KeepAlive Fix
         run: |
           mkdir -p ~/.ssh
           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
 
-      - name: Deploy Containers on EC2
+          # KeepAlive fix for ALL SSH commands (applies to long Docker builds)
+          cat <<EOF >> ~/.ssh/config
+          Host ec2
+            HostName ${EC2_INSTANCE_IP}
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ServerAliveInterval 20
+            ServerAliveCountMax 10
+            TCPKeepAlive yes
+            StrictHostKeyChecking no
+          EOF
+
+      - name: Deploy Containers on EC2 (SSH KeepAlive)
         run: |
-          ssh ubuntu@${EC2_INSTANCE_IP} "sudo systemctl start docker || true"
-          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose down || true"
-          ssh ubuntu@${EC2_INSTANCE_IP} "docker system prune -f || true"
-          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose build --no-cache"
-          ssh ubuntu@${EC2_INSTANCE_IP} "cd /opt/juice-shop && docker compose up -d"
+          ssh ec2 "sudo systemctl start docker || true"
+          ssh ec2 "cd /opt/juice-shop && docker compose down || true"
+          ssh ec2 "docker system prune -f || true"
+
+          # This is where GitHub Actions normally breaks → now prevented
+          ssh ec2 "cd /opt/juice-shop && docker compose build --no-cache"
+
+          ssh ec2 "cd /opt/juice-shop && docker compose up -d"
 
       - name: Wait for container health
         run: |
-          ssh ubuntu@${EC2_INSTANCE_IP} '
-            echo "Waiting for juice-shop container..."
+          ssh ec2 '
             for i in {1..30}; do
               status=$(docker inspect --format "{{.State.Health.Status}}" juice-shop 2>/dev/null || echo "none")
               if [ "$status" = "healthy" ]; then exit 0; fi
@@ -128,7 +154,7 @@ jobs:
 
       - name: Wait for port 3000
         run: |
-          ssh ubuntu@${EC2_INSTANCE_IP} '
+          ssh ec2 '
             for i in {1..30}; do
               nc -z localhost 3000 && exit 0
               sleep 5
@@ -192,6 +218,7 @@ jobs:
             curl -X POST -s "http://${EC2_INSTANCE_IP}:3000/rest/user/login" \
               -d '{"email":"admin@juice-sh.op","password":"admin123"}' \
               -H "Content-Type: application/json" >/dev/null 2>&1 || true
+
             sleep 1
           done
 
