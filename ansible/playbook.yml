@@ -322,7 +322,8 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          docker compose up -d --build juice-shop metrics-exporter
+          # FIX: Removing specific service names so ALL containers (Grafana/Prometheus) start
+          docker compose up -d --build
           
           echo "✅ Scenario Active. Waiting 15s..."
           sleep 15
