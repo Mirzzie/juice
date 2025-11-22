@@ -8,7 +8,6 @@
     juice_shop_dir: /opt/juice-shop
     monitoring_dir: /opt/monitoring
     exporter_dir: /opt/security-metrics-exporter
-    # Ports
     grafana_port: 3001
     prometheus_port: 9090
     otel_grpc_port: 43170
@@ -328,6 +327,18 @@
           echo "✅ Scenario Active. Waiting 15s..."
           sleep 15
         owner: ubuntu
+
+    # --- 9. START INITIAL DEPLOYMENT (THIS WAS MISSING!) ---
+    - name: Launch Baseline Scenario (Build & Start Containers)
+      shell: "/home/ubuntu/run_scenario.sh baseline"
+      register: deploy_output
+      # This will take time because it builds Docker images
+      async: 1200 
+      poll: 10
+
+    - name: Show Deployment Logs
+      debug:
+        var: deploy_output.stdout_lines
 
   handlers:
     - name: Restart DataDog Agent
