@@ -401,13 +401,11 @@
         content: |
           const { NodeSDK } = require('@opentelemetry/sdk-node');
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-          // FIX: Use resourceFromAttributes helper instead of Resource constructor
           const { resourceFromAttributes } = require('@opentelemetry/resources');
           const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-grpc');
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc');
           const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 
-          // FIX: Create resource using helper and string literals for keys to avoid import issues
           const resource = resourceFromAttributes({
             'service.name': 'juice-shop',
             'service.version': 'latest',
@@ -475,12 +473,11 @@
           COPY tracer.ts ./tracer.ts
           COPY otel-init.js ./otel-init.js
 
+          # Removed redundant injection of otel-init, relying on NODE_OPTIONS instead
           RUN sed -i "1i import './tracer' // DataDog APM" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
-              sed -i "3i require('./otel-init') // OpenTelemetry" app.ts && \
               sed -i "1i import './tracer' // DataDog APM" server.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts && \
-              sed -i "3i require('./otel-init') // OpenTelemetry" server.ts
+              sed -i "2i import '@aikidosec/firewall' // Aikido RASP" server.ts
 
           RUN npx tsc || npm run build:server || echo "TypeScript compilation attempted"
 
