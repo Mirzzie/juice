@@ -1,0 +1,61 @@
+name: Thesis Data Generator (Daily)
+
+on:
+    schedule:
+        - cron: "0 3 * * *" # Runs at 3 AM daily
+    workflow_dispatch: # Allows you to click "Run Now" button
+
+env:
+    EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+    EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+jobs:
+    run-comparison:
+        name: Run IAST vs RASP Scenarios
+        runs-on: ubuntu-latest
+        steps:
+            - name: Setup SSH
+              run: |
+                  mkdir -p ~/.ssh
+                  echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+                  ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+
+            # --- SCENARIO 1: BASELINE (IAST Only) ---
+            - name: 🧪 Activate Baseline Mode
+              run: ssh ubuntu@$EC2_INSTANCE_IP "./run_scenario.sh baseline"
+
+            - name: ⚡ Attack Baseline (Should Succeed)
+              run: |
+                  echo "Running SQL Injection (Expected: 200 OK)"
+                  curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=' OR 1=1--" 
+
+                  # Run standard traffic generator
+                  docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+                  zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -m 2 || true
+
+            # --- SCENARIO 2: RASP DETECTION ---
+            - name: 🧪 Activate Detection Mode
+              run: ssh ubuntu@$EC2_INSTANCE_IP "./run_scenario.sh detection"
+
+            - name: ⚡ Attack Detection (Should Succeed + Log)
+              run: |
+                  echo "Running XSS (Expected: 200 OK but Logged)"
+                  curl -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>"
+
+            # --- SCENARIO 3: RASP BLOCKING ---
+            - name: 🧪 Activate Blocking Mode
+              run: ssh ubuntu@$EC2_INSTANCE_IP "./run_scenario.sh blocking"
+
+            - name: ⚡ Attack Blocking (Should FAIL)
+              run: |
+                  echo "Running SQL Injection (Expected: 403 Forbidden)"
+                  # We use -f to fail the step if curl gets a 403, but we wrap it in || true because we WANT a 403
+                  curl -f -s "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=' OR 1=1--" || echo "Blocked Successfully"
+
+                  # Heavy Attack
+                  docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+                  zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -m 2 || true
+
+            - name: ✅ Finish
+              run: echo "Experiment Complete. Check Grafana at http://${EC2_INSTANCE_IP}:3001"
