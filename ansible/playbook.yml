@@ -12,13 +12,13 @@
     prometheus_port: 9090
     otel_grpc_port: 4317
     otel_http_port: 4318
-    juice_shop_version: "v16.0.0" # Pin version for stability
+    juice_shop_version: "v16.0.0"
 
   tasks:
     # --- 1. SYSTEM PREP ---
     - name: Update APT and install Docker deps
       apt:
-        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils]
+        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils, python3-docker]
         update_cache: yes
         state: present
 
@@ -51,44 +51,17 @@
     # --- 3. CUSTOM METRICS EXPORTER ---
     - name: Copy Enhanced Metrics Exporter
       copy:
+        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
-        content: |
-          from prometheus_client import start_http_server, Gauge
-          import time
-          import json
-          import os
 
-          # Metrics
-          SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario ID (1=Baseline, 2=Detect, 3=Block)')
-          ATTACK_COUNT = Gauge('thesis_simulated_attacks_total', 'Total number of attacks simulated')
-
-          DATA_FILE = "/opt/security-metrics/data/scenario_info.json"
-
-          def update_metrics():
-              try:
-                  if os.path.exists(DATA_FILE):
-                      with open(DATA_FILE, 'r') as f:
-                          data = json.load(f)
-                          SCENARIO_GAUGE.set(data.get('scenario_id', 0))
-              except Exception as e:
-                  print(f"Error reading scenario file: {e}")
-
-          if __name__ == '__main__':
-              start_http_server(9999)
-              print("Thesis Exporter running on port 9999")
-              while True:
-                  update_metrics()
-                  time.sleep(2)
-
-    - name: Dockerfile for Exporter
+    - name: Exporter Dockerfile
       copy:
         dest: "{{ exporter_dir }}/Dockerfile"
         content: |
           FROM python:3.9-slim
           WORKDIR /app
           COPY exporter.py .
-          # ADDED: docker library to read logs
           RUN pip install prometheus_client docker
           CMD ["python", "exporter.py"]
 
@@ -119,8 +92,6 @@
                 path: /etc/grafana/provisioning/dashboards
 
     - name: Copy Thesis Dashboard JSON
-      # IMPORTANT: We assume this file exists locally in your ansible/files folder. 
-      # I will provide the JSON content in the next section of this response.
       copy:
         src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
@@ -229,6 +200,7 @@
                 - AIKIDO_TOKEN={{ aikido_token }}
                 - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
                 - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
+                - DD_API_KEY={{ datadog_api_key }}
               depends_on: [otel-collector]
               networks: [thesis-net]
 
@@ -237,7 +209,7 @@
               container_name: metrics-exporter
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
-                # CRITICAL ADDITION: Allow exporter to read sibling logs
+                # Mount docker socket for Log Telemetry
                 - /var/run/docker.sock:/var/run/docker.sock
               ports: ["9999:9999"]
               networks: [thesis-net]
@@ -301,8 +273,15 @@
           # Update the JSON file so Grafana knows what line to draw
           echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # Restart just the app to apply Env Vars
-          docker compose up -d juice-shop
+          # Start containers (detached)
+          docker compose up -d
           
           echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
           sleep 10
+
+    # --- 7. PROJECT STARTUP (THIS WAS MISSING!) ---
+    - name: Launch Baseline Scenario (Build & Start Containers)
+      shell: "/home/ubuntu/run_scenario.sh baseline"
+      # Allow 20 minutes for the first build (Juice Shop is heavy)
+      async: 1200
+      poll: 10
