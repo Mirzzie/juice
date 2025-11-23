@@ -10,17 +10,15 @@
     exporter_dir: /opt/security-metrics-exporter
     grafana_port: 3001
     prometheus_port: 9090
-    otel_grpc_port: 43170
-    otel_http_port: 43180
-
-  vars_files:
-    - secrets.yml
+    otel_grpc_port: 4317
+    otel_http_port: 4318
+    juice_shop_version: "v16.0.0" # Pin version for stability
 
   tasks:
-    # --- 1. SYSTEM SETUP ---
+    # --- 1. SYSTEM PREP ---
     - name: Update APT and install Docker deps
       apt:
-        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv]
+        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils]
         update_cache: yes
         state: present
 
@@ -35,31 +33,7 @@
         groups: docker
         append: yes
 
-    # --- 2. DATADOG HOST AGENT ---
-    - name: Install DataDog Agent
-      shell: >
-        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} 
-        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
-      args:
-        creates: /etc/datadog-agent/datadog.yaml
-
-    - name: Configure DataDog OTLP
-      blockinfile:
-        path: /etc/datadog-agent/datadog.yaml
-        block: |
-          apm_config:
-            enabled: true
-            apm_non_local_traffic: true
-          otlp_config:
-            receiver:
-              protocols:
-                grpc:
-                  endpoint: 0.0.0.0:4317
-                http:
-                  endpoint: 0.0.0.0:4318
-      notify: Restart DataDog Agent
-
-    # --- 3. MONITORING DIRECTORIES ---
+    # --- 2. MONITORING DIRECTORIES ---
     - name: Create directories
       file:
         path: "{{ item }}"
@@ -74,22 +48,62 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 4. DEPLOY CUSTOM FILES ---
+    # --- 3. CUSTOM METRICS EXPORTER ---
     - name: Copy Enhanced Metrics Exporter
       copy:
-        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
-        owner: ubuntu
+        content: |
+          from prometheus_client import start_http_server, Gauge
+          import time
+          import json
+          import os
 
-    - name: Copy Thesis Dashboard
+          # Metrics
+          SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario ID (1=Baseline, 2=Detect, 3=Block)')
+          ATTACK_COUNT = Gauge('thesis_simulated_attacks_total', 'Total number of attacks simulated')
+
+          DATA_FILE = "/opt/security-metrics/data/scenario_info.json"
+
+          def update_metrics():
+              try:
+                  if os.path.exists(DATA_FILE):
+                      with open(DATA_FILE, 'r') as f:
+                          data = json.load(f)
+                          SCENARIO_GAUGE.set(data.get('scenario_id', 0))
+              except Exception as e:
+                  print(f"Error reading scenario file: {e}")
+
+          if __name__ == '__main__':
+              start_http_server(9999)
+              print("Thesis Exporter running on port 9999")
+              while True:
+                  update_metrics()
+                  time.sleep(2)
+
+    - name: Exporter Dockerfile
       copy:
-        src: files/grafana-three-scenario-dashboard.json
-        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
-        mode: '0644'
-        owner: ubuntu
+        dest: "{{ exporter_dir }}/Dockerfile"
+        content: |
+          FROM python:3.9-slim
+          WORKDIR /app
+          COPY exporter.py .
+          RUN pip install prometheus_client
+          CMD ["python", "exporter.py"]
 
-    # --- 5. CONFIG FILES (Grafana/Prometheus) ---
+    # --- 4. OBSERVABILITY CONFIGS ---
+    - name: Configure Grafana Datasource
+      copy:
+        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasource.yaml"
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+
     - name: Configure Grafana Provider
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -102,19 +116,13 @@
               type: file
               options:
                 path: /etc/grafana/provisioning/dashboards
-        mode: '0644'
 
-    - name: Configure Grafana Datasource
+    - name: Copy Thesis Dashboard JSON
+      # IMPORTANT: We assume this file exists locally in your ansible/files folder. 
+      # I will provide the JSON content in the next section of this response.
       copy:
-        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasource.yaml"
-        content: |
-          apiVersion: 1
-          datasources:
-            - name: Prometheus
-              type: prometheus
-              access: proxy
-              url: http://prometheus:9090
-              isDefault: true
+        src: files/grafana-three-scenario-dashboard.json
+        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
         mode: '0644'
 
     - name: Configure Prometheus
@@ -122,15 +130,14 @@
         dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
         content: |
           global:
-            scrape_interval: 5s
+            scrape_interval: 2s 
           scrape_configs:
+            - job_name: 'thesis-exporter'
+              static_configs:
+                - targets: ['metrics-exporter:9999']
             - job_name: 'otel-collector'
               static_configs:
                 - targets: ['otel-collector:8889']
-            - job_name: 'security-exporter'
-              static_configs:
-                - targets: ['metrics-exporter:9999']
-        mode: '0644'
 
     - name: Configure Otel Collector
       copy:
@@ -140,90 +147,76 @@
             otlp:
               protocols:
                 grpc:
-                  endpoint: 0.0.0.0:{{ otel_grpc_port }}
+                  endpoint: 0.0.0.0:4317
                 http:
-                  endpoint: 0.0.0.0:{{ otel_http_port }}
+                  endpoint: 0.0.0.0:4318
           processors:
             batch:
-              timeout: 1s
           exporters:
             prometheus:
               endpoint: "0.0.0.0:8889"
-              namespace: otel
-            otlp:
-              endpoint: "172.17.0.1:4317"
-              tls:
-                insecure: true
+              namespace: "juice_shop"
           service:
             pipelines:
               metrics:
                 receivers: [otlp]
                 processors: [batch]
                 exporters: [prometheus]
-              traces:
-                receivers: [otlp]
-                processors: [batch]
-                exporters: [otlp]
-        mode: '0644'
 
-    # --- 6. JUICE SHOP & EXPORTER BUILD PREP ---
-    - name: Prepare Juice Shop Repo
-      git:
-        repo: https://github.com/juice-shop/juice-shop.git
-        dest: "{{ juice_shop_dir }}"
-        depth: 1
-        force: yes
+    # --- 5. JUICE SHOP & AIKIDO SETUP ---
+    - name: Clean Juice Shop Dir
+      file:
+        path: "{{ juice_shop_dir }}"
+        state: absent
 
-    - name: Dockerfile for Exporter
-      copy:
-        dest: "{{ exporter_dir }}/Dockerfile"
-        content: |
-          FROM python:3.9-slim
-          WORKDIR /app
-          COPY exporter.py .
-          RUN pip install prometheus_client requests opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
-          CMD ["python", "exporter.py"]
+    - name: Create Juice Shop Dir
+      file:
+        path: "{{ juice_shop_dir }}"
+        state: directory
+        owner: ubuntu
 
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:22-bookworm-slim AS builder
+          FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
-          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           RUN npm install
-          RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Helper Files
-          RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true }); export default tracer;" > tracer.ts
+          # Install Aikido and OpenTelemetry
+          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Inject Imports
-          RUN sed -i "1i import './tracer' // DataDog" app.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
-              sed -i "1i import './tracer' // DataDog" server.ts && \
-              sed -i "2i import '@aikidosec/firewall' // Aikido" server.ts
+          # Inject Aikido Import at top of app.ts
+          RUN sed -i "1i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
+              sed -i "1i import '@aikidosec/firewall' // Aikido RASP" server.ts
               
-          RUN npx tsc || npm run build:server
+          RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          FROM node:22-bookworm-slim
+          FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # Otel Init
-          RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); const { resourceFromAttributes } = require('@opentelemetry/resources'); const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); const resource = resourceFromAttributes({'service.name': 'juice-shop'}); const metricExporter = new OTLPMetricExporter({endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 5000}); const sdk = new NodeSDK({resource, metricReader, instrumentations: [getNodeAutoInstrumentations()]}); sdk.start();" > otel-init.js
+          # OpenTelemetry Initialization Script
+          RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
+          const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
+          const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); \
+          const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); \
+          const metricExporter = new OTLPMetricExporter({url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); \
+          const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 2000}); \
+          const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); \
+          sdk.start();" > otel-init.js
           
           EXPOSE 3000
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 7. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
-          version: '3.8'
           services:
             juice-shop:
               build: .
@@ -231,118 +224,82 @@
               ports: ["3000:3000"]
               environment:
                 - NODE_ENV=production
-                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
+                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
                 - AIKIDO_TOKEN={{ aikido_token }}
-                - DD_API_KEY={{ datadog_api_key }}
-                # CONTROLS
                 - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
                 - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
-                - OTEL_RESOURCE_ATTRIBUTES=test.scenario=${SCENARIO_NAME:-baseline}
               depends_on: [otel-collector]
-              networks: [monitoring]
+              networks: [thesis-net]
 
             metrics-exporter:
               build: {{ exporter_dir }}
               container_name: metrics-exporter
-              environment:
-                - DD_API_KEY={{ datadog_api_key }}
-                - DD_APP_KEY={{ datadog_app_key }}
-                - AIKIDO_TOKEN={{ aikido_token }}
-                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
               ports: ["9999:9999"]
-              networks: [monitoring]
+              networks: [thesis-net]
 
             otel-collector:
               image: otel/opentelemetry-collector-contrib:latest
               command: ["--config=/etc/otel-collector-config.yaml"]
               volumes:
                 - {{ monitoring_dir }}/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-              ports:
-                - "{{ otel_grpc_port }}:{{ otel_grpc_port }}"
-                - "{{ otel_http_port }}:{{ otel_http_port }}"
-                - "8889:8889"
-              networks: [monitoring]
+              ports: ["4317:4317", "4318:4318", "8889:8889"]
+              networks: [thesis-net]
 
             prometheus:
               image: prom/prometheus:latest
               volumes:
                 - {{ monitoring_dir }}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-                - prometheus_data:/prometheus
-              ports: ["{{ prometheus_port }}:9090"]
-              networks: [monitoring]
+              ports: ["9090:9090"]
+              networks: [thesis-net]
 
             grafana:
               image: grafana/grafana:latest
               volumes:
                 - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
-                - grafana_data:/var/lib/grafana
               ports: ["{{ grafana_port }}:3000"]
               environment:
                 - GF_SECURITY_ADMIN_PASSWORD=admin
-              networks: [monitoring]
+              networks: [thesis-net]
 
           networks:
-            monitoring:
+            thesis-net:
               driver: bridge
-          
-          volumes:
-            prometheus_data:
-            grafana_data:
 
-    # --- 8. SCENARIO SCRIPT ---
-    - name: Create Scenario Script
+    # --- 6. CONTROL SCRIPTS ---
+    - name: Create Scenario Switch Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
         mode: '0755'
+        owner: ubuntu
         content: |
           #!/bin/bash
           MODE=$1
           cd /opt/juice-shop
           
-          echo "🔬 SCENARIO SWITCH: $MODE"
+          echo "🔬 INITIALIZING SCENARIO: $MODE"
           
-          if [ "$MODE" == "baseline" ]; then
-             export SCENARIO_NAME="iast-only"
-             export AIKIDO_DISABLE="true" 
-             export AIKIDO_BLOCK="false"
-             SCENARIO_ID=1
-          elif [ "$MODE" == "detection" ]; then
-             export SCENARIO_NAME="iast-rasp-detect"
+          # DEFAULT: Baseline (Scenario 1)
+          export AIKIDO_DISABLE="true"
+          export AIKIDO_BLOCK="false"
+          SCENARIO_ID=1
+
+          if [ "$MODE" == "detection" ]; then
              export AIKIDO_DISABLE="false"
              export AIKIDO_BLOCK="false"
              SCENARIO_ID=2
           elif [ "$MODE" == "blocking" ]; then
-             export SCENARIO_NAME="iast-rasp-block"
              export AIKIDO_DISABLE="false"
              export AIKIDO_BLOCK="true"
              SCENARIO_ID=3
           fi
 
-          echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
+          # Update the JSON file so Grafana knows what line to draw
+          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # FIX: Removing specific service names so ALL containers (Grafana/Prometheus) start
-          docker compose up -d --build
+          # Restart just the app to apply Env Vars
+          docker compose up -d juice-shop
           
-          echo "✅ Scenario Active. Waiting 15s..."
-          sleep 15
-        owner: ubuntu
-
-    # --- 9. START INITIAL DEPLOYMENT (THIS WAS MISSING!) ---
-    - name: Launch Baseline Scenario (Build & Start Containers)
-      shell: "/home/ubuntu/run_scenario.sh baseline"
-      register: deploy_output
-      # This will take time because it builds Docker images
-      async: 1200 
-      poll: 10
-
-    - name: Show Deployment Logs
-      debug:
-        var: deploy_output.stdout_lines
-
-  handlers:
-    - name: Restart DataDog Agent
-      systemd:
-        name: datadog-agent
-        state: restarted
+          echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
+          sleep 10
