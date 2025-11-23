@@ -170,7 +170,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP (FIXED) ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP (THE FIX) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -182,7 +182,7 @@
         state: directory
         owner: ubuntu
 
-    # THE FIX: No 'sed' commands on app.ts. We install packages only.
+    # THE FIX IS IN THIS TASK:
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
@@ -191,12 +191,16 @@
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          
+          # Fix: Update tsconfig to ignore errors in node_modules caused by newer library versions
+          RUN sed -i 's/"compilerOptions": {/"compilerOptions": { "skipLibCheck": true,/' tsconfig.json
+          
           RUN npm install
           
           # Install Aikido and OpenTelemetry
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # NO SED COMMANDS HERE - We do not modify source code to avoid build errors!
+          # No source code modification via sed (prevents strict mode errors)
               
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
@@ -205,7 +209,7 @@
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # FIX: We load Aikido here in the JS init script. This runs at runtime, bypassing the TypeScript compiler.
+          # Runtime Injection of Aikido/Otel
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -234,7 +238,6 @@
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
                 - DD_API_KEY={{ datadog_api_key }}
                 - AIKIDO_TOKEN={{ aikido_token }}
-                # Variables from .env
                 - AIKIDO_BLOCK=${AIKIDO_BLOCK} 
                 - AIKIDO_DISABLE=${AIKIDO_DISABLE}
               depends_on: [otel-collector]
@@ -306,6 +309,7 @@
 
           echo "{\"scenario_id\": $S_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
+          # Create .env file for Docker Compose
           echo "AIKIDO_DISABLE=$A_DISABLE" > .env
           echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
           echo "SCENARIO_ID=$S_ID" >> .env
@@ -331,19 +335,6 @@
         - name: Fail the playbook
           fail:
             msg: "Deployment failed. See logs above."
-
-    # Explicit build with longer timeout
-    - name: 🏗️ Build Containers
-      command: docker compose build
-      args:
-        chdir: "{{ juice_shop_dir }}"
-      async: 1800
-      poll: 15
-
-    - name: 🚀 Start Containers
-      command: docker compose up -d
-      args:
-        chdir: "{{ juice_shop_dir }}"
 
     - name: ⏳ Wait for Port 3000
       wait_for:
