@@ -15,13 +15,13 @@
     juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (CRITICAL FIX FOR DOCKER BUILDS) ---
+    # --- 0. SYSTEM TUNING (SWAP MEMORY) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
       register: swap_file_check
 
-    - name: Create 4GB Swap file (Prevents OOM Kills during build)
+    - name: Create 4GB Swap file
       command: fallocate -l 4G /swapfile
       when: not swap_file_check.stat.exists
 
@@ -65,8 +65,7 @@
         groups: docker
         append: yes
 
-    # CRITICAL: Reset connection so group membership takes effect immediately
-    - name: Reset SSH connection for group changes
+    - name: Reset SSH connection
       meta: reset_connection
 
     # --- 2. MONITORING DIRECTORIES ---
@@ -183,6 +182,7 @@
         state: directory
         owner: ubuntu
 
+    # CRITICAL FIX: The @ts-ignore lines below PREVENT the build failure you are seeing
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
@@ -196,9 +196,9 @@
           # Install Aikido and OpenTelemetry
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Inject Aikido Import at top of app.ts
-          RUN sed -i "1i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
-              sed -i "1i import '@aikidosec/firewall' // Aikido RASP" server.ts
+          # Inject Aikido Import SAFELY (Bypassing TypeScript Strict Checks)
+          RUN sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' app.ts && \
+              sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' server.ts
               
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
@@ -233,10 +233,11 @@
               environment:
                 - NODE_ENV=production
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-                - AIKIDO_TOKEN={{ aikido_token }}
-                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
-                - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
                 - DD_API_KEY={{ datadog_api_key }}
+                - AIKIDO_TOKEN={{ aikido_token }}
+                # Variables loaded from .env file created by script
+                - AIKIDO_BLOCK=${AIKIDO_BLOCK} 
+                - AIKIDO_DISABLE=${AIKIDO_DISABLE}
               depends_on: [otel-collector]
               networks: [thesis-net]
 
@@ -245,7 +246,6 @@
               container_name: metrics-exporter
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
-                # Mount docker socket for Log Telemetry
                 - /var/run/docker.sock:/var/run/docker.sock
               ports: ["9999:9999"]
               networks: [thesis-net]
@@ -286,33 +286,36 @@
         owner: ubuntu
         content: |
           #!/bin/bash
-          # EXIT ON ERROR so we know if it fails
           set -e
-          
           MODE=$1
           cd /opt/juice-shop
           
           echo "🔬 INITIALIZING SCENARIO: $MODE"
           
           # DEFAULT: Baseline (Scenario 1)
-          export AIKIDO_DISABLE="true"
-          export AIKIDO_BLOCK="false"
-          SCENARIO_ID=1
+          A_DISABLE="true"
+          A_BLOCK="false"
+          S_ID=1
 
           if [ "$MODE" == "detection" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="false"
-             SCENARIO_ID=2
+             A_DISABLE="false"
+             A_BLOCK="false"
+             S_ID=2
           elif [ "$MODE" == "blocking" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="true"
-             SCENARIO_ID=3
+             A_DISABLE="false"
+             A_BLOCK="true"
+             S_ID=3
           fi
 
-          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
+          echo "{\"scenario_id\": $S_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # Force build to ensure image exists
-          echo "🏗️ Building containers..."
+          # Create .env file for Docker Compose
+          echo "AIKIDO_DISABLE=$A_DISABLE" > .env
+          echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
+          echo "SCENARIO_ID=$S_ID" >> .env
+          
+          # Use your "Old Fix" command (it works if the build passes!)
+          echo "🏗️ Building and Starting containers..."
           docker compose up -d --build
           
           echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
@@ -320,7 +323,7 @@
 
     # --- 7. PROJECT STARTUP ---
     - name: Launch Baseline Scenario (Build & Start Containers)
-      # Redirect output to log file so we can see why it fails
+      # We use async/poll to allow the heavy build to finish without timeout
       shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
-      async: 1200
+      async: 1800
       poll: 10
