@@ -189,24 +189,30 @@
           FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
+          # 1. Clone specific version
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          
+          # 2. Install dependencies (including dev deps for building)
           RUN npm install
           
-          # Install Aikido and OpenTelemetry
+          # 3. Install Security & Observability Tools
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Inject Aikido Import at top of app.ts
-          RUN sed -i "1i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
-              sed -i "1i import '@aikidosec/firewall' // Aikido RASP" server.ts
+          # 4. Inject Aikido Import SAFELY (Bypassing TypeScript Strict Checks)
+          # We use printf + sed to insert "@ts-ignore" so the build doesn't fail on missing types
+          RUN sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' app.ts && \
+              sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' server.ts
               
+          # 5. Build the application (TypeScript -> JavaScript)
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
+          # --- RUNTIME STAGE ---
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # OpenTelemetry Initialization Script
+          # 6. Create OpenTelemetry Initialization Script
           RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); \
