@@ -15,13 +15,13 @@
     juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (Keep this, it is safe and helpful) ---
+    # --- 0. SYSTEM TUNING (CRITICAL FIX FOR DOCKER BUILDS) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
       register: swap_file_check
 
-    - name: Create 4GB Swap file
+    - name: Create 4GB Swap file (Prevents OOM Kills during build)
       command: fallocate -l 4G /swapfile
       when: not swap_file_check.stat.exists
 
@@ -65,6 +65,7 @@
         groups: docker
         append: yes
 
+    # CRITICAL: Reset connection so group membership takes effect immediately
     - name: Reset SSH connection for group changes
       meta: reset_connection
 
@@ -189,30 +190,24 @@
           FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
-          # 1. Clone specific version
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
-          # 2. Install dependencies (including dev deps for building)
           RUN npm install
           
-          # 3. Install Security & Observability Tools
+          # Install Aikido and OpenTelemetry
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # 4. Inject Aikido Import SAFELY (Bypassing TypeScript Strict Checks)
-          # We use printf + sed to insert "@ts-ignore" so the build doesn't fail on missing types
-          RUN sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' app.ts && \
-              sed -i '1i // @ts-ignore\nimport "@aikidosec/firewall"; // Aikido RASP' server.ts
+          # Inject Aikido Import at top of app.ts
+          RUN sed -i "1i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
+              sed -i "1i import '@aikidosec/firewall' // Aikido RASP" server.ts
               
-          # 5. Build the application (TypeScript -> JavaScript)
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          # --- RUNTIME STAGE ---
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # 6. Create OpenTelemetry Initialization Script
+          # OpenTelemetry Initialization Script
           RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
           const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); \
@@ -291,52 +286,41 @@
         owner: ubuntu
         content: |
           #!/bin/bash
+          # EXIT ON ERROR so we know if it fails
           set -e
+          
           MODE=$1
           cd /opt/juice-shop
           
-          # Initialize JSON for Dashboard
-          echo "{\"scenario_id\": 1, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
+          echo "🔬 INITIALIZING SCENARIO: $MODE"
           
-          # We just set variables here for the shell session, but Docker needs them in .env or passed explicitly
-          # For simple restarts, we rely on the Docker Compose service definitions
-          
-          echo "✅ Scenario Configuration Updated."
-          # Note: We do NOT run docker compose here anymore to prevent Ansible timeouts.
-          # We let Ansible handle the build lifecycle.
-
-    # --- 7. EXPLICIT BUILD & START (THE FIX) ---
-    
-    # Step A: Create a .env file so Docker Compose knows the variables
-    - name: Create .env file for Docker Compose
-      copy:
-        dest: "{{ juice_shop_dir }}/.env"
-        content: |
-          AIKIDO_DISABLE=true
-          AIKIDO_BLOCK=false
+          # DEFAULT: Baseline (Scenario 1)
+          export AIKIDO_DISABLE="true"
+          export AIKIDO_BLOCK="false"
           SCENARIO_ID=1
-          DD_API_KEY={{ datadog_api_key }}
-          aikido_token={{ aikido_token }}
 
-    # Step B: Build explicitly in the foreground (Ansible waits for this!)
-    - name: 🏗️ Build Juice Shop Images (This takes ~10 mins)
-      shell: "docker compose build"
-      args:
-        chdir: "{{ juice_shop_dir }}"
-      # 30 minute timeout ensures we don't disconnect prematurely
-      async: 1800 
-      poll: 15
+          if [ "$MODE" == "detection" ]; then
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="false"
+             SCENARIO_ID=2
+          elif [ "$MODE" == "blocking" ]; then
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="true"
+             SCENARIO_ID=3
+          fi
 
-    # Step C: Start the containers
-    - name: 🚀 Start Containers
-      shell: "docker compose up -d"
-      args:
-        chdir: "{{ juice_shop_dir }}"
+          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
+          
+          # Force build to ensure image exists
+          echo "🏗️ Building containers..."
+          docker compose up -d --build
+          
+          echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
+          sleep 10
 
-    # Step D: The "Truth" Check - Ansible will FAIL if this times out
-    - name: ⏳ Wait for Port 3000 (Verify Success)
-      wait_for:
-        port: 3000
-        delay: 10
-        timeout: 600
-        msg: "Timeout waiting for Juice Shop to start on port 3000"
+    # --- 7. PROJECT STARTUP ---
+    - name: Launch Baseline Scenario (Build & Start Containers)
+      # Redirect output to log file so we can see why it fails
+      shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
+      async: 1200
+      poll: 10
