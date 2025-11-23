@@ -1,548 +1,700 @@
 {
-  "dashboard": {
-    "title": "IAST vs RASP Three-Scenario Analysis (Thesis Dashboard with OpenTelemetry)",
-    "tags": ["security", "devsecops", "iast", "rasp", "comparison", "thesis", "opentelemetry"],
-    "timezone": "browser",
-    "refresh": "30s",
-    "panels": [
+  "annotations": {
+    "list": [
       {
-        "id": 1,
-        "title": "🎯 THESIS HYPOTHESIS VALIDATION (Three Scenarios)",
-        "type": "text",
-        "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
-        "options": {
-          "mode": "markdown",
-          "content": "# IAST vs RASP Three-Scenario Comparison Study\n\n## Hypothesis\n**RASP provides superior protection by both detecting AND blocking attacks, while IAST provides detection only.**\n\n### Three Test Scenarios:\n- **Scenario 1 (IAST Only)**: DataDog IAST ON, Aikido RASP OFF → Detection without blocking (Baseline)\n- **Scenario 2A (IAST + RASP Detection)**: DataDog IAST ON, Aikido RASP ON (detection-only) → Enhanced detection, no blocking\n- **Scenario 2B (IAST + RASP Blocking)**: DataDog IAST ON, Aikido RASP ON (blocking mode) → Detection WITH blocking\n\n**Expected Result:**\n- Scenarios 1 & 2A: 0% blocking rate\n- Scenario 2B: ~80% blocking rate\n\n**Conclusion:** Demonstrates RASP's superior protection capability beyond IAST detection.\n\n📡 **OpenTelemetry Enabled:** All scenarios export telemetry data for comprehensive analysis."
-        }
-      },
-      {
-        "id": 2,
-        "title": "📊 Three-Scenario Comparison Overview",
-        "type": "stat",
-        "gridPos": {"h": 7, "w": 24, "x": 0, "y": 5},
-        "targets": [
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-only\"})",
-            "legendFormat": "S1: IAST Detections (No RASP)"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-rasp-detect\"})",
-            "legendFormat": "S2A: IAST Detections"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-detect\"})",
-            "legendFormat": "S2A: RASP Detections (No Blocking)"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "S2B: IAST Detections"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "S2B: RASP Detections"
-          },
-          {
-            "expr": "sum(security_blocks_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "S2B: RASP BLOCKS ✅"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "graphMode": "area",
-          "orientation": "horizontal"
-        }
-      },
-      {
-        "id": 3,
-        "title": "🚫 KEY METRIC: RASP Blocking Effectiveness (Scenario 2B ONLY)",
-        "type": "gauge",
-        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 12},
-        "targets": [
-          {
-            "expr": "(sum(security_blocks_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"}) / sum(security_detections_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"})) * 100",
-            "legendFormat": "Block Rate %"
-          }
-        ],
-        "options": {
-          "showThresholdLabels": true,
-          "showThresholdMarkers": true
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
         },
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 60, "color": "yellow"},
-                {"value": 75, "color": "green"},
-                {"value": 85, "color": "dark-green"}
-              ]
-            },
-            "unit": "percent",
-            "min": 0,
-            "max": 100
-          }
-        }
-      },
-      {
-        "id": 4,
-        "title": "📈 Detection Timeline: All Three Scenarios",
-        "type": "timeseries",
-        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 12},
-        "targets": [
-          {
-            "expr": "rate(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-only\"}[5m])",
-            "legendFormat": "S1: IAST (No RASP)"
-          },
-          {
-            "expr": "rate(security_detections_total{scenario=\"iast-rasp-detect\"}[5m])",
-            "legendFormat": "S2A: IAST+RASP (Detect)"
-          },
-          {
-            "expr": "rate(security_detections_total{scenario=\"iast-rasp-block\"}[5m])",
-            "legendFormat": "S2B: IAST+RASP (Detect)"
-          },
-          {
-            "expr": "rate(security_blocks_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"}[5m])",
-            "legendFormat": "S2B: RASP Blocks"
-          }
-        ]
-      },
-      {
-        "id": 5,
-        "title": "🔴 SCENARIO 1: IAST Only (Baseline - No RASP)",
-        "type": "row",
-        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21}
-      },
-      {
-        "id": 6,
-        "title": "DAST Vulnerabilities - Scenario 1",
-        "type": "bargauge",
-        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 22},
-        "targets": [
-          {
-            "expr": "sum by (severity) (dast_vulnerabilities_found{scenario=\"iast-only\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "{{severity}}"
-          }
-        ]
-      },
-      {
-        "id": 7,
-        "title": "IAST Detections - Scenario 1",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 22},
-        "targets": [
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-only\"})",
-            "legendFormat": "Total IAST Detections"
-          }
-        ],
-        "options": {
-          "colorMode": "value",
-          "graphMode": "area"
-        }
-      },
-      {
-        "id": 8,
-        "title": "RASP Status - Scenario 1",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 22},
-        "targets": [
-          {
-            "expr": "sum(security_blocks_total{scenario=\"iast-only\"}) or vector(0)",
-            "legendFormat": "RASP Blocks (Expected: 0)"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "graphMode": "none"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "steps": [
-                {"value": 0, "color": "red"}
-              ]
-            },
-            "mappings": [
-              {"type": "value", "value": 0, "text": "RASP DISABLED"}
-            ]
-          }
-        }
-      },
-      {
-        "id": 9,
-        "title": "🟡 SCENARIO 2A: IAST + RASP (Detection Only Mode)",
-        "type": "row",
-        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28}
-      },
-      {
-        "id": 10,
-        "title": "DAST Vulnerabilities - Scenario 2A",
-        "type": "bargauge",
-        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 29},
-        "targets": [
-          {
-            "expr": "sum by (severity) (dast_vulnerabilities_found{scenario=\"iast-rasp-detect\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "{{severity}}"
-          }
-        ]
-      },
-      {
-        "id": 11,
-        "title": "IAST + RASP Detections - Scenario 2A",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 29},
-        "targets": [
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-rasp-detect\"})",
-            "legendFormat": "IAST Detections"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-detect\"})",
-            "legendFormat": "RASP Detections"
-          }
-        ],
-        "options": {
-          "colorMode": "value",
-          "graphMode": "area",
-          "orientation": "vertical"
-        }
-      },
-      {
-        "id": 12,
-        "title": "RASP Blocking - Scenario 2A",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 29},
-        "targets": [
-          {
-            "expr": "sum(security_blocks_total{scenario=\"iast-rasp-detect\"}) or vector(0)",
-            "legendFormat": "Blocks (Expected: 0)"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "graphMode": "none"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "steps": [
-                {"value": 0, "color": "yellow"}
-              ]
-            },
-            "mappings": [
-              {"type": "value", "value": 0, "text": "DETECTION ONLY"}
-            ]
-          }
-        }
-      },
-      {
-        "id": 13,
-        "title": "🟢 SCENARIO 2B: IAST + RASP (Blocking Mode) ✅",
-        "type": "row",
-        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35}
-      },
-      {
-        "id": 14,
-        "title": "DAST Vulnerabilities - Scenario 2B",
-        "type": "bargauge",
-        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 36},
-        "targets": [
-          {
-            "expr": "sum by (severity) (dast_vulnerabilities_found{scenario=\"iast-rasp-block\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "{{severity}}"
-          }
-        ]
-      },
-      {
-        "id": 15,
-        "title": "IAST + RASP Detections - Scenario 2B",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 36},
-        "targets": [
-          {
-            "expr": "sum(security_detections_total{tool=\"datadog_iast\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "IAST Detections"
-          },
-          {
-            "expr": "sum(security_detections_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "RASP Detections"
-          }
-        ],
-        "options": {
-          "colorMode": "value",
-          "graphMode": "area",
-          "orientation": "vertical"
-        }
-      },
-      {
-        "id": 16,
-        "title": "🚫 RASP BLOCKS - Scenario 2B",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 36},
-        "targets": [
-          {
-            "expr": "sum(security_blocks_total{tool=\"aikido_rasp\",scenario=\"iast-rasp-block\"})",
-            "legendFormat": "Attacks Blocked"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "graphMode": "area"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 20, "color": "yellow"},
-                {"value": 50, "color": "green"},
-                {"value": 100, "color": "dark-green"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 17,
-        "title": "📊 Side-by-Side: Total Vulnerabilities by Scenario",
-        "type": "bargauge",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
-        "targets": [
-          {
-            "expr": "sum(dast_vulnerabilities_found{scenario=\"iast-only\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "S1: IAST Only"
-          },
-          {
-            "expr": "sum(dast_vulnerabilities_found{scenario=\"iast-rasp-detect\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "S2A: IAST+RASP (Detect)"
-          },
-          {
-            "expr": "sum(dast_vulnerabilities_found{scenario=\"iast-rasp-block\",scan_type=\"full\",vuln_name=\"total\"})",
-            "legendFormat": "S2B: IAST+RASP (Block)"
-          }
-        ],
-        "options": {
-          "orientation": "horizontal",
-          "displayMode": "gradient"
-        }
-      },
-      {
-        "id": 18,
-        "title": "🎯 THESIS KEY METRIC: Blocking Rate Comparison",
-        "type": "bargauge",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
-        "targets": [
-          {
-            "expr": "(sum(security_blocks_total{scenario=\"iast-only\"}) or vector(0)) / (sum(security_detections_total{scenario=\"iast-only\"}) or vector(1)) * 100",
-            "legendFormat": "S1: Block Rate (0%)"
-          },
-          {
-            "expr": "(sum(security_blocks_total{scenario=\"iast-rasp-detect\"}) or vector(0)) / (sum(security_detections_total{scenario=\"iast-rasp-detect\"}) or vector(1)) * 100",
-            "legendFormat": "S2A: Block Rate (0%)"
-          },
-          {
-            "expr": "(sum(security_blocks_total{scenario=\"iast-rasp-block\"}) / sum(security_detections_total{scenario=\"iast-rasp-block\"})) * 100",
-            "legendFormat": "S2B: Block Rate (~80%)"
-          }
-        ],
-        "options": {
-          "orientation": "horizontal",
-          "displayMode": "lcd"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "unit": "percent",
-            "max": 100,
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 50, "color": "yellow"},
-                {"value": 75, "color": "green"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 19,
-        "title": "🔬 Detection Breakdown by Tool & Scenario",
-        "type": "bargauge",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
-        "targets": [
-          {
-            "expr": "sum by (tool, scenario) (security_detections_total)",
-            "legendFormat": "{{scenario}}: {{tool}}"
-          }
-        ],
-        "options": {
-          "orientation": "horizontal"
-        }
-      },
-      {
-        "id": 20,
-        "title": "🛡️ RASP Attack Type Distribution (All RASP Scenarios)",
-        "type": "piechart",
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
-        "targets": [
-          {
-            "expr": "sum by (attack_type) (security_blocks_total{tool=\"aikido_rasp\"})",
-            "legendFormat": "{{attack_type}}"
-          }
-        ]
-      },
-      {
-        "id": 21,
-        "title": "📡 OpenTelemetry Collection Status",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 58},
-        "targets": [
-          {
-            "expr": "otel_collection_status{source=\"datadog_iast\",status=\"success\"}",
-            "legendFormat": "DataDog IAST"
-          },
-          {
-            "expr": "otel_collection_status{source=\"aikido_rasp\",status=\"success\"}",
-            "legendFormat": "Aikido RASP"
-          },
-          {
-            "expr": "otel_collection_status{source=\"exporter\",status=\"active\"}",
-            "legendFormat": "Exporter"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "orientation": "horizontal"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 1, "color": "green"}
-              ]
-            },
-            "mappings": [
-              {"type": "value", "value": 0, "text": "OFFLINE"},
-              {"type": "value", "value": 1, "text": "ACTIVE"}
-            ]
-          }
-        }
-      },
-      {
-        "id": 22,
-        "title": "⚡ Current Test Status",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 58},
-        "targets": [
-          {
-            "expr": "current_scenario_id",
-            "legendFormat": "Scenario ID"
-          },
-          {
-            "expr": "current_scan_phase",
-            "legendFormat": "Scan Phase"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "orientation": "horizontal"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "mappings": [
-              {"type": "value", "value": 1, "text": "S1: IAST Only"},
-              {"type": "value", "value": 2, "text": "S2A: IAST+RASP (Detect)"},
-              {"type": "value", "value": 3, "text": "S2B: IAST+RASP (Block)"}
-            ]
-          }
-        }
-      },
-      {
-        "id": 23,
-        "title": "📋 SAST Baseline (Semgrep - Static Analysis)",
-        "type": "bargauge",
-        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 64},
-        "targets": [
-          {
-            "expr": "sum by (severity) (sast_vulnerabilities_found{rule_id=\"total\"})",
-            "legendFormat": "{{severity}}"
-          }
-        ]
-      },
-      {
-        "id": 24,
-        "title": "📈 OpenTelemetry Metrics Volume",
-        "type": "timeseries",
-        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 64},
-        "targets": [
-          {
-            "expr": "rate(otel_receiver_accepted_spans[5m])",
-            "legendFormat": "OTel Spans/sec"
-          },
-          {
-            "expr": "rate(otel_receiver_accepted_metric_points[5m])",
-            "legendFormat": "OTel Metrics/sec"
-          }
-        ]
-      },
-      {
-        "id": 25,
-        "title": "📊 COMPREHENSIVE THESIS DATA TABLE",
-        "type": "table",
-        "gridPos": {"h": 12, "w": 24, "x": 0, "y": 70},
-        "targets": [
-          {
-            "expr": "sum by (scenario) (security_detections_total{tool=\"datadog_iast\"})",
-            "format": "table",
-            "instant": true
-          },
-          {
-            "expr": "sum by (scenario) (security_detections_total{tool=\"aikido_rasp\"})",
-            "format": "table",
-            "instant": true
-          },
-          {
-            "expr": "sum by (scenario) (security_blocks_total{tool=\"aikido_rasp\"})",
-            "format": "table",
-            "instant": true
-          },
-          {
-            "expr": "sum by (scenario) (dast_vulnerabilities_found{vuln_name=\"total\",scan_type=\"full\"})",
-            "format": "table",
-            "instant": true
-          },
-          {
-            "expr": "(sum by (scenario) (security_blocks_total{tool=\"aikido_rasp\"}) / sum by (scenario) (security_detections_total{tool=\"aikido_rasp\"})) * 100",
-            "format": "table",
-            "instant": true
-          }
-        ],
-        "transformations": [
-          {
-            "id": "merge"
-          },
-          {
-            "id": "organize",
-            "options": {
-              "renameByName": {
-                "scenario": "Test Scenario",
-                "Value #A": "IAST Detections",
-                "Value #B": "RASP Detections",
-                "Value #C": "RASP Blocks",
-                "Value #D": "DAST Vulns",
-                "Value #E": "Block Rate %"
-              }
-            }
-          }
-        ]
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
       }
-    ],
-    "schemaVersion": 36,
-    "version": 2,
-    "uid": "three-scenario-thesis",
-    "editable": true
-  }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "content": "# 🎓 Thesis: IAST vs RASP Comparative Analysis\n\n**Hypothesis:** RASP (Runtime Application Self-Protection) provides superior security by **actively blocking** attacks that IAST only detects, with negligible performance overhead.\n\n### 🧪 Experiment Scenarios:\n1.  **🔵 Baseline (IAST Only):** Vulnerabilities reported by Datadog, but attacks **SUCCEED (HTTP 200)**.\n2.  **🟠 Detection (RASP Log):** Attacks detected by Aikido deep in code, attacks **SUCCEED**, logs generated.\n3.  **🟢 Blocking (RASP Protect):** Attacks intercepted by Aikido in runtime, attacks **BLOCKED (HTTP 403)**.",
+        "mode": "markdown"
+      },
+      "title": "🎯 THESIS CONTEXT",
+      "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "1": {
+                  "color": "blue",
+                  "index": 0,
+                  "text": "1. BASELINE (IAST ONLY)"
+                },
+                "2": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "2. RASP DETECTION"
+                },
+                "3": {
+                  "color": "green",
+                  "index": 2,
+                  "text": "3. RASP BLOCKING"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "gray",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "thesis_scenario_id",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "CURRENT ACTIVE SCENARIO",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m])) / sum(rate(juice_shop_http_server_request_duration_seconds_count[1m])) * 100",
+          "legendFormat": "Blocking Rate %",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "🛡️ ATTACK BLOCK RATE (Success Metric)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🐶 Datadog IAST Detections"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🥋 Aikido RASP Detections"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🛡️ Aikido RASP BLOCKS"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "increase(thesis_iast_detections_total[1m])",
+          "legendFormat": "🐶 Datadog IAST Detections",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "increase(thesis_rasp_detections_total[1m])",
+          "legendFormat": "🥋 Aikido RASP Detections",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "increase(thesis_rasp_blocks_total[1m])",
+          "legendFormat": "🛡️ Aikido RASP BLOCKS",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "⚔️ TOOL COMPARISON: Real-Time Log Telemetry",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))",
+          "legendFormat": "✅ Allowed Traffic (HTTP 200)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))",
+          "legendFormat": "🚫 RASP Blocks (HTTP 403)",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "🛡️ SECURITY EFFECTIVENESS (HTTP Status)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "ms",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000",
+          "legendFormat": "Avg Latency (ms)",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "⚡ PERFORMANCE OVERHEAD (Cost of Security)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "id": 7,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "text": {}
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "thesis_sast_vulns",
+          "legendFormat": "SAST: {{severity}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "📋 SAST VULNERABILITY PROFILE (Static)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "rate(juice_shop_http_server_request_duration_seconds_count[1m])",
+          "legendFormat": "Events / Sec",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "📈 TOTAL TRAFFIC THROUGHPUT",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [
+    "thesis",
+    "rasp",
+    "security"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "FINAL THESIS: IAST vs RASP Evaluation",
+  "uid": "thesis-final-dash",
+  "version": 1,
+  "weekStart": ""
 }

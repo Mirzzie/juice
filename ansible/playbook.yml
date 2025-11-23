@@ -81,14 +81,15 @@
                   update_metrics()
                   time.sleep(2)
 
-    - name: Exporter Dockerfile
+    - name: Dockerfile for Exporter
       copy:
         dest: "{{ exporter_dir }}/Dockerfile"
         content: |
           FROM python:3.9-slim
           WORKDIR /app
           COPY exporter.py .
-          RUN pip install prometheus_client
+          # ADDED: docker library to read logs
+          RUN pip install prometheus_client docker
           CMD ["python", "exporter.py"]
 
     # --- 4. OBSERVABILITY CONFIGS ---
@@ -236,6 +237,8 @@
               container_name: metrics-exporter
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
+                # CRITICAL ADDITION: Allow exporter to read sibling logs
+                - /var/run/docker.sock:/var/run/docker.sock
               ports: ["9999:9999"]
               networks: [thesis-net]
 
