@@ -15,6 +15,38 @@
     juice_shop_version: "v16.0.0"
 
   tasks:
+    # --- 0. SYSTEM TUNING (Keep this, it is safe and helpful) ---
+    - name: Check if swap file exists
+      stat:
+        path: /swapfile
+      register: swap_file_check
+
+    - name: Create 4GB Swap file
+      command: fallocate -l 4G /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Set permissions on swap file
+      file:
+        path: /swapfile
+        mode: '0600'
+      when: not swap_file_check.stat.exists
+
+    - name: Make swap file
+      command: mkswap /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Enable swap file
+      command: swapon /swapfile
+      when: not swap_file_check.stat.exists
+
+    - name: Persist swap in fstab
+      mount:
+        name: none
+        src: /swapfile
+        fstype: swap
+        opts: sw
+        state: present
+
     # --- 1. SYSTEM PREP ---
     - name: Update APT and install Docker deps
       apt:
@@ -32,6 +64,9 @@
         name: ubuntu
         groups: docker
         append: yes
+
+    - name: Reset SSH connection for group changes
+      meta: reset_connection
 
     # --- 2. MONITORING DIRECTORIES ---
     - name: Create directories
@@ -250,38 +285,52 @@
         owner: ubuntu
         content: |
           #!/bin/bash
+          set -e
           MODE=$1
           cd /opt/juice-shop
           
-          echo "🔬 INITIALIZING SCENARIO: $MODE"
+          # Initialize JSON for Dashboard
+          echo "{\"scenario_id\": 1, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # DEFAULT: Baseline (Scenario 1)
-          export AIKIDO_DISABLE="true"
-          export AIKIDO_BLOCK="false"
+          # We just set variables here for the shell session, but Docker needs them in .env or passed explicitly
+          # For simple restarts, we rely on the Docker Compose service definitions
+          
+          echo "✅ Scenario Configuration Updated."
+          # Note: We do NOT run docker compose here anymore to prevent Ansible timeouts.
+          # We let Ansible handle the build lifecycle.
+
+    # --- 7. EXPLICIT BUILD & START (THE FIX) ---
+    
+    # Step A: Create a .env file so Docker Compose knows the variables
+    - name: Create .env file for Docker Compose
+      copy:
+        dest: "{{ juice_shop_dir }}/.env"
+        content: |
+          AIKIDO_DISABLE=true
+          AIKIDO_BLOCK=false
           SCENARIO_ID=1
+          DD_API_KEY={{ datadog_api_key }}
+          aikido_token={{ aikido_token }}
 
-          if [ "$MODE" == "detection" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="false"
-             SCENARIO_ID=2
-          elif [ "$MODE" == "blocking" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="true"
-             SCENARIO_ID=3
-          fi
+    # Step B: Build explicitly in the foreground (Ansible waits for this!)
+    - name: 🏗️ Build Juice Shop Images (This takes ~10 mins)
+      shell: "docker compose build"
+      args:
+        chdir: "{{ juice_shop_dir }}"
+      # 30 minute timeout ensures we don't disconnect prematurely
+      async: 1800 
+      poll: 15
 
-          # Update the JSON file so Grafana knows what line to draw
-          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
-          
-          # Start containers (detached)
-          docker compose up -d
-          
-          echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
-          sleep 10
+    # Step C: Start the containers
+    - name: 🚀 Start Containers
+      shell: "docker compose up -d"
+      args:
+        chdir: "{{ juice_shop_dir }}"
 
-    # --- 7. PROJECT STARTUP (THIS WAS MISSING!) ---
-    - name: Launch Baseline Scenario (Build & Start Containers)
-      shell: "/home/ubuntu/run_scenario.sh baseline"
-      # Allow 20 minutes for the first build (Juice Shop is heavy)
-      async: 1200
-      poll: 10
+    # Step D: The "Truth" Check - Ansible will FAIL if this times out
+    - name: ⏳ Wait for Port 3000 (Verify Success)
+      wait_for:
+        port: 3000
+        delay: 10
+        timeout: 600
+        msg: "Timeout waiting for Juice Shop to start on port 3000"
