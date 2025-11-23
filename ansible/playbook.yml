@@ -15,7 +15,7 @@
     juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING ---
+    # --- 0. SYSTEM TUNING (SWAP) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
@@ -170,7 +170,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP (THE FIX) ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -182,7 +182,7 @@
         state: directory
         owner: ubuntu
 
-    # THE FIX IS IN THIS TASK:
+    # CRITICAL FIX: skipLibCheck prevents TS1005 errors
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
@@ -200,8 +200,6 @@
           # Install Aikido and OpenTelemetry
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # No source code modification via sed (prevents strict mode errors)
-              
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
@@ -209,7 +207,7 @@
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # Runtime Injection of Aikido/Otel
+          # Runtime Injection
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -292,7 +290,7 @@
           MODE=$1
           cd /opt/juice-shop
           
-          # DEFAULT: Baseline (Scenario 1)
+          # Setup variables
           A_DISABLE="true"
           A_BLOCK="false"
           S_ID=1
@@ -309,35 +307,34 @@
 
           echo "{\"scenario_id\": $S_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # Create .env file for Docker Compose
+          # Create .env for Docker
           echo "AIKIDO_DISABLE=$A_DISABLE" > .env
           echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
           echo "SCENARIO_ID=$S_ID" >> .env
           
-          # Only recreate container if vars changed
-          docker compose up -d
+          echo "✅ Config updated for $MODE."
+          # NOTE: We do not run docker compose here to avoid SSH timeouts. Ansible handles it.
 
-    # --- 7. PROJECT STARTUP ---
-    - name: Launch Baseline Scenario
-      block:
-        - name: Run Build Script
-          shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
-      
-      rescue:
-        - name: ❌ PRINT DEBUG LOGS ON FAILURE
-          command: cat /home/ubuntu/deployment.log
-          register: error_log
-        
-        - name: Display Error Log
-          debug:
-            var: error_log.stdout_lines
-        
-        - name: Fail the playbook
-          fail:
-            msg: "Deployment failed. See logs above."
+    # --- 7. PROJECT STARTUP (ASYNC MODE) ---
+    - name: Initialize Config
+      shell: "/home/ubuntu/run_scenario.sh baseline"
+
+    - name: 🏗️ Build Containers (Async)
+      # This task starts the build and disconnects, checking back every 30s
+      shell: "docker compose build"
+      args:
+        chdir: "{{ juice_shop_dir }}"
+      async: 1800  # 30 Minutes timeout
+      poll: 30     # Check every 30 seconds
+
+    - name: 🚀 Start Containers
+      shell: "docker compose up -d"
+      args:
+        chdir: "{{ juice_shop_dir }}"
 
     - name: ⏳ Wait for Port 3000
       wait_for:
         port: 3000
         delay: 10
         timeout: 600
+        msg: "Juice Shop failed to start on port 3000"
