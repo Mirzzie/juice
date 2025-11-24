@@ -12,10 +12,11 @@
     prometheus_port: 9090
     otel_grpc_port: 4317
     otel_http_port: 4318
-    juice_shop_version: "v16.0.0"
+    # Official Image Tag (Stable)
+    juice_shop_image: "bkimminich/juice-shop:v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (Keep this, it saves the build from crashing) ---
+    # --- 0. SYSTEM TUNING (SWAP) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
@@ -292,7 +293,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP (STABLE OVERLAY METHOD) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -304,33 +305,22 @@
         state: directory
         owner: ubuntu
 
-    # STABLE DOCKERFILE: Using Node 18 to match Juice Shop v16 + Runtime Injection
+    # THE SOLUTION: Use Official Image + Runtime Inject. NO COMPILATION.
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:18-bullseye-slim AS builder
-          RUN apt-get update && apt-get install -y git python3 make g++ curl
-          WORKDIR /juice-shop
+          # 1. Use the Official Juice Shop Image (Already Compiled & Working)
+          FROM {{ juice_shop_image }}
           
-          # 1. Clone
-          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          # 2. Switch to Root to install our tools
+          USER root
           
-          # 2. Install Deps (Using legacy peer deps for stability)
-          RUN npm install --legacy-peer-deps
+          # 3. Install Security Tools
+          # We use --no-save to avoid messing with package-lock.json
+          RUN npm install --no-save @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # 3. Build
-          RUN npm run build:server
-          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
-          
-          # 4. Install Security Tools (No source modification)
-          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node --legacy-peer-deps
-          
-          FROM node:18-bullseye-slim
-          WORKDIR /juice-shop
-          COPY --from=builder /juice-shop .
-          
-          # 5. Safe Runtime Injection
+          # 4. Create the Runtime Injection Script
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -341,8 +331,7 @@
           const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); \
           sdk.start();" > otel-init.js
           
-          EXPOSE 3000
-          ENV NODE_ENV=production
+          # 5. Override Command to use our Injection Script
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
     - name: Create Docker Compose
@@ -359,7 +348,7 @@
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
                 - DD_API_KEY={{ datadog_api_key }}
                 - AIKIDO_TOKEN={{ aikido_token }}
-                # Variables are passed from the SHELL (Old Method)
+                # Variables from script
                 - AIKIDO_BLOCK=${AIKIDO_BLOCK} 
                 - AIKIDO_DISABLE=${AIKIDO_DISABLE}
               depends_on: [otel-collector]
@@ -402,7 +391,7 @@
             thesis-net:
               driver: bridge
 
-    # --- 6. CONTROL SCRIPTS (RESTORED OLD LOGIC) ---
+    # --- 6. CONTROL SCRIPTS ---
     - name: Create Scenario Switch Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
@@ -414,36 +403,53 @@
           MODE=$1
           cd /opt/juice-shop
           
-          echo "🔬 INITIALIZING SCENARIO: $MODE"
-          
-          # Logic from your working script
-          if [ "$MODE" == "baseline" ]; then
-             export SCENARIO_NAME="iast-only"
-             export AIKIDO_DISABLE="true" 
-             export AIKIDO_BLOCK="false"
-             SCENARIO_ID=1
-          elif [ "$MODE" == "detection" ]; then
-             export SCENARIO_NAME="iast-rasp-detect"
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="false"
-             SCENARIO_ID=2
+          # Setup variables
+          A_DISABLE="true"
+          A_BLOCK="false"
+          S_ID=1
+
+          if [ "$MODE" == "detection" ]; then
+             A_DISABLE="false"
+             A_BLOCK="false"
+             S_ID=2
           elif [ "$MODE" == "blocking" ]; then
-             export SCENARIO_NAME="iast-rasp-block"
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="true"
-             SCENARIO_ID=3
+             A_DISABLE="false"
+             A_BLOCK="true"
+             S_ID=3
           fi
 
-          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
+          echo "{\"scenario_id\": $S_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # EXECUTE DOCKER HERE (So variables persist)
-          echo "🏗️  Starting Docker with Mode: $MODE"
+          # Write Env
+          echo "AIKIDO_DISABLE=$A_DISABLE" > .env
+          echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
+          echo "SCENARIO_ID=$S_ID" >> .env
+          
+          echo "🏗️  Scenario $MODE: Recreating Containers..."
           docker compose up -d --build
-          
-          echo "✅ Scenario Active. Waiting 10s..."
-          sleep 10
 
-    # --- 7. PROJECT STARTUP (SIMPLE EXECUTION) ---
-    - name: Launch Baseline Scenario (Script handles build & start)
-      shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
-      # No async needed now that Node 18 + Swap is stable
+    # --- 7. PROJECT STARTUP & DEBUG ---
+    - name: Launch Baseline Scenario
+      block:
+        - name: Execute Script
+          shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
+      
+      # THIS WILL SHOW YOU THE LOGS IF IT FAILS
+      rescue:
+        - name: ❌ PRINT DEPLOYMENT LOG
+          command: cat /home/ubuntu/deployment.log
+          register: error_log
+        
+        - name: Display Failure Details
+          debug:
+            var: error_log.stdout_lines
+        
+        - name: Fail
+          fail:
+            msg: "Deployment failed. Check logs above."
+
+    - name: ⏳ Wait for Port 3000
+      wait_for:
+        port: 3000
+        delay: 10
+        timeout: 300
