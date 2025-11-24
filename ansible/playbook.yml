@@ -72,8 +72,10 @@
       file:
         path: "{{ item }}"
         state: directory
-        mode: '0755'
-        owner: ubuntu
+        mode: '0777'       # CHANGED: Allow full write access
+        owner: ubuntu      # CHANGED: Ensure ubuntu owns it
+        group: ubuntu
+        recurse: yes       # CHANGED: Fix permissions for existing files
       loop:
         - "{{ monitoring_dir }}/otel-collector"
         - "{{ monitoring_dir }}/prometheus"
@@ -81,7 +83,7 @@
         - "{{ monitoring_dir }}/grafana/provisioning/dashboards"
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
-
+        
     # --- 4. DEPLOY FILES ---
     - name: Copy Enhanced Metrics Exporter
       copy:
