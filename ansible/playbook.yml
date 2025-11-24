@@ -12,17 +12,17 @@
     prometheus_port: 9090
     otel_grpc_port: 4317
     otel_http_port: 4318
-    # Using the official image version
-    juice_shop_image_tag: "v16.0.0"
+    # We use the version that works with your Node 22 build strategy
+    juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING ---
+    # --- 0. SYSTEM TUNING (REQUIRED FOR NODE 22 BUILDS) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
       register: swap_file_check
 
-    - name: Create 4GB Swap file
+    - name: Create 4GB Swap file (Prevents OOM during npm install)
       command: fallocate -l 4G /swapfile
       when: not swap_file_check.stat.exists
 
@@ -84,7 +84,7 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 3. CUSTOM METRICS EXPORTER ---
+    # --- 3. CUSTOM METRICS EXPORTER (NEW) ---
     - name: Create Exporter Script
       copy:
         dest: "{{ exporter_dir }}/exporter.py"
@@ -293,7 +293,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP SETUP (STABLE OVERLAY METHOD) ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP (HYBRID APPROACH) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -305,29 +305,32 @@
         state: directory
         owner: ubuntu
 
-    # THE FIX: Use Official Image + Overlay
+    # HYBRID DOCKERFILE: Using Node 22 (your working preference) + Runtime Injection
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # Stage 1: Installer (Get the security tools)
-          FROM node:18-bullseye-slim as installer
-          WORKDIR /tools
-          RUN npm install --no-save @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
-          
-          # Stage 2: Official Pre-Built App (Guaranteed to work)
-          FROM bkimminich/juice-shop:{{ juice_shop_image_tag }}
-          
-          # Switch to root to copy files
-          USER root
+          FROM node:22-bookworm-slim AS builder
+          RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
+          # Clone Juice Shop v16
+          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # Overlay our security tools into the existing app
-          COPY --from=installer /tools/node_modules ./node_modules_overlay
-          # Merge node_modules (cp -rn prevents overwriting existing deps)
-          RUN cp -rn ./node_modules_overlay/* ./node_modules/
+          # Install deps
+          RUN npm install
           
-          # Add our runtime injection script
+          # Build the server first (pure Juice Shop build)
+          RUN npm run build:server
+          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
+          
+          # Install Security Tools AFTER build (No compilation conflicts)
+          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node --legacy-peer-deps
+          
+          FROM node:22-bookworm-slim
+          WORKDIR /juice-shop
+          COPY --from=builder /juice-shop .
+          
+          # Runtime Injection (No modification of app.ts source code)
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -433,16 +436,17 @@
           echo "SCENARIO_ID=$S_ID" >> .env
           
           echo "✅ Config updated for $MODE."
-          # No docker compose here, Ansible handles it.
 
-    # --- 7. PROJECT STARTUP (STABLE MODE) ---
+    # --- 7. PROJECT STARTUP (ASYNC BUILD FROM SOURCE) ---
     - name: Initialize Config
       shell: "/home/ubuntu/run_scenario.sh baseline"
 
-    - name: 🏗️ Build Containers
+    - name: 🏗️ Build Containers (Source Build)
       shell: "docker compose build"
       args:
         chdir: "{{ juice_shop_dir }}"
+      async: 2400  # 40 Minutes allowed for source build
+      poll: 30
 
     - name: 🚀 Start Containers
       shell: "docker compose up -d"
