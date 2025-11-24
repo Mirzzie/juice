@@ -12,7 +12,8 @@
     prometheus_port: 9090
     otel_grpc_port: 4317
     otel_http_port: 4318
-    juice_shop_version: "v16.0.0"
+    # Using the official image version
+    juice_shop_image_tag: "v16.0.0"
 
   tasks:
     # --- 0. SYSTEM TUNING ---
@@ -292,7 +293,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP (FIXED) ---
+    # --- 5. JUICE SHOP SETUP (STABLE OVERLAY METHOD) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -304,29 +305,29 @@
         state: directory
         owner: ubuntu
 
-    # THE FIX IS HERE: ORDER OF OPERATIONS
+    # THE FIX: Use Official Image + Overlay
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:20-bookworm-slim AS builder
-          RUN apt-get update && apt-get install -y git python3 make g++ curl
+          # Stage 1: Installer (Get the security tools)
+          FROM node:18-bullseye-slim as installer
+          WORKDIR /tools
+          RUN npm install --no-save @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
+          
+          # Stage 2: Official Pre-Built App (Guaranteed to work)
+          FROM bkimminich/juice-shop:{{ juice_shop_image_tag }}
+          
+          # Switch to root to copy files
+          USER root
           WORKDIR /juice-shop
-          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # 1. Standard Install & Build (Compiler works fine here)
-          RUN npm install
-          RUN npm run build:server
-          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
+          # Overlay our security tools into the existing app
+          COPY --from=installer /tools/node_modules ./node_modules_overlay
+          # Merge node_modules (cp -rn prevents overwriting existing deps)
+          RUN cp -rn ./node_modules_overlay/* ./node_modules/
           
-          # 2. INSTALL SECURITY TOOLS AFTER COMPILATION (Compiler is already done, so it won't crash)
-          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node --legacy-peer-deps
-          
-          FROM node:20-bookworm-slim
-          WORKDIR /juice-shop
-          COPY --from=builder /juice-shop .
-          
-          # Runtime Injection
+          # Add our runtime injection script
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -432,18 +433,16 @@
           echo "SCENARIO_ID=$S_ID" >> .env
           
           echo "✅ Config updated for $MODE."
-          # NOTE: We do not run docker compose here to avoid SSH timeouts. Ansible handles it.
+          # No docker compose here, Ansible handles it.
 
-    # --- 7. PROJECT STARTUP ---
+    # --- 7. PROJECT STARTUP (STABLE MODE) ---
     - name: Initialize Config
       shell: "/home/ubuntu/run_scenario.sh baseline"
 
-    - name: 🏗️ Build Containers (Async)
+    - name: 🏗️ Build Containers
       shell: "docker compose build"
       args:
         chdir: "{{ juice_shop_dir }}"
-      async: 2400
-      poll: 30
 
     - name: 🚀 Start Containers
       shell: "docker compose up -d"
