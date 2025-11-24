@@ -12,17 +12,16 @@
     prometheus_port: 9090
     otel_grpc_port: 4317
     otel_http_port: 4318
-    # We use the version that works with your Node 22 build strategy
     juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (REQUIRED FOR NODE 22 BUILDS) ---
+    # --- 0. SYSTEM TUNING (SWAP IS MANDATORY FOR BUILD) ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
       register: swap_file_check
 
-    - name: Create 4GB Swap file (Prevents OOM during npm install)
+    - name: Create 4GB Swap file
       command: fallocate -l 4G /swapfile
       when: not swap_file_check.stat.exists
 
@@ -84,7 +83,7 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 3. CUSTOM METRICS EXPORTER (NEW) ---
+    # --- 3. CUSTOM METRICS EXPORTER ---
     - name: Create Exporter Script
       copy:
         dest: "{{ exporter_dir }}/exporter.py"
@@ -293,7 +292,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP (HYBRID APPROACH) ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -305,32 +304,33 @@
         state: directory
         owner: ubuntu
 
-    # HYBRID DOCKERFILE: Using Node 22 (your working preference) + Runtime Injection
+    # DOCKERFILE: Node 18 (Stable) + Runtime Injection
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:22-bookworm-slim AS builder
+          FROM node:18-bullseye-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
-          # Clone Juice Shop v16
+          
+          # 1. Clone Code
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # Install deps
-          RUN npm install
+          # 2. Install Deps (Legacy Peer Deps needed for v16 on newer Node)
+          RUN npm install --legacy-peer-deps
           
-          # Build the server first (pure Juice Shop build)
+          # 3. Build (Standard)
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          # Install Security Tools AFTER build (No compilation conflicts)
+          # 4. Install Security Tools (Using legacy peer deps to avoid conflicts)
           RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node --legacy-peer-deps
           
-          FROM node:22-bookworm-slim
+          FROM node:18-bullseye-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # Runtime Injection (No modification of app.ts source code)
+          # 5. Runtime Injection (Safe)
           RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
           const { NodeSDK } = require('@opentelemetry/sdk-node'); \
           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
@@ -435,21 +435,16 @@
           echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
           echo "SCENARIO_ID=$S_ID" >> .env
           
-          echo "✅ Config updated for $MODE."
+          # IMPORTANT: Force restart to pick up env vars
+          docker compose up -d
 
-    # --- 7. PROJECT STARTUP (ASYNC BUILD FROM SOURCE) ---
+    # --- 7. PROJECT STARTUP (SYNCHRONOUS / OLD SCHOOL) ---
     - name: Initialize Config
       shell: "/home/ubuntu/run_scenario.sh baseline"
 
-    - name: 🏗️ Build Containers (Source Build)
-      shell: "docker compose build"
-      args:
-        chdir: "{{ juice_shop_dir }}"
-      async: 2400  # 40 Minutes allowed for source build
-      poll: 30
-
-    - name: 🚀 Start Containers
-      shell: "docker compose up -d"
+    - name: 🏗️ Build & Start Containers (Synchronous)
+      # No async. Ansible waits.
+      shell: "docker compose up -d --build"
       args:
         chdir: "{{ juice_shop_dir }}"
 
