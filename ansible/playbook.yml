@@ -84,11 +84,68 @@
         - "/opt/security-metrics/data"
 
     # --- 3. CUSTOM METRICS EXPORTER ---
-    - name: Copy Enhanced Metrics Exporter
+    - name: Create Exporter Script (Inlined)
       copy:
-        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
+        content: |
+          #!/usr/bin/env python3
+          import time
+          import json
+          import os
+          import docker
+          from prometheus_client import start_http_server, Gauge, Counter
+          
+          # Config
+          SCENARIO_FILE = '/opt/security-metrics/data/scenario_info.json'
+          JUICE_CONTAINER_NAME = 'juice-shop'
+          
+          # Metrics
+          SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario')
+          IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'Real-time Datadog IAST Detections')
+          RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Real-time Aikido RASP Detections')
+          RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Real-time Aikido RASP Blocks')
+          
+          def watch_docker_logs():
+              client = docker.from_env()
+              print(f"🔌 Connecting to Docker container: {JUICE_CONTAINER_NAME}")
+              while True:
+                  try:
+                      container = client.containers.get(JUICE_CONTAINER_NAME)
+                      for line in container.logs(stream=True, tail=0, follow=True):
+                          process_log_line(line.decode('utf-8', errors='ignore'))
+                  except Exception as e:
+                      print(f"⚠️  Docker error: {e}. Retrying in 5s...")
+                      time.sleep(5)
+          
+          def process_log_line(line):
+              if "dd-trace" in line and "Vulnerability detected" in line:
+                  IAST_DETECTIONS.inc()
+                  print(f"🚨 IAST: {line.strip()[:100]}")
+              
+              if "Aikido" in line or "@aikidosec" in line:
+                  if "SecurityException" in line or "Blocked" in line or "Attack detected" in line:
+                      RASP_DETECTIONS.inc()
+                      if "Blocked" in line or "SecurityException" in line:
+                          RASP_BLOCKS.inc()
+                          print(f"🛡️ RASP BLOCK: {line.strip()[:100]}")
+                      else:
+                          print(f"👁️ RASP DETECT: {line.strip()[:100]}")
+          
+          def update_scenario():
+              try:
+                  if os.path.exists(SCENARIO_FILE):
+                      with open(SCENARIO_FILE, 'r') as f:
+                          data = json.load(f)
+                          SCENARIO_GAUGE.set(data.get('scenario_id', 0))
+              except: pass
+          
+          if __name__ == '__main__':
+              start_http_server(9999)
+              print("🚀 Exporter running on :9999")
+              import threading
+              threading.Thread(target=lambda: [update_scenario() or time.sleep(2) for _ in iter(int, 1)], daemon=True).start()
+              watch_docker_logs()
 
     - name: Exporter Dockerfile
       copy:
@@ -126,11 +183,79 @@
               options:
                 path: /etc/grafana/provisioning/dashboards
 
-    - name: Copy Thesis Dashboard JSON
+    - name: Create Thesis Dashboard JSON (Inlined)
       copy:
-        src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
         mode: '0644'
+        content: |
+          {
+            "dashboard": {
+              "id": null,
+              "title": "FINAL THESIS: IAST vs RASP Evaluation",
+              "tags": ["thesis", "rasp", "security"],
+              "timezone": "browser",
+              "refresh": "5s",
+              "panels": [
+                {
+                  "id": 1,
+                  "title": "🎯 THESIS CONTEXT",
+                  "type": "text",
+                  "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
+                  "options": {
+                    "mode": "markdown",
+                    "content": "# 🎓 Thesis: IAST vs RASP Comparative Analysis\n\n**Hypothesis:** RASP provides superior security by **actively blocking** attacks that IAST only detects.\n\n### 🧪 Scenarios:\n1. **🔵 Baseline:** IAST Detects, Attack **SUCCEEDS (200)**.\n2. **🟠 Detection:** RASP Detects, Attack **SUCCEEDS (200)**.\n3. **🟢 Blocking:** RASP Blocks, Attack **FAILS (403)**."
+                  }
+                },
+                {
+                  "id": 2,
+                  "title": "ACTIVE SCENARIO",
+                  "type": "stat",
+                  "gridPos": {"h": 4, "w": 12, "x": 0, "y": 5},
+                  "targets": [{"expr": "thesis_scenario_id"}],
+                  "options": {"colorMode": "background"},
+                  "fieldConfig": {
+                    "defaults": {
+                      "mappings": [
+                        {"type": "value", "value": 1, "text": "1. BASELINE (IAST ONLY)", "color": "blue"},
+                        {"type": "value", "value": 2, "text": "2. RASP DETECTION", "color": "orange"},
+                        {"type": "value", "value": 3, "text": "3. RASP BLOCKING", "color": "green"}
+                      ]
+                    }
+                  }
+                },
+                {
+                  "id": 3,
+                  "title": "🛡️ BLOCK RATE",
+                  "type": "stat",
+                  "gridPos": {"h": 4, "w": 12, "x": 12, "y": 5},
+                  "targets": [{"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m])) / sum(rate(juice_shop_http_server_request_duration_seconds_count[1m])) * 100"}],
+                  "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"color": "red","value": 0},{"color": "green","value": 1}]}}}
+                },
+                {
+                  "id": 4,
+                  "title": "⚔️ TOOL COMPARISON: Real-Time Log Telemetry",
+                  "type": "timeseries",
+                  "gridPos": {"h": 10, "w": 24, "x": 0, "y": 9},
+                  "targets": [
+                    {"expr": "increase(thesis_iast_detections_total[1m])", "legendFormat": "🐶 Datadog IAST Detections"},
+                    {"expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "🥋 Aikido RASP Detections"},
+                    {"expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "🛡️ Aikido RASP BLOCKS"}
+                  ],
+                  "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 40}}}
+                },
+                {
+                  "id": 5,
+                  "title": "🛡️ HTTP RESPONSE STATUS",
+                  "type": "timeseries",
+                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+                  "targets": [
+                    {"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))", "legendFormat": "✅ Allowed (200)"},
+                    {"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))", "legendFormat": "🚫 Blocked (403)"}
+                  ]
+                }
+              ]
+            }
+          }
 
     - name: Configure Prometheus
       copy:
@@ -170,7 +295,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP (THE FIX) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -182,18 +307,19 @@
         state: directory
         owner: ubuntu
 
-    # CRITICAL FIX: skipLibCheck prevents TS1005 errors
+    # CRITICAL FIX: Install jq and use it to force valid JSON config
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
           FROM node:20-bookworm-slim AS builder
-          RUN apt-get update && apt-get install -y git python3 make g++ curl
+          # Install jq here
+          RUN apt-get update && apt-get install -y git python3 make g++ curl jq
           WORKDIR /juice-shop
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # Fix: Update tsconfig to ignore errors in node_modules caused by newer library versions
-          RUN sed -i 's/"compilerOptions": {/"compilerOptions": { "skipLibCheck": true,/' tsconfig.json
+          # FIX: Use jq to SAFELY disable TypeScript strict checks in node_modules
+          RUN jq '.compilerOptions.skipLibCheck = true' tsconfig.json > tsconfig.tmp && mv tsconfig.tmp tsconfig.json
           
           RUN npm install
           
@@ -315,17 +441,16 @@
           echo "✅ Config updated for $MODE."
           # NOTE: We do not run docker compose here to avoid SSH timeouts. Ansible handles it.
 
-    # --- 7. PROJECT STARTUP (ASYNC MODE) ---
+    # --- 7. PROJECT STARTUP ---
     - name: Initialize Config
       shell: "/home/ubuntu/run_scenario.sh baseline"
 
     - name: 🏗️ Build Containers (Async)
-      # This task starts the build and disconnects, checking back every 30s
       shell: "docker compose build"
       args:
         chdir: "{{ juice_shop_dir }}"
-      async: 1800  # 30 Minutes timeout
-      poll: 30     # Check every 30 seconds
+      async: 1800  # 30 Minutes
+      poll: 30
 
     - name: 🚀 Start Containers
       shell: "docker compose up -d"
