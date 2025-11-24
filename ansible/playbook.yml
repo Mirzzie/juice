@@ -666,7 +666,7 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          docker compose up -d juice-shop
+          docker compose up -d --remove-orphans
           
           echo "✅ Scenario Active. Waiting 15s..."
           sleep 15
