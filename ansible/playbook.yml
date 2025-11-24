@@ -348,7 +348,8 @@
     prometheus_port: 9090
     otel_grpc_port: 43170
     otel_http_port: 43180
-    juice_shop_version: "v16.0.0"
+    # CHANGED: Use 'master' to get the Absolute Latest Juice Shop
+    juice_shop_version: "master"
 
   tasks:
     # --- 1. SYSTEM SETUP ---
@@ -519,7 +520,6 @@
           FROM python:3.9-slim
           WORKDIR /app
           COPY exporter.py .
-          # ADDED 'docker' here for Log Telemetry
           RUN pip install prometheus_client docker
           CMD ["python", "exporter.py"]
 
@@ -527,17 +527,21 @@
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:22-bookworm-slim AS builder
+          # CHANGED: Node 20 is the official recommendation for Latest Juice Shop
+          FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
+          
+          # CHANGED: 'master' gets the latest code
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          
           RUN npm install
           RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
           # Helper Files
           RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true }); export default tracer;" > tracer.ts
           
-          # Inject Imports
+          # Inject Imports (Standard Structure)
           RUN sed -i "1i import './tracer' // DataDog" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
               sed -i "1i import './tracer' // DataDog" server.ts && \
@@ -546,7 +550,8 @@
           RUN npx tsc || npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          FROM node:22-bookworm-slim
+          # CHANGED: Node 20 for Runtime
+          FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
@@ -589,7 +594,6 @@
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
-                # ADDED: Allow exporter to read sibling logs
                 - /var/run/docker.sock:/var/run/docker.sock
               ports: ["9999:9999"]
               networks: [monitoring]
