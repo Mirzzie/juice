@@ -15,7 +15,7 @@
     juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (SWAP) ---
+    # --- 0. SYSTEM TUNING ---
     - name: Check if swap file exists
       stat:
         path: /swapfile
@@ -84,7 +84,7 @@
         - "/opt/security-metrics/data"
 
     # --- 3. CUSTOM METRICS EXPORTER ---
-    - name: Create Exporter Script (Inlined)
+    - name: Create Exporter Script
       copy:
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
@@ -96,11 +96,9 @@
           import docker
           from prometheus_client import start_http_server, Gauge, Counter
           
-          # Config
           SCENARIO_FILE = '/opt/security-metrics/data/scenario_info.json'
           JUICE_CONTAINER_NAME = 'juice-shop'
           
-          # Metrics
           SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario')
           IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'Real-time Datadog IAST Detections')
           RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Real-time Aikido RASP Detections')
@@ -122,7 +120,6 @@
               if "dd-trace" in line and "Vulnerability detected" in line:
                   IAST_DETECTIONS.inc()
                   print(f"🚨 IAST: {line.strip()[:100]}")
-              
               if "Aikido" in line or "@aikidosec" in line:
                   if "SecurityException" in line or "Blocked" in line or "Attack detected" in line:
                       RASP_DETECTIONS.inc()
@@ -183,7 +180,7 @@
               options:
                 path: /etc/grafana/provisioning/dashboards
 
-    - name: Create Thesis Dashboard JSON (Inlined)
+    - name: Create Thesis Dashboard JSON
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
         mode: '0644'
@@ -295,7 +292,7 @@
                 processors: [batch]
                 exporters: [prometheus]
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP (THE FIX) ---
+    # --- 5. JUICE SHOP & AIKIDO SETUP (FIXED) ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -307,27 +304,23 @@
         state: directory
         owner: ubuntu
 
-    # CRITICAL FIX: Install jq and use it to force valid JSON config
+    # THE FIX IS HERE: ORDER OF OPERATIONS
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
           FROM node:20-bookworm-slim AS builder
-          # Install jq here
-          RUN apt-get update && apt-get install -y git python3 make g++ curl jq
+          RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
-          # FIX: Use jq to SAFELY disable TypeScript strict checks in node_modules
-          RUN jq '.compilerOptions.skipLibCheck = true' tsconfig.json > tsconfig.tmp && mv tsconfig.tmp tsconfig.json
-          
+          # 1. Standard Install & Build (Compiler works fine here)
           RUN npm install
-          
-          # Install Aikido and OpenTelemetry
-          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
-          
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
+          
+          # 2. INSTALL SECURITY TOOLS AFTER COMPILATION (Compiler is already done, so it won't crash)
+          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node --legacy-peer-deps
           
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
@@ -449,7 +442,7 @@
       shell: "docker compose build"
       args:
         chdir: "{{ juice_shop_dir }}"
-      async: 1800  # 30 Minutes
+      async: 2400
       poll: 30
 
     - name: 🚀 Start Containers
