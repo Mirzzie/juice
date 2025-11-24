@@ -1,4 +1,3 @@
-# .github/workflows/ci-cd.yml
 name: DevSecOps CI/CD Pipeline
 
 on:
@@ -8,10 +7,11 @@ on:
 
 env:
     EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+    ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
     EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
-    # 1. SAST (Unchanged)
+    # 1. SAST
     sast:
         name: SAST - Semgrep
         runs-on: ubuntu-latest
@@ -26,35 +26,38 @@ jobs:
                   name: semgrep-results
                   path: semgrep-results.json
 
-    # 2. DEPLOY
+    # 2. DEPLOY (Using Ansible)
     deploy:
         name: Deploy & Config
         runs-on: ubuntu-latest
         needs: sast
         steps:
             - uses: actions/checkout@v3
-
             - name: Setup SSH
               run: |
                   mkdir -p ~/.ssh
                   echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
                   chmod 600 ~/.ssh/id_rsa
-                  # StrictHostKeyChecking=no prevents prompt hang on new instances
                   ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
-
             - name: Install Ansible
               run: sudo apt-get install -y ansible sshpass
-
             - name: Create Inventory
               run: |
                   echo "[juiceshop]" > inventory.ini
                   echo "$EC2_INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+                  echo "$ANSIBLE_VAULT_PASSWORD" > .vault_pass
 
+            # This runs the playbook created above
             - name: Run Ansible Playbook
-              # PASS SECRETS AS EXTRA VARS here. It's safer and easier than managing a vault file in git.
+              run: ansible-playbook -i inventory.ini ansible/playbook.yml --vault-password-file .vault_pass
+
+    # 3. DAST (Basic Check)
+    dast:
+        name: DAST - Baseline Check
+        runs-on: ubuntu-latest
+        needs: deploy
+        steps:
+            - name: Run ZAP Baseline
               run: |
-                  ansible-playbook -i inventory.ini ansible/playbook.yml \
-                  -e "datadog_api_key=${{ secrets.DATADOG_API_KEY }}" \
-                  -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
-                  -e "datadog_site='us5.datadoghq.com'" \
-                  -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN  }}"
+                  docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+                  zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -m 5 -a -j || true

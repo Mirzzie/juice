@@ -1,4 +1,3 @@
----
 - name: Configure EC2 for Thesis Experiment
   hosts: juiceshop
   become: true
@@ -10,15 +9,17 @@
     exporter_dir: /opt/security-metrics-exporter
     grafana_port: 3001
     prometheus_port: 9090
-    otel_grpc_port: 4317
-    otel_http_port: 4318
-    juice_shop_version: "v16.0.0" # Pin version for stability
+    otel_grpc_port: 43170
+    otel_http_port: 43180
+
+  vars_files:
+    - secrets.yml
 
   tasks:
-    # --- 1. SYSTEM PREP ---
+    # --- 1. SYSTEM SETUP ---
     - name: Update APT and install Docker deps
       apt:
-        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils]
+        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv]
         update_cache: yes
         state: present
 
@@ -33,7 +34,31 @@
         groups: docker
         append: yes
 
-    # --- 2. MONITORING DIRECTORIES ---
+    # --- 2. DATADOG HOST AGENT ---
+    - name: Install DataDog Agent
+      shell: >
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} 
+        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
+
+    - name: Configure DataDog OTLP
+      blockinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        block: |
+          apm_config:
+            enabled: true
+            apm_non_local_traffic: true
+          otlp_config:
+            receiver:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+      notify: Restart DataDog Agent
+
+    # --- 3. MONITORING DIRECTORIES ---
     - name: Create directories
       file:
         path: "{{ item }}"
@@ -48,62 +73,22 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 3. CUSTOM METRICS EXPORTER ---
+    # --- 4. DEPLOY CUSTOM FILES ---
     - name: Copy Enhanced Metrics Exporter
       copy:
+        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
-        content: |
-          from prometheus_client import start_http_server, Gauge
-          import time
-          import json
-          import os
+        owner: ubuntu
 
-          # Metrics
-          SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario ID (1=Baseline, 2=Detect, 3=Block)')
-          ATTACK_COUNT = Gauge('thesis_simulated_attacks_total', 'Total number of attacks simulated')
-
-          DATA_FILE = "/opt/security-metrics/data/scenario_info.json"
-
-          def update_metrics():
-              try:
-                  if os.path.exists(DATA_FILE):
-                      with open(DATA_FILE, 'r') as f:
-                          data = json.load(f)
-                          SCENARIO_GAUGE.set(data.get('scenario_id', 0))
-              except Exception as e:
-                  print(f"Error reading scenario file: {e}")
-
-          if __name__ == '__main__':
-              start_http_server(9999)
-              print("Thesis Exporter running on port 9999")
-              while True:
-                  update_metrics()
-                  time.sleep(2)
-
-    - name: Exporter Dockerfile
+    - name: Copy Thesis Dashboard
       copy:
-        dest: "{{ exporter_dir }}/Dockerfile"
-        content: |
-          FROM python:3.9-slim
-          WORKDIR /app
-          COPY exporter.py .
-          RUN pip install prometheus_client
-          CMD ["python", "exporter.py"]
+        src: files/grafana-three-scenario-dashboard.json
+        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
+        mode: '0644'
+        owner: ubuntu
 
-    # --- 4. OBSERVABILITY CONFIGS ---
-    - name: Configure Grafana Datasource
-      copy:
-        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasource.yaml"
-        content: |
-          apiVersion: 1
-          datasources:
-            - name: Prometheus
-              type: prometheus
-              access: proxy
-              url: http://prometheus:9090
-              isDefault: true
-
+    # --- 5. CONFIG FILES (Grafana/Prometheus) ---
     - name: Configure Grafana Provider
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -116,11 +101,19 @@
               type: file
               options:
                 path: /etc/grafana/provisioning/dashboards
+        mode: '0644'
 
-    - name: Copy Thesis Dashboard JSON
+    - name: Configure Grafana Datasource
       copy:
-        src: files/grafana-three-scenario-dashboard.json
-        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
+        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasource.yaml"
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
         mode: '0644'
 
     - name: Configure Prometheus
@@ -128,14 +121,15 @@
         dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
         content: |
           global:
-            scrape_interval: 2s 
+            scrape_interval: 5s
           scrape_configs:
-            - job_name: 'thesis-exporter'
-              static_configs:
-                - targets: ['metrics-exporter:9999']
             - job_name: 'otel-collector'
               static_configs:
                 - targets: ['otel-collector:8889']
+            - job_name: 'security-exporter'
+              static_configs:
+                - targets: ['metrics-exporter:9999']
+        mode: '0644'
 
     - name: Configure Otel Collector
       copy:
@@ -145,94 +139,90 @@
             otlp:
               protocols:
                 grpc:
-                  endpoint: 0.0.0.0:4317
+                  endpoint: 0.0.0.0:{{ otel_grpc_port }}
                 http:
-                  endpoint: 0.0.0.0:4318
+                  endpoint: 0.0.0.0:{{ otel_http_port }}
           processors:
             batch:
+              timeout: 1s
           exporters:
             prometheus:
               endpoint: "0.0.0.0:8889"
-              namespace: "juice_shop"
+              namespace: otel
+            otlp:
+              endpoint: "172.17.0.1:4317"
+              tls:
+                insecure: true
           service:
             pipelines:
               metrics:
                 receivers: [otlp]
                 processors: [batch]
                 exporters: [prometheus]
+              traces:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [otlp]
+        mode: '0644'
 
-    # --- 5. JUICE SHOP & AIKIDO SETUP ---
-    - name: Clean Juice Shop Dir
-      file:
-        path: "{{ juice_shop_dir }}"
-        state: absent
+    # --- 6. JUICE SHOP & EXPORTER BUILD PREP ---
+    - name: Prepare Juice Shop Repo
+      git:
+        repo: https://github.com/juice-shop/juice-shop.git
+        dest: "{{ juice_shop_dir }}"
+        depth: 1
+        force: yes
 
-    - name: Create Juice Shop Dir
-      file:
-        path: "{{ juice_shop_dir }}"
-        state: directory
-        owner: ubuntu
+    - name: Dockerfile for Exporter
+      copy:
+        dest: "{{ exporter_dir }}/Dockerfile"
+        content: |
+          FROM python:3.9-slim
+          WORKDIR /app
+          COPY exporter.py .
+          RUN pip install prometheus_client requests opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
+          CMD ["python", "exporter.py"]
 
-    - name: Juice Shop Dockerfile with Conditional Aikido Loading
+    - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          FROM node:20-bookworm-slim AS builder
+          FROM node:22-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
-          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          RUN git clone --depth 1 https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           RUN npm install
+          RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Install Aikido and OpenTelemetry (Latest versions)
-          RUN npm install --save-exact @aikidosec/firewall \
-              @opentelemetry/api \
-              @opentelemetry/auto-instrumentations-node \
-              @opentelemetry/exporter-metrics-otlp-grpc \
-              @opentelemetry/resources \
-              @opentelemetry/sdk-node
+          # Helper Files
+          RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true }); export default tracer;" > tracer.ts
           
-          # Build WITHOUT modifying source files
-          RUN npm run build:server
-          RUN cd frontend && npm install --legacy-peer-deps && \
-              node ./node_modules/@angular/cli/bin/ng build --configuration production
+          # Inject Imports
+          RUN sed -i "1i import './tracer' // DataDog" app.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
+              sed -i "1i import './tracer' // DataDog" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" server.ts
+              
+          RUN npx tsc || npm run build:server
+          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          FROM node:20-bookworm-slim
+          FROM node:22-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # Aikido Initialization Script
-          RUN echo "require('@aikidosec/firewall');" > aikido-init.js
-          
-          # OpenTelemetry Initialization Script
-          RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
-          const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
-          const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); \
-          const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); \
-          const metricExporter = new OTLPMetricExporter({url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); \
-          const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 2000}); \
-          const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); \
-          sdk.start();" > otel-init.js
-          
-          # Conditional Startup Script
-          # This loads Aikido ONLY if AIKIDO_TOKEN is set (Scenarios 2 & 3)
-          # Scenario 1 (Baseline) runs WITHOUT Aikido
-          RUN echo '#!/bin/sh\n\
-          if [ -n "$AIKIDO_TOKEN" ]; then\n\
-            echo "🛡️  Starting with Aikido RASP (Block Mode: ${AIKIDO_BLOCK})"\n\
-            exec node --require ./aikido-init.js --require ./otel-init.js build/app\n\
-          else\n\
-            echo "📊 Starting BASELINE mode (IAST Only - No RASP)"\n\
-            exec node --require ./otel-init.js build/app\n\
-          fi' > /juice-shop/start.sh && chmod +x /juice-shop/start.sh
+          # Otel Init
+          RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); const { resourceFromAttributes } = require('@opentelemetry/resources'); const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); const resource = resourceFromAttributes({'service.name': 'juice-shop'}); const metricExporter = new OTLPMetricExporter({endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 5000}); const sdk = new NodeSDK({resource, metricReader, instrumentations: [getNodeAutoInstrumentations()]}); sdk.start();" > otel-init.js
           
           EXPOSE 3000
           ENV NODE_ENV=production
-          CMD ["/juice-shop/start.sh"]
+          CMD ["node", "--require", "./otel-init.js", "build/app"]
 
+    # --- 7. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
         content: |
+          version: '3.8'
           services:
             juice-shop:
               build: .
@@ -240,312 +230,118 @@
               ports: ["3000:3000"]
               environment:
                 - NODE_ENV=production
-                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-                - AIKIDO_TOKEN=${AIKIDO_TOKEN:-}
-                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false}
-                - AIKIDO_DEBUG=true
+                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
+                - AIKIDO_TOKEN={{ aikido_token }}
+                - DD_API_KEY={{ datadog_api_key }}
+                # CONTROLS
+                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
+                - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
+                - OTEL_RESOURCE_ATTRIBUTES=test.scenario=${SCENARIO_NAME:-baseline}
               depends_on: [otel-collector]
-              networks: [thesis-net]
+              networks: [monitoring]
 
             metrics-exporter:
               build: {{ exporter_dir }}
               container_name: metrics-exporter
+              environment:
+                - DD_API_KEY={{ datadog_api_key }}
+                - DD_APP_KEY={{ datadog_app_key }}
+                - AIKIDO_TOKEN={{ aikido_token }}
+                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
               ports: ["9999:9999"]
-              networks: [thesis-net]
+              networks: [monitoring]
 
             otel-collector:
               image: otel/opentelemetry-collector-contrib:latest
               command: ["--config=/etc/otel-collector-config.yaml"]
               volumes:
                 - {{ monitoring_dir }}/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-              ports: ["4317:4317", "4318:4318", "8889:8889"]
-              networks: [thesis-net]
+              ports:
+                - "{{ otel_grpc_port }}:{{ otel_grpc_port }}"
+                - "{{ otel_http_port }}:{{ otel_http_port }}"
+                - "8889:8889"
+              networks: [monitoring]
 
             prometheus:
               image: prom/prometheus:latest
               volumes:
                 - {{ monitoring_dir }}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-              ports: ["9090:9090"]
-              networks: [thesis-net]
+                - prometheus_data:/prometheus
+              ports: ["{{ prometheus_port }}:9090"]
+              networks: [monitoring]
 
             grafana:
               image: grafana/grafana:latest
               volumes:
                 - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
+                - grafana_data:/var/lib/grafana
               ports: ["{{ grafana_port }}:3000"]
               environment:
                 - GF_SECURITY_ADMIN_PASSWORD=admin
-                - GF_SECURITY_ADMIN_USER=admin
-                - GF_USERS_ALLOW_SIGN_UP=false
-              networks: [thesis-net]
+              networks: [monitoring]
 
           networks:
-            thesis-net:
+            monitoring:
               driver: bridge
+          
+          volumes:
+            prometheus_data:
+            grafana_data:
 
-    # --- 6. CONTROL SCRIPTS ---
-    - name: Create Scenario Switch Script
+    # --- 8. SCENARIO SCRIPT ---
+    - name: Create Scenario Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
         mode: '0755'
-        owner: ubuntu
         content: |
           #!/bin/bash
           MODE=$1
           cd /opt/juice-shop
           
-          echo "🔬 INITIALIZING SCENARIO: $MODE"
+          echo "🔬 SCENARIO SWITCH: $MODE"
           
-          # Create .env file for docker-compose
-          cat > .env << EOF
-          # Scenario Configuration
-          SCENARIO_MODE=$MODE
-          EOF
-          
-          # SCENARIO 1: BASELINE (IAST Only - NO RASP)
           if [ "$MODE" == "baseline" ]; then
-             echo "📊 Scenario 1: BASELINE (DataDog IAST Only)"
-             echo "   - Aikido RASP: DISABLED (Not loaded)"
-             echo "   - Expected: Attacks succeed, IAST detects vulnerabilities"
-             echo "AIKIDO_TOKEN=" >> .env
-             echo "AIKIDO_BLOCK=false" >> .env
+             export SCENARIO_NAME="iast-only"
+             export AIKIDO_DISABLE="true" 
+             export AIKIDO_BLOCK="false"
              SCENARIO_ID=1
-          
-          # SCENARIO 2: DETECTION MODE (RASP Logging Only)
           elif [ "$MODE" == "detection" ]; then
-             echo "🔍 Scenario 2: DETECTION MODE (RASP Logging)"
-             echo "   - Aikido RASP: ENABLED (Detection only)"
-             echo "   - Expected: Attacks succeed but logged by RASP"
-             echo "AIKIDO_TOKEN={{ aikido_token }}" >> .env
-             echo "AIKIDO_BLOCK=false" >> .env
+             export SCENARIO_NAME="iast-rasp-detect"
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="false"
              SCENARIO_ID=2
-          
-          # SCENARIO 3: BLOCKING MODE (RASP Active Protection)
           elif [ "$MODE" == "blocking" ]; then
-             echo "🛡️  Scenario 3: BLOCKING MODE (RASP Active)"
-             echo "   - Aikido RASP: ENABLED (Blocking attacks)"
-             echo "   - Expected: Attacks blocked with 403 responses"
-             echo "AIKIDO_TOKEN={{ aikido_token }}" >> .env
-             echo "AIKIDO_BLOCK=true" >> .env
+             export SCENARIO_NAME="iast-rasp-block"
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="true"
              SCENARIO_ID=3
-          else
-             echo "❌ Invalid mode: $MODE"
-             echo "Usage: $0 {baseline|detection|blocking}"
-             exit 1
-          fi
-          
-          # Update metrics file
-          echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
-          
-          # Restart Juice Shop with new configuration
-          echo "🔄 Restarting Juice Shop container..."
-          docker compose up -d juice-shop
-          
-          # Wait for startup
-          echo "⏳ Waiting 15s for application warm-up..."
-          sleep 15
-          
-          # Verify
-          if docker ps | grep -q juice-shop; then
-             echo "✅ Scenario '$MODE' (ID: $SCENARIO_ID) is ACTIVE"
-             docker logs juice-shop --tail 10 2>&1 | grep -E "Starting|Aikido|BASELINE" || true
-          else
-             echo "❌ ERROR: Juice Shop failed to start"
-             docker logs juice-shop --tail 20
-             exit 1
           fi
 
-    - name: Create Quick Status Script
-      copy:
-        dest: "/home/ubuntu/check_scenario.sh"
-        mode: '0755'
-        owner: ubuntu
-        content: |
-          #!/bin/bash
-          echo "📊 Current Scenario Status:"
-          echo "------------------------"
-          if [ -f /opt/security-metrics/data/scenario_info.json ]; then
-             cat /opt/security-metrics/data/scenario_info.json | jq .
-          else
-             echo "No scenario active"
-          fi
-          echo ""
-          echo "🐳 Juice Shop Status:"
-          docker ps --filter name=juice-shop --format "table {{{{.Names}}}}\t{{{{.Status}}}}\t{{{{.Ports}}}}"
-          echo ""
-          echo "📝 Recent Juice Shop Logs:"
-          docker logs juice-shop --tail 5 2>&1 | grep -E "Starting|Aikido|BASELINE|Error" || echo "No relevant logs"
-
-    - name: Start Docker Compose Services
-      become_user: ubuntu
-      shell: |
-        cd {{ juice_shop_dir }}
-        docker compose up -d --build
-      args:
-        chdir: "{{ juice_shop_dir }}"
-
-    - name: Wait for Services to Start
-      pause:
-        seconds: 30
-
-    - name: Verify Services are Running
-      shell: docker ps --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
-      register: docker_status
-
-    - name: Display Service Status
-      debug:
-        msg: "{{ docker_status.stdout_lines }}"
-
-    - name: Create README for Thesis Workflow
-      copy:
-        dest: "/home/ubuntu/THESIS_INSTRUCTIONS.md"
-        mode: '0644'
-        owner: ubuntu
-        content: |
-          # 🎓 THESIS EXPERIMENT INSTRUCTIONS
+          echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          ## 🏗️ Architecture Overview
-          Your EC2 instance now has a complete DevSecOps research pipeline:
-          
-          - **Juice Shop** (Port 3000): Vulnerable web app with DataDog IAST + Aikido RASP
-          - **Grafana** (Port {{ grafana_port }}): Visualization dashboard
-          - **Prometheus** (Port 9090): Metrics collection
-          - **OpenTelemetry Collector**: Application telemetry
-          - **Custom Metrics Exporter** (Port 9999): Scenario tracking
-          
-          ## 🔬 Three Research Scenarios
-          
-          ### Scenario 1: BASELINE (IAST Only)
-          ```bash
-          ./run_scenario.sh baseline
-          ```
-          - Aikido RASP: **NOT LOADED** (true baseline)
-          - DataDog IAST: Active (detecting vulnerabilities)
-          - Expected Result: Attacks succeed, IAST detects post-execution
-          
-          ### Scenario 2: DETECTION MODE
-          ```bash
-          ./run_scenario.sh detection
-          ```
-          - Aikido RASP: **LOADED** (detection only, AIKIDO_BLOCK=false)
-          - DataDog IAST: Active
-          - Expected Result: Attacks succeed but RASP logs them in real-time
-          
-          ### Scenario 3: BLOCKING MODE
-          ```bash
-          ./run_scenario.sh blocking
-          ```
-          - Aikido RASP: **LOADED** (active blocking, AIKIDO_BLOCK=true)
-          - DataDog IAST: Active
-          - Expected Result: Attacks blocked with 403 responses
-          
-          ## 🚀 Running Experiments
-          
-          ### Manual Testing
-          ```bash
-          # 1. Activate scenario
-          ./run_scenario.sh baseline
-          
-          # 2. Send benign traffic
-          ab -n 100 -c 5 "http://localhost:3000/rest/products/search?q=apple"
-          
-          # 3. Send attack traffic
-          curl "http://localhost:3000/rest/products/search?q=' OR 1=1--"
-          
-          # 4. Check results in Grafana
-          # Navigate to: http://YOUR_EC2_IP:{{ grafana_port }}
-          # Login: admin / admin
-          ```
-          
-          ### Automated Testing (GitHub Actions)
-          The `experiment.yml` workflow runs all three scenarios automatically:
-          - Triggers: Manual dispatch or daily at 4 AM
-          - Generates: Benign + attack traffic for each scenario
-          - Collects: Metrics in Prometheus → Visualized in Grafana
-          
-          ## 📊 Monitoring
-          
-          ```bash
-          # Check current scenario
-          ./check_scenario.sh
-          
-          # View live logs
-          docker logs -f juice-shop
-          
-          # Check all containers
-          docker ps
-          
-          # Restart everything
-          cd /opt/juice-shop && docker compose restart
-          ```
-          
-          ## 🔍 Accessing Dashboards
-          
-          - **Grafana**: http://YOUR_EC2_IP:{{ grafana_port }} (admin/admin)
-          - **Prometheus**: http://YOUR_EC2_IP:9090
-          - **Juice Shop**: http://YOUR_EC2_IP:3000
-          
-          ## 🎯 Key Research Questions This Tests
-          
-          1. **Detection Speed**: IAST (post-execution) vs RASP (runtime)
-          2. **Attack Prevention**: Can RASP block what IAST only detects?
-          3. **Performance Overhead**: Latency with/without RASP
-          4. **False Positives**: Benign traffic handling in each mode
-          
-          ## 📝 Data Collection
-          
-          Your Grafana dashboard tracks:
-          - Scenario ID (1/2/3) over time
-          - HTTP response codes (200 vs 403)
-          - Request latency percentiles
-          - Attack vs benign traffic ratios
-          - IAST detections vs RASP blocks
-          
-          ## 🆘 Troubleshooting
-          
-          ```bash
-          # Container not starting?
-          docker logs juice-shop
-          
-          # Aikido not loading?
-          docker logs juice-shop | grep -i aikido
-          
-          # Metrics not showing?
-          curl http://localhost:9999/metrics
-          
-          # Reset everything
-          cd /opt/juice-shop
-          docker compose down
+          # FIX: Removing specific service names so ALL containers (Grafana/Prometheus) start
           docker compose up -d --build
-          ```
           
-          ## 📚 Thesis Writing Tips
-          
-          - **Baseline is crucial**: Shows IAST-only detection (what most orgs have)
-          - **Detection mode**: Proves RASP can identify attacks IAST misses
-          - **Blocking mode**: Demonstrates RASP's preventive capability
-          - **Compare metrics**: IAST detection lag vs RASP real-time blocking
-          
-          Good luck with your research! 🎓
+          echo "✅ Scenario Active. Waiting 15s..."
+          sleep 15
+        owner: ubuntu
 
-    - name: Display Access Information
+    # --- 9. START INITIAL DEPLOYMENT (THIS WAS MISSING!) ---
+    - name: Launch Baseline Scenario (Build & Start Containers)
+      shell: "/home/ubuntu/run_scenario.sh baseline"
+      register: deploy_output
+      # This will take time because it builds Docker images
+      async: 1200 
+      poll: 10
+
+    - name: Show Deployment Logs
       debug:
-        msg:
-          - "=========================================="
-          - "✅ THESIS INFRASTRUCTURE DEPLOYED"
-          - "=========================================="
-          - ""
-          - "📊 Access URLs:"
-          - "  Grafana:    http://{{ ansible_host }}:{{ grafana_port }} (admin/admin)"
-          - "  Prometheus: http://{{ ansible_host }}:9090"
-          - "  Juice Shop: http://{{ ansible_host }}:3000"
-          - ""
-          - "🔬 Quick Commands:"
-          - "  Switch Scenario: ./run_scenario.sh {baseline|detection|blocking}"
-          - "  Check Status:    ./check_scenario.sh"
-          - "  View Logs:       docker logs -f juice-shop"
-          - ""
-          - "📖 Full Instructions: cat ~/THESIS_INSTRUCTIONS.md"
-          - "=========================================="
+        var: deploy_output.stdout_lines
+
+  handlers:
+    - name: Restart DataDog Agent
+      systemd:
+        name: datadog-agent
+        state: restarted

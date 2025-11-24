@@ -39,5 +39,3 @@ terraform.tfvars
 .DS_Store
 .idea/
 .vscode/
-
-*secrets.yml
