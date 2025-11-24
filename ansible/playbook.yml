@@ -303,3 +303,14 @@
           
           echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
           sleep 10
+    - name: Start Docker Compose Services
+      become_user: ubuntu
+      shell: |
+        cd {{ juice_shop_dir }}
+        docker compose up -d --build
+      args:
+        chdir: "{{ juice_shop_dir }}"
+
+    - name: Wait for Services to Start
+      pause:
+        seconds: 30
