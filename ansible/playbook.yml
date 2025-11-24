@@ -595,7 +595,7 @@
                 - DD_TRACE_AGENT_PORT=8126
                 # FEATURES
                 - DD_APPSEC_ENABLED=true
-                - DD_IAST_ENABLED=true
+                - ENV DD_IAST_ENABLED=true
                 - DD_APPSEC_SCA_ENABLED=true
                 - DD_LOGS_INJECTION=true
                 - DD_PROFILING_ENABLED=true
