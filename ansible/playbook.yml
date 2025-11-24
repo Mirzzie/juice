@@ -186,18 +186,24 @@
           RUN npm install
           
           # Install Aikido and OpenTelemetry
-          RUN npm install --save-exact @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
+          RUN npm install --save-exact @aikidosec/firewall@^5.0.0 \
+              @opentelemetry/api \
+              @opentelemetry/auto-instrumentations-node \
+              @opentelemetry/exporter-metrics-otlp-grpc \
+              @opentelemetry/resources \
+              @opentelemetry/sdk-node
           
-          # Inject Aikido Import at top of app.ts
-          RUN sed -i "1i import '@aikidosec/firewall' // Aikido RASP" app.ts && \
-              sed -i "1i import '@aikidosec/firewall' // Aikido RASP" server.ts
-              
+          # Build WITHOUT modifying TypeScript files
           RUN npm run build:server
-          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
+          RUN cd frontend && npm install --legacy-peer-deps && \
+              node ./node_modules/@angular/cli/bin/ng build --configuration production
           
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
+          
+          # Aikido Initialization Script (loaded via --require)
+          RUN echo "require('@aikidosec/firewall');" > aikido-init.js
           
           # OpenTelemetry Initialization Script
           RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
@@ -211,7 +217,7 @@
           
           EXPOSE 3000
           ENV NODE_ENV=production
-          CMD ["node", "--require", "./otel-init.js", "build/app"]
+          CMD ["node", "--require", "./aikido-init.js", "--require", "./otel-init.js", "build/app"]
 
     - name: Create Docker Compose
       copy:
