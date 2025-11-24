@@ -373,7 +373,7 @@
           fi
           echo ""
           echo "🐳 Juice Shop Status:"
-          docker ps --filter name=juice-shop --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          docker ps --filter name=juice-shop --format "table {{{{.Names}}}}\t{{{{.Status}}}}\t{{{{.Ports}}}}"
           echo ""
           echo "📝 Recent Juice Shop Logs:"
           docker logs juice-shop --tail 5 2>&1 | grep -E "Starting|Aikido|BASELINE|Error" || echo "No relevant logs"
@@ -391,7 +391,7 @@
         seconds: 30
 
     - name: Verify Services are Running
-      shell: docker ps --format "table {{.Names}}\t{{.Status}}"
+      shell: docker ps --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
       register: docker_status
 
     - name: Display Service Status
