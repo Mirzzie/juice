@@ -395,7 +395,6 @@
     prometheus_port: 9090
     otel_grpc_port: 43170
     otel_http_port: 43180
-    # Using master to ensure latest Node compatibility
     juice_shop_version: "master"
 
   tasks:
@@ -425,22 +424,16 @@
       args:
         creates: /etc/datadog-agent/datadog.yaml
 
-    - name: Configure DataDog Agent for Docker Traffic
+    - name: Configure DataDog Agent
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
-          # CRITICAL: Allow containers to send traces to Host Agent
           apm_config:
             enabled: true
-            apm_non_local_traffic: true 
-          
-          # Enable Process/Container monitoring
+            apm_non_local_traffic: true
           process_config:
             enabled: true
-          
-          # Enable Logs
           logs_enabled: true
-          
           otlp_config:
             receiver:
               protocols:
@@ -455,10 +448,10 @@
       file:
         path: "{{ item }}"
         state: directory
-        mode: '0777'       # Full write access for scripts/containers
+        mode: '0777'
         owner: ubuntu
         group: ubuntu
-        recurse: yes       # Ensure existing files are writable
+        recurse: yes
       loop:
         - "{{ monitoring_dir }}/otel-collector"
         - "{{ monitoring_dir }}/prometheus"
@@ -482,7 +475,7 @@
         mode: '0644'
         owner: ubuntu
 
-    # --- 5. CONFIG FILES (Grafana/Prometheus) ---
+    # --- 5. CONFIG FILES ---
     - name: Configure Grafana Provider
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -588,17 +581,14 @@
           FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
-          
-          # Clone Latest Juice Shop
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
-          
           RUN npm install
-          # Install Datadog Trace and Aikido Firewall
+          
+          # Install Datadog, Aikido, OTel
           RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
           # ---------------------------------------------------------
           # TRACER.TS - HARDCODED IAST CONFIGURATION
-          # We explicitly enable IAST here so it cannot be disabled easily
           # ---------------------------------------------------------
           RUN echo "import tracer from 'dd-trace'; \
           tracer.init({ \
@@ -611,7 +601,7 @@
           }); \
           export default tracer;" > tracer.ts
           
-          # Inject Imports at the VERY TOP of files
+          # Inject Imports
           RUN sed -i "1i import './tracer' // DataDog" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
               sed -i "1i import './tracer' // DataDog" server.ts && \
@@ -631,7 +621,7 @@
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 7. DOCKER COMPOSE (UPDATED & FIXED) ---
+    # --- 7. DOCKER COMPOSE (FIXED: RESTART POLICY) ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -642,19 +632,16 @@
               build: .
               container_name: juice-shop
               ports: ["3000:3000"]
+              # NEW: Restart if RASP crashes the app (Hard Block)
+              restart: unless-stopped
               environment:
                 - NODE_ENV=production
                 
-                # --- DATADOG IAST CONFIGURATION ---
+                # --- DATADOG CONFIGURATION ---
                 - DD_API_KEY={{ datadog_api_key }}
                 - DD_SITE={{ datadog_site }}
-                - DD_ENV=thesis-experiment
-                - DD_SERVICE=juice-shop
-                - DD_VERSION=1.0.0
-                # CRITICAL: Point to Host Machine (Where Agent runs)
-                - DD_AGENT_HOST=172.17.0.1 
+                - DD_AGENT_HOST=172.17.0.1
                 - DD_TRACE_AGENT_PORT=8126
-                # FEATURES
                 - DD_APPSEC_ENABLED=true
                 - DD_IAST_ENABLED=true
                 - DD_APPSEC_SCA_ENABLED=true
@@ -674,6 +661,7 @@
             metrics-exporter:
               build: {{ exporter_dir }}
               container_name: metrics-exporter
+              restart: unless-stopped
               environment:
                 - DD_API_KEY={{ datadog_api_key }}
                 - AIKIDO_TOKEN={{ aikido_token }}
@@ -721,7 +709,7 @@
             prometheus_data:
             grafana_data:
 
-    # --- 8. SCENARIO SCRIPT (WITH HEALTH CHECK LOOP) ---
+    # --- 8. SCENARIO SCRIPT ---
     - name: Create Scenario Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
@@ -752,27 +740,23 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          # Remove orphans ensures new config is picked up
           docker compose up -d --remove-orphans
           
-          echo "⏳ Waiting for Juice Shop to accept connections..."
-          
-          # Loop until Port 3000 returns HTTP 200 or any response
-          # We try 30 times with 2 second delay = 60 seconds max wait
+          echo "⏳ Waiting for Juice Shop..."
           count=0
           max_retries=30
           until curl -s -o /dev/null http://localhost:3000 || [ $count -eq $max_retries ]; do
-            echo "   ... App not ready yet (Attempt $((count+1))/$max_retries)"
+            echo "   ... App not ready yet ($((count+1))/$max_retries)"
             sleep 2
             ((count++))
           done
 
           if [ $count -eq $max_retries ]; then
-             echo "❌ ERROR: Timed out waiting for Juice Shop to start."
+             echo "❌ Timed out waiting for Juice Shop."
              exit 1
           fi
           
-          echo "✅ Juice Shop is UP! Proceeding to attack."
+          echo "✅ Juice Shop is UP!"
         owner: ubuntu
 
     # --- 9. START INITIAL DEPLOYMENT ---
