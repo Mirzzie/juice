@@ -88,3 +88,71 @@ jobs:
       - name: ✅ Experiment Finished
         run: |
           echo "Go to Grafana: http://${EC2_INSTANCE_IP}:3001"
+
+# name: DevSecOps CI/CD Pipeline
+
+# on:
+#     push:
+#         branches: ["main", "dev-test"]
+#     workflow_dispatch:
+
+# env:
+#     EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+#     ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+#     EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+# jobs:
+#     # 1. SAST
+#     sast:
+#         name: SAST - Semgrep
+#         runs-on: ubuntu-latest
+#         steps:
+#             - uses: actions/checkout@v3
+#             - name: Run Semgrep
+#               run: |
+#                   pip install semgrep
+#                   semgrep scan --config=auto --json --output=semgrep-results.json || true
+#             - uses: actions/upload-artifact@v4
+#               with:
+#                   name: semgrep-results
+#                   path: semgrep-results.json
+
+#     # 2. DEPLOY (Using Ansible)
+#     deploy:
+#         name: Deploy & Config
+#         runs-on: ubuntu-latest
+#         needs: sast
+#         steps:
+#             - uses: actions/checkout@v3
+#             - name: Setup SSH
+#               run: |
+#                   mkdir -p ~/.ssh
+#                   echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+#                   chmod 600 ~/.ssh/id_rsa
+#                   ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+#             - name: Install Ansible
+#               run: sudo apt-get install -y ansible sshpass
+
+#             - name: Create Inventory
+#               run: |
+#                   echo "[juiceshop]" > inventory.ini
+#                   echo "$EC2_INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+
+#             - name: Run Ansible Playbook
+#               run: |
+#                   ansible-playbook -i inventory.ini ansible/playbook.yml \
+#                   -e "datadog_api_key=${{ secrets.DATADOG_API_KEY }}" \
+#                   -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
+#                   -e "datadog_site='us5.datadoghq.com'" \
+#                   -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
+
+#             # 3. DAST (Basic Check)
+#     dast:
+#         name: DAST - Baseline Check
+#         runs-on: ubuntu-latest
+#         needs: deploy
+#         steps:
+#             - name: Run ZAP Baseline
+#               run: |
+#                   docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+#                   zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -m 5 -a -j || true
