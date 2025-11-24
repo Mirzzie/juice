@@ -348,7 +348,7 @@
     prometheus_port: 9090
     otel_grpc_port: 43170
     otel_http_port: 43180
-    # CHANGED: Use 'master' to get the Absolute Latest Juice Shop
+    # Using master to ensure latest Node compatibility
     juice_shop_version: "master"
 
   tasks:
@@ -370,21 +370,30 @@
         groups: docker
         append: yes
 
-    # --- 2. DATADOG AGENT ---
+    # --- 2. DATADOG AGENT (UPDATED FOR IAST) ---
     - name: Install DataDog Agent
       shell: >
-        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} 
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} DD_APM_INSTRUMENTATION_ENABLED=host 
         bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
         creates: /etc/datadog-agent/datadog.yaml
 
-    - name: Configure DataDog OTLP
+    - name: Configure DataDog Agent for Docker Traffic
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
+          # CRITICAL: Allow containers to send traces to Host Agent
           apm_config:
             enabled: true
-            apm_non_local_traffic: true
+            apm_non_local_traffic: true 
+          
+          # Enable Process/Container monitoring
+          process_config:
+            enabled: true
+          
+          # Enable Logs
+          logs_enabled: true
+          
           otlp_config:
             receiver:
               protocols:
@@ -527,21 +536,21 @@
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # CHANGED: Node 20 is the official recommendation for Latest Juice Shop
           FROM node:20-bookworm-slim AS builder
           RUN apt-get update && apt-get install -y git python3 make g++ curl
           WORKDIR /juice-shop
           
-          # CHANGED: 'master' gets the latest code
+          # Clone Latest Juice Shop
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           
           RUN npm install
+          # Install Datadog Trace and Aikido Firewall
           RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # Helper Files
-          RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true }); export default tracer;" > tracer.ts
+          # 1. Setup Datadog Tracer (With IAST config in code as backup)
+          RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true, iast: true }); export default tracer;" > tracer.ts
           
-          # Inject Imports (Standard Structure)
+          # 2. Inject Imports
           RUN sed -i "1i import './tracer' // DataDog" app.ts && \
               sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
               sed -i "1i import './tracer' // DataDog" server.ts && \
@@ -550,7 +559,6 @@
           RUN npx tsc || npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          # CHANGED: Node 20 for Runtime
           FROM node:20-bookworm-slim
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
@@ -562,7 +570,7 @@
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 7. DOCKER COMPOSE ---
+    # --- 7. DOCKER COMPOSE (UPDATED ENV VARS) ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -575,13 +583,30 @@
               ports: ["3000:3000"]
               environment:
                 - NODE_ENV=production
+                
+                # --- DATADOG IAST CONFIGURATION ---
+                - DD_API_KEY={{ datadog_api_key }}
+                - DD_SITE={{ datadog_site }}
+                - DD_ENV=thesis-experiment
+                - DD_SERVICE=juice-shop
+                - DD_VERSION=1.0.0
+                # CRITICAL: Point to Host Machine (Where Agent runs)
+                - DD_AGENT_HOST=172.17.0.1 
+                - DD_TRACE_AGENT_PORT=8126
+                # FEATURES
+                - DD_APPSEC_ENABLED=true
+                - DD_IAST_ENABLED=true
+                - DD_APPSEC_SCA_ENABLED=true
+                - DD_LOGS_INJECTION=true
+                - DD_PROFILING_ENABLED=true
+                
+                # --- OTHER TOOLS ---
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
                 - AIKIDO_TOKEN={{ aikido_token }}
-                - DD_API_KEY={{ datadog_api_key }}
-                # CONTROLS
                 - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
                 - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
                 - OTEL_RESOURCE_ATTRIBUTES=test.scenario=${SCENARIO_NAME:-baseline}
+              
               depends_on: [otel-collector]
               networks: [monitoring]
 
@@ -666,6 +691,7 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
+          # Remove orphans ensures new config is picked up
           docker compose up -d --remove-orphans
           
           echo "✅ Scenario Active. Waiting 15s..."
