@@ -118,8 +118,6 @@
                 path: /etc/grafana/provisioning/dashboards
 
     - name: Copy Thesis Dashboard JSON
-      # IMPORTANT: We assume this file exists locally in your ansible/files folder. 
-      # I will provide the JSON content in the next section of this response.
       copy:
         src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
@@ -175,7 +173,7 @@
         state: directory
         owner: ubuntu
 
-    - name: Juice Shop Dockerfile
+    - name: Juice Shop Dockerfile with Conditional Aikido Loading
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
@@ -185,15 +183,15 @@
           RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
           RUN npm install
           
-          # Install Aikido and OpenTelemetry
-          RUN npm install --save-exact @aikidosec/firewall@^5.0.0 \
+          # Install Aikido and OpenTelemetry (Latest versions)
+          RUN npm install --save-exact @aikidosec/firewall \
               @opentelemetry/api \
               @opentelemetry/auto-instrumentations-node \
               @opentelemetry/exporter-metrics-otlp-grpc \
               @opentelemetry/resources \
               @opentelemetry/sdk-node
           
-          # Build WITHOUT modifying TypeScript files
+          # Build WITHOUT modifying source files
           RUN npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && \
               node ./node_modules/@angular/cli/bin/ng build --configuration production
@@ -202,7 +200,7 @@
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # Aikido Initialization Script (loaded via --require)
+          # Aikido Initialization Script
           RUN echo "require('@aikidosec/firewall');" > aikido-init.js
           
           # OpenTelemetry Initialization Script
@@ -215,9 +213,21 @@
           const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); \
           sdk.start();" > otel-init.js
           
+          # Conditional Startup Script
+          # This loads Aikido ONLY if AIKIDO_TOKEN is set (Scenarios 2 & 3)
+          # Scenario 1 (Baseline) runs WITHOUT Aikido
+          RUN echo '#!/bin/sh\n\
+          if [ -n "$AIKIDO_TOKEN" ]; then\n\
+            echo "🛡️  Starting with Aikido RASP (Block Mode: ${AIKIDO_BLOCK})"\n\
+            exec node --require ./aikido-init.js --require ./otel-init.js build/app\n\
+          else\n\
+            echo "📊 Starting BASELINE mode (IAST Only - No RASP)"\n\
+            exec node --require ./otel-init.js build/app\n\
+          fi' > /juice-shop/start.sh && chmod +x /juice-shop/start.sh
+          
           EXPOSE 3000
           ENV NODE_ENV=production
-          CMD ["node", "--require", "./aikido-init.js", "--require", "./otel-init.js", "build/app"]
+          CMD ["/juice-shop/start.sh"]
 
     - name: Create Docker Compose
       copy:
@@ -231,9 +241,9 @@
               environment:
                 - NODE_ENV=production
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-                - AIKIDO_TOKEN={{ aikido_token }}
-                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
-                - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
+                - AIKIDO_TOKEN=${AIKIDO_TOKEN:-}
+                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false}
+                - AIKIDO_DEBUG=true
               depends_on: [otel-collector]
               networks: [thesis-net]
 
@@ -267,6 +277,8 @@
               ports: ["{{ grafana_port }}:3000"]
               environment:
                 - GF_SECURITY_ADMIN_PASSWORD=admin
+                - GF_SECURITY_ADMIN_USER=admin
+                - GF_USERS_ALLOW_SIGN_UP=false
               networks: [thesis-net]
 
           networks:
@@ -286,29 +298,86 @@
           
           echo "🔬 INITIALIZING SCENARIO: $MODE"
           
-          # DEFAULT: Baseline (Scenario 1)
-          export AIKIDO_DISABLE="true"
-          export AIKIDO_BLOCK="false"
-          SCENARIO_ID=1
-
-          if [ "$MODE" == "detection" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="false"
+          # Create .env file for docker-compose
+          cat > .env << EOF
+          # Scenario Configuration
+          SCENARIO_MODE=$MODE
+          EOF
+          
+          # SCENARIO 1: BASELINE (IAST Only - NO RASP)
+          if [ "$MODE" == "baseline" ]; then
+             echo "📊 Scenario 1: BASELINE (DataDog IAST Only)"
+             echo "   - Aikido RASP: DISABLED (Not loaded)"
+             echo "   - Expected: Attacks succeed, IAST detects vulnerabilities"
+             echo "AIKIDO_TOKEN=" >> .env
+             echo "AIKIDO_BLOCK=false" >> .env
+             SCENARIO_ID=1
+          
+          # SCENARIO 2: DETECTION MODE (RASP Logging Only)
+          elif [ "$MODE" == "detection" ]; then
+             echo "🔍 Scenario 2: DETECTION MODE (RASP Logging)"
+             echo "   - Aikido RASP: ENABLED (Detection only)"
+             echo "   - Expected: Attacks succeed but logged by RASP"
+             echo "AIKIDO_TOKEN={{ aikido_token }}" >> .env
+             echo "AIKIDO_BLOCK=false" >> .env
              SCENARIO_ID=2
+          
+          # SCENARIO 3: BLOCKING MODE (RASP Active Protection)
           elif [ "$MODE" == "blocking" ]; then
-             export AIKIDO_DISABLE="false"
-             export AIKIDO_BLOCK="true"
+             echo "🛡️  Scenario 3: BLOCKING MODE (RASP Active)"
+             echo "   - Aikido RASP: ENABLED (Blocking attacks)"
+             echo "   - Expected: Attacks blocked with 403 responses"
+             echo "AIKIDO_TOKEN={{ aikido_token }}" >> .env
+             echo "AIKIDO_BLOCK=true" >> .env
              SCENARIO_ID=3
+          else
+             echo "❌ Invalid mode: $MODE"
+             echo "Usage: $0 {baseline|detection|blocking}"
+             exit 1
           fi
-
-          # Update the JSON file so Grafana knows what line to draw
+          
+          # Update metrics file
           echo "{\"scenario_id\": $SCENARIO_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # Restart just the app to apply Env Vars
+          # Restart Juice Shop with new configuration
+          echo "🔄 Restarting Juice Shop container..."
           docker compose up -d juice-shop
           
-          echo "✅ Scenario $MODE Active. Waiting 10s for warm-up..."
-          sleep 10
+          # Wait for startup
+          echo "⏳ Waiting 15s for application warm-up..."
+          sleep 15
+          
+          # Verify
+          if docker ps | grep -q juice-shop; then
+             echo "✅ Scenario '$MODE' (ID: $SCENARIO_ID) is ACTIVE"
+             docker logs juice-shop --tail 10 2>&1 | grep -E "Starting|Aikido|BASELINE" || true
+          else
+             echo "❌ ERROR: Juice Shop failed to start"
+             docker logs juice-shop --tail 20
+             exit 1
+          fi
+
+    - name: Create Quick Status Script
+      copy:
+        dest: "/home/ubuntu/check_scenario.sh"
+        mode: '0755'
+        owner: ubuntu
+        content: |
+          #!/bin/bash
+          echo "📊 Current Scenario Status:"
+          echo "------------------------"
+          if [ -f /opt/security-metrics/data/scenario_info.json ]; then
+             cat /opt/security-metrics/data/scenario_info.json | jq .
+          else
+             echo "No scenario active"
+          fi
+          echo ""
+          echo "🐳 Juice Shop Status:"
+          docker ps --filter name=juice-shop --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "📝 Recent Juice Shop Logs:"
+          docker logs juice-shop --tail 5 2>&1 | grep -E "Starting|Aikido|BASELINE|Error" || echo "No relevant logs"
+
     - name: Start Docker Compose Services
       become_user: ubuntu
       shell: |
@@ -320,3 +389,163 @@
     - name: Wait for Services to Start
       pause:
         seconds: 30
+
+    - name: Verify Services are Running
+      shell: docker ps --format "table {{.Names}}\t{{.Status}}"
+      register: docker_status
+
+    - name: Display Service Status
+      debug:
+        msg: "{{ docker_status.stdout_lines }}"
+
+    - name: Create README for Thesis Workflow
+      copy:
+        dest: "/home/ubuntu/THESIS_INSTRUCTIONS.md"
+        mode: '0644'
+        owner: ubuntu
+        content: |
+          # 🎓 THESIS EXPERIMENT INSTRUCTIONS
+          
+          ## 🏗️ Architecture Overview
+          Your EC2 instance now has a complete DevSecOps research pipeline:
+          
+          - **Juice Shop** (Port 3000): Vulnerable web app with DataDog IAST + Aikido RASP
+          - **Grafana** (Port {{ grafana_port }}): Visualization dashboard
+          - **Prometheus** (Port 9090): Metrics collection
+          - **OpenTelemetry Collector**: Application telemetry
+          - **Custom Metrics Exporter** (Port 9999): Scenario tracking
+          
+          ## 🔬 Three Research Scenarios
+          
+          ### Scenario 1: BASELINE (IAST Only)
+          ```bash
+          ./run_scenario.sh baseline
+          ```
+          - Aikido RASP: **NOT LOADED** (true baseline)
+          - DataDog IAST: Active (detecting vulnerabilities)
+          - Expected Result: Attacks succeed, IAST detects post-execution
+          
+          ### Scenario 2: DETECTION MODE
+          ```bash
+          ./run_scenario.sh detection
+          ```
+          - Aikido RASP: **LOADED** (detection only, AIKIDO_BLOCK=false)
+          - DataDog IAST: Active
+          - Expected Result: Attacks succeed but RASP logs them in real-time
+          
+          ### Scenario 3: BLOCKING MODE
+          ```bash
+          ./run_scenario.sh blocking
+          ```
+          - Aikido RASP: **LOADED** (active blocking, AIKIDO_BLOCK=true)
+          - DataDog IAST: Active
+          - Expected Result: Attacks blocked with 403 responses
+          
+          ## 🚀 Running Experiments
+          
+          ### Manual Testing
+          ```bash
+          # 1. Activate scenario
+          ./run_scenario.sh baseline
+          
+          # 2. Send benign traffic
+          ab -n 100 -c 5 "http://localhost:3000/rest/products/search?q=apple"
+          
+          # 3. Send attack traffic
+          curl "http://localhost:3000/rest/products/search?q=' OR 1=1--"
+          
+          # 4. Check results in Grafana
+          # Navigate to: http://YOUR_EC2_IP:{{ grafana_port }}
+          # Login: admin / admin
+          ```
+          
+          ### Automated Testing (GitHub Actions)
+          The `experiment.yml` workflow runs all three scenarios automatically:
+          - Triggers: Manual dispatch or daily at 4 AM
+          - Generates: Benign + attack traffic for each scenario
+          - Collects: Metrics in Prometheus → Visualized in Grafana
+          
+          ## 📊 Monitoring
+          
+          ```bash
+          # Check current scenario
+          ./check_scenario.sh
+          
+          # View live logs
+          docker logs -f juice-shop
+          
+          # Check all containers
+          docker ps
+          
+          # Restart everything
+          cd /opt/juice-shop && docker compose restart
+          ```
+          
+          ## 🔍 Accessing Dashboards
+          
+          - **Grafana**: http://YOUR_EC2_IP:{{ grafana_port }} (admin/admin)
+          - **Prometheus**: http://YOUR_EC2_IP:9090
+          - **Juice Shop**: http://YOUR_EC2_IP:3000
+          
+          ## 🎯 Key Research Questions This Tests
+          
+          1. **Detection Speed**: IAST (post-execution) vs RASP (runtime)
+          2. **Attack Prevention**: Can RASP block what IAST only detects?
+          3. **Performance Overhead**: Latency with/without RASP
+          4. **False Positives**: Benign traffic handling in each mode
+          
+          ## 📝 Data Collection
+          
+          Your Grafana dashboard tracks:
+          - Scenario ID (1/2/3) over time
+          - HTTP response codes (200 vs 403)
+          - Request latency percentiles
+          - Attack vs benign traffic ratios
+          - IAST detections vs RASP blocks
+          
+          ## 🆘 Troubleshooting
+          
+          ```bash
+          # Container not starting?
+          docker logs juice-shop
+          
+          # Aikido not loading?
+          docker logs juice-shop | grep -i aikido
+          
+          # Metrics not showing?
+          curl http://localhost:9999/metrics
+          
+          # Reset everything
+          cd /opt/juice-shop
+          docker compose down
+          docker compose up -d --build
+          ```
+          
+          ## 📚 Thesis Writing Tips
+          
+          - **Baseline is crucial**: Shows IAST-only detection (what most orgs have)
+          - **Detection mode**: Proves RASP can identify attacks IAST misses
+          - **Blocking mode**: Demonstrates RASP's preventive capability
+          - **Compare metrics**: IAST detection lag vs RASP real-time blocking
+          
+          Good luck with your research! 🎓
+
+    - name: Display Access Information
+      debug:
+        msg:
+          - "=========================================="
+          - "✅ THESIS INFRASTRUCTURE DEPLOYED"
+          - "=========================================="
+          - ""
+          - "📊 Access URLs:"
+          - "  Grafana:    http://{{ ansible_host }}:{{ grafana_port }} (admin/admin)"
+          - "  Prometheus: http://{{ ansible_host }}:9090"
+          - "  Juice Shop: http://{{ ansible_host }}:3000"
+          - ""
+          - "🔬 Quick Commands:"
+          - "  Switch Scenario: ./run_scenario.sh {baseline|detection|blocking}"
+          - "  Check Status:    ./check_scenario.sh"
+          - "  View Logs:       docker logs -f juice-shop"
+          - ""
+          - "📖 Full Instructions: cat ~/THESIS_INSTRUCTIONS.md"
+          - "=========================================="
