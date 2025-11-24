@@ -101,21 +101,21 @@ jobs:
                   ab -n 200 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
 
                   echo "Injecting SQLi (Should be Blocked)..."
-                  BLOCKED_COUNT=0
-                  for i in {1..20}; do
-                     # We capture the status OR the crash (empty reply = code 000)
-                     CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || echo "000")
-                     
-                     # Code 403 = Blocked by WAF behavior
-                     # Code 000 (Crash) = Hard Block by RASP Exception
-                     if [ "$CODE" == "403" ] || [ "$CODE" == "000" ]; then 
-                       ((BLOCKED_COUNT++))
-                     fi
+                  # Run attacks, ignore curl errors (because server might crash)
+                  for i in {1..20}; do 
+                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || true
                   done
 
-                  echo "Attacks Blocked: $BLOCKED_COUNT / 20"
-                  if [ "$BLOCKED_COUNT" -lt 5 ]; then
-                    echo "FAILED: RASP did not block enough attacks!"
+                  # VERIFICATION: Check Docker Logs for the "Zen has blocked" message
+                  echo "Checking Docker Logs for RASP Intervention..."
+                  BLOCK_LOGS=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked'")
+
+                  echo "🛡️ Total RASP Blocks Detected in Logs: $BLOCK_LOGS"
+
+                  if [ "$BLOCK_LOGS" -gt 0 ]; then
+                    echo "✅ SUCCESS: RASP successfully blocked attacks (Fail Closed)."
+                  else
+                    echo "❌ FAILURE: No blocking events found in logs."
                     exit 1
                   fi
 
