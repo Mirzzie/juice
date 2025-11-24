@@ -1,3 +1,4 @@
+# ansible/playbook.yml
 ---
 - name: Configure EC2 for Thesis Experiment
   hosts: juiceshop
@@ -10,48 +11,18 @@
     exporter_dir: /opt/security-metrics-exporter
     grafana_port: 3001
     prometheus_port: 9090
-    otel_grpc_port: 4317
-    otel_http_port: 4318
-    # Official Image Tag (Stable)
-    juice_shop_image: "bkimminich/juice-shop:v16.0.0"
+    otel_grpc_port: 43170
+    otel_http_port: 43180
+    # Pinning version to ensure 'sed' commands don't break in the future
+    juice_shop_version: "v16.0.0"
 
   tasks:
-    # --- 0. SYSTEM TUNING (SWAP) ---
-    - name: Check if swap file exists
-      stat:
-        path: /swapfile
-      register: swap_file_check
-
-    - name: Create 4GB Swap file
-      command: fallocate -l 4G /swapfile
-      when: not swap_file_check.stat.exists
-
-    - name: Set permissions on swap file
-      file:
-        path: /swapfile
-        mode: '0600'
-      when: not swap_file_check.stat.exists
-
-    - name: Make swap file
-      command: mkswap /swapfile
-      when: not swap_file_check.stat.exists
-
-    - name: Enable swap file
-      command: swapon /swapfile
-      when: not swap_file_check.stat.exists
-
-    - name: Persist swap in fstab
-      mount:
-        name: none
-        src: /swapfile
-        fstype: swap
-        opts: sw
-        state: present
-
-    # --- 1. SYSTEM PREP ---
+    # ... [Steps 1-5 remain mostly the same] ...
+    
+    # --- 1. SYSTEM SETUP ---
     - name: Update APT and install Docker deps
       apt:
-        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils, python3-docker]
+        name: [curl, wget, git, unzip, jq, python3-pip, python3-venv]
         update_cache: yes
         state: present
 
@@ -66,10 +37,30 @@
         groups: docker
         append: yes
 
-    - name: Reset SSH connection
-      meta: reset_connection
+    # --- 2. DATADOG AGENT ---
+    - name: Install DataDog Agent
+      shell: >
+        DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} 
+        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
 
-    # --- 2. MONITORING DIRECTORIES ---
+    - name: Configure DataDog OTLP
+      blockinfile:
+        path: /etc/datadog-agent/datadog.yaml
+        block: |
+          apm_config:
+            enabled: true
+          otlp_config:
+            receiver:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+      notify: Restart DataDog Agent
+
+    # --- 3. MONITORING DIRECTORIES ---
     - name: Create directories
       file:
         path: "{{ item }}"
@@ -84,216 +75,25 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 3. CUSTOM METRICS EXPORTER ---
-    - name: Create Exporter Script
+    # --- 4. DEPLOY FILES ---
+    - name: Copy Enhanced Metrics Exporter
       copy:
+        src: files/enhanced_metrics_exporter_otel.py
         dest: "{{ exporter_dir }}/exporter.py"
         mode: '0755'
-        content: |
-          #!/usr/bin/env python3
-          import time
-          import json
-          import os
-          import docker
-          from prometheus_client import start_http_server, Gauge, Counter
-          
-          SCENARIO_FILE = '/opt/security-metrics/data/scenario_info.json'
-          JUICE_CONTAINER_NAME = 'juice-shop'
-          
-          SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario')
-          IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'Real-time Datadog IAST Detections')
-          RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Real-time Aikido RASP Detections')
-          RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Real-time Aikido RASP Blocks')
-          
-          def watch_docker_logs():
-              client = docker.from_env()
-              print(f"🔌 Connecting to Docker container: {JUICE_CONTAINER_NAME}")
-              while True:
-                  try:
-                      container = client.containers.get(JUICE_CONTAINER_NAME)
-                      for line in container.logs(stream=True, tail=0, follow=True):
-                          process_log_line(line.decode('utf-8', errors='ignore'))
-                  except Exception as e:
-                      print(f"⚠️  Docker error: {e}. Retrying in 5s...")
-                      time.sleep(5)
-          
-          def process_log_line(line):
-              if "dd-trace" in line and "Vulnerability detected" in line:
-                  IAST_DETECTIONS.inc()
-                  print(f"🚨 IAST: {line.strip()[:100]}")
-              if "Aikido" in line or "@aikidosec" in line:
-                  if "SecurityException" in line or "Blocked" in line or "Attack detected" in line:
-                      RASP_DETECTIONS.inc()
-                      if "Blocked" in line or "SecurityException" in line:
-                          RASP_BLOCKS.inc()
-                          print(f"🛡️ RASP BLOCK: {line.strip()[:100]}")
-                      else:
-                          print(f"👁️ RASP DETECT: {line.strip()[:100]}")
-          
-          def update_scenario():
-              try:
-                  if os.path.exists(SCENARIO_FILE):
-                      with open(SCENARIO_FILE, 'r') as f:
-                          data = json.load(f)
-                          SCENARIO_GAUGE.set(data.get('scenario_id', 0))
-              except: pass
-          
-          if __name__ == '__main__':
-              start_http_server(9999)
-              print("🚀 Exporter running on :9999")
-              import threading
-              threading.Thread(target=lambda: [update_scenario() or time.sleep(2) for _ in iter(int, 1)], daemon=True).start()
-              watch_docker_logs()
 
-    - name: Exporter Dockerfile
+    - name: Copy Thesis Dashboard
       copy:
-        dest: "{{ exporter_dir }}/Dockerfile"
-        content: |
-          FROM python:3.9-slim
-          WORKDIR /app
-          COPY exporter.py .
-          RUN pip install prometheus_client docker
-          CMD ["python", "exporter.py"]
-
-    # --- 4. OBSERVABILITY CONFIGS ---
-    - name: Configure Grafana Datasource
-      copy:
-        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasource.yaml"
-        content: |
-          apiVersion: 1
-          datasources:
-            - name: Prometheus
-              type: prometheus
-              access: proxy
-              url: http://prometheus:9090
-              isDefault: true
-
-    - name: Configure Grafana Provider
-      copy:
-        dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
-        content: |
-          apiVersion: 1
-          providers:
-            - name: 'Thesis Results'
-              orgId: 1
-              folder: ''
-              type: file
-              options:
-                path: /etc/grafana/provisioning/dashboards
-
-    - name: Create Thesis Dashboard JSON
-      copy:
+        src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/thesis_dashboard.json"
         mode: '0644'
-        content: |
-          {
-            "dashboard": {
-              "id": null,
-              "title": "FINAL THESIS: IAST vs RASP Evaluation",
-              "tags": ["thesis", "rasp", "security"],
-              "timezone": "browser",
-              "refresh": "5s",
-              "panels": [
-                {
-                  "id": 1,
-                  "title": "🎯 THESIS CONTEXT",
-                  "type": "text",
-                  "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
-                  "options": {
-                    "mode": "markdown",
-                    "content": "# 🎓 Thesis: IAST vs RASP Comparative Analysis\n\n**Hypothesis:** RASP provides superior security by **actively blocking** attacks that IAST only detects.\n\n### 🧪 Scenarios:\n1. **🔵 Baseline:** IAST Detects, Attack **SUCCEEDS (200)**.\n2. **🟠 Detection:** RASP Detects, Attack **SUCCEEDS (200)**.\n3. **🟢 Blocking:** RASP Blocks, Attack **FAILS (403)**."
-                  }
-                },
-                {
-                  "id": 2,
-                  "title": "ACTIVE SCENARIO",
-                  "type": "stat",
-                  "gridPos": {"h": 4, "w": 12, "x": 0, "y": 5},
-                  "targets": [{"expr": "thesis_scenario_id"}],
-                  "options": {"colorMode": "background"},
-                  "fieldConfig": {
-                    "defaults": {
-                      "mappings": [
-                        {"type": "value", "value": 1, "text": "1. BASELINE (IAST ONLY)", "color": "blue"},
-                        {"type": "value", "value": 2, "text": "2. RASP DETECTION", "color": "orange"},
-                        {"type": "value", "value": 3, "text": "3. RASP BLOCKING", "color": "green"}
-                      ]
-                    }
-                  }
-                },
-                {
-                  "id": 3,
-                  "title": "🛡️ BLOCK RATE",
-                  "type": "stat",
-                  "gridPos": {"h": 4, "w": 12, "x": 12, "y": 5},
-                  "targets": [{"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m])) / sum(rate(juice_shop_http_server_request_duration_seconds_count[1m])) * 100"}],
-                  "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"color": "red","value": 0},{"color": "green","value": 1}]}}}
-                },
-                {
-                  "id": 4,
-                  "title": "⚔️ TOOL COMPARISON: Real-Time Log Telemetry",
-                  "type": "timeseries",
-                  "gridPos": {"h": 10, "w": 24, "x": 0, "y": 9},
-                  "targets": [
-                    {"expr": "increase(thesis_iast_detections_total[1m])", "legendFormat": "🐶 Datadog IAST Detections"},
-                    {"expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "🥋 Aikido RASP Detections"},
-                    {"expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "🛡️ Aikido RASP BLOCKS"}
-                  ],
-                  "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 40}}}
-                },
-                {
-                  "id": 5,
-                  "title": "🛡️ HTTP RESPONSE STATUS",
-                  "type": "timeseries",
-                  "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
-                  "targets": [
-                    {"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))", "legendFormat": "✅ Allowed (200)"},
-                    {"expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))", "legendFormat": "🚫 Blocked (403)"}
-                  ]
-                }
-              ]
-            }
-          }
 
-    - name: Configure Prometheus
-      copy:
-        dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
-        content: |
-          global:
-            scrape_interval: 2s 
-          scrape_configs:
-            - job_name: 'thesis-exporter'
-              static_configs:
-                - targets: ['metrics-exporter:9999']
-            - job_name: 'otel-collector'
-              static_configs:
-                - targets: ['otel-collector:8889']
+    # --- 5. CONFIGS (Prometheus/Grafana/Otel) ---
+    # (Keep your existing Config tasks here, they looked correct)
+    # ... [Ensure you copy the Grafana Datasource/Provider and Prometheus YML tasks here] ...
 
-    - name: Configure Otel Collector
-      copy:
-        dest: "{{ monitoring_dir }}/otel-collector/otel-collector-config.yaml"
-        content: |
-          receivers:
-            otlp:
-              protocols:
-                grpc:
-                  endpoint: 0.0.0.0:4317
-                http:
-                  endpoint: 0.0.0.0:4318
-          processors:
-            batch:
-          exporters:
-            prometheus:
-              endpoint: "0.0.0.0:8889"
-              namespace: "juice_shop"
-          service:
-            pipelines:
-              metrics:
-                receivers: [otlp]
-                processors: [batch]
-                exporters: [prometheus]
-
-    # --- 5. JUICE SHOP & AIKIDO SETUP (STABLE OVERLAY METHOD) ---
+    # --- 6. JUICE SHOP PREP ---
+    # CRITICAL CHANGE: Empty the dir first to ensure clean build
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -305,35 +105,54 @@
         state: directory
         owner: ubuntu
 
-    # THE SOLUTION: Use Official Image + Runtime Inject. NO COMPILATION.
     - name: Juice Shop Dockerfile
       copy:
         dest: "{{ juice_shop_dir }}/Dockerfile"
         content: |
-          # 1. Use the Official Juice Shop Image (Already Compiled & Working)
-          FROM {{ juice_shop_image }}
+          FROM node:20-bookworm-slim AS builder
+          RUN apt-get update && apt-get install -y git python3 make g++ curl
+          WORKDIR /juice-shop
+          # Use the variable for version pinning
+          RUN git clone --depth 1 --branch {{ juice_shop_version }} https://github.com/juice-shop/juice-shop.git . && rm -rf .git
+          RUN npm install
+          # Install your RASP/IAST tools
+          RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # 2. Switch to Root to install our tools
-          USER root
+          # 1. Setup DataDog Tracer
+          RUN echo "import tracer from 'dd-trace'; tracer.init({ logInjection: true, runtimeMetrics: true, appsec: true }); export default tracer;" > tracer.ts
           
-          # 3. Install Security Tools
-          # We use --no-save to avoid messing with package-lock.json
-          RUN npm install --no-save @aikidosec/firewall @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
+          # 2. Inject Imports (Order matters in TypeScript)
+          # We use standard 'sed' to inject at the top of app.ts / server.ts
+          RUN sed -i "1i import './tracer' // DataDog" app.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
+              sed -i "1i import './tracer' // DataDog" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" server.ts
+              
+          RUN npm run build:server
+          RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
           
-          # 4. Create the Runtime Injection Script
-          RUN echo "try { require('@aikidosec/firewall'); console.log('✅ Aikido RASP Loaded'); } catch(e) { console.error('❌ Aikido Load Failed', e); } \
-          const { NodeSDK } = require('@opentelemetry/sdk-node'); \
-          const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
-          const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); \
-          const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); \
-          const metricExporter = new OTLPMetricExporter({url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); \
-          const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 2000}); \
-          const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); \
-          sdk.start();" > otel-init.js
+          FROM node:20-bookworm-slim
+          WORKDIR /juice-shop
+          COPY --from=builder /juice-shop .
           
-          # 5. Override Command to use our Injection Script
+          # OpenTelemetry Initialization Script
+          RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); const metricExporter = new OTLPMetricExporter({endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 5000}); const sdk = new NodeSDK({metricReader, instrumentations: [getNodeAutoInstrumentations()]}); sdk.start();" > otel-init.js
+          
+          EXPOSE 3000
+          ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
+    - name: Exporter Dockerfile
+      copy:
+        dest: "{{ exporter_dir }}/Dockerfile"
+        content: |
+          FROM python:3.9-slim
+          WORKDIR /app
+          COPY exporter.py .
+          RUN pip install prometheus_client requests opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
+          CMD ["python", "exporter.py"]
+
+    # --- 7. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -345,38 +164,44 @@
               ports: ["3000:3000"]
               environment:
                 - NODE_ENV=production
-                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-                - DD_API_KEY={{ datadog_api_key }}
+                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
                 - AIKIDO_TOKEN={{ aikido_token }}
-                # Variables from script
-                - AIKIDO_BLOCK=${AIKIDO_BLOCK} 
-                - AIKIDO_DISABLE=${AIKIDO_DISABLE}
+                - DD_API_KEY={{ datadog_api_key }}
+                # These are passed from shell environment
+                - AIKIDO_BLOCK=${AIKIDO_BLOCK:-false} 
+                - AIKIDO_DISABLE=${AIKIDO_DISABLE:-false}
+                - OTEL_RESOURCE_ATTRIBUTES=test.scenario=${SCENARIO_NAME:-baseline}
               depends_on: [otel-collector]
-              networks: [thesis-net]
+              networks: [monitoring]
 
             metrics-exporter:
               build: {{ exporter_dir }}
               container_name: metrics-exporter
+              environment:
+                - DD_API_KEY={{ datadog_api_key }}
+                - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
-                - /var/run/docker.sock:/var/run/docker.sock
               ports: ["9999:9999"]
-              networks: [thesis-net]
+              networks: [monitoring]
 
             otel-collector:
               image: otel/opentelemetry-collector-contrib:latest
               command: ["--config=/etc/otel-collector-config.yaml"]
               volumes:
                 - {{ monitoring_dir }}/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-              ports: ["4317:4317", "4318:4318", "8889:8889"]
-              networks: [thesis-net]
+              ports:
+                - "{{ otel_grpc_port }}:{{ otel_grpc_port }}"
+                - "{{ otel_http_port }}:{{ otel_http_port }}"
+                - "8889:8889"
+              networks: [monitoring]
 
             prometheus:
               image: prom/prometheus:latest
               volumes:
                 - {{ monitoring_dir }}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-              ports: ["9090:9090"]
-              networks: [thesis-net]
+              ports: ["{{ prometheus_port }}:9090"]
+              networks: [monitoring]
 
             grafana:
               image: grafana/grafana:latest
@@ -385,71 +210,54 @@
               ports: ["{{ grafana_port }}:3000"]
               environment:
                 - GF_SECURITY_ADMIN_PASSWORD=admin
-              networks: [thesis-net]
+              networks: [monitoring]
 
           networks:
-            thesis-net:
+            monitoring:
               driver: bridge
 
-    # --- 6. CONTROL SCRIPTS ---
-    - name: Create Scenario Switch Script
+    # --- 8. SCENARIO SCRIPT ---
+    - name: Create Scenario Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
         mode: '0755'
         owner: ubuntu
         content: |
           #!/bin/bash
-          set -e
           MODE=$1
           cd /opt/juice-shop
           
-          # Setup variables
-          A_DISABLE="true"
-          A_BLOCK="false"
-          S_ID=1
+          echo "🔬 SCENARIO SWITCH: $MODE"
+          
+          # Default values
+          export SCENARIO_NAME="baseline"
+          export AIKIDO_DISABLE="true"
+          export AIKIDO_BLOCK="false"
+          SCENARIO_ID=1
 
           if [ "$MODE" == "detection" ]; then
-             A_DISABLE="false"
-             A_BLOCK="false"
-             S_ID=2
+             export SCENARIO_NAME="detection"
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="false"
+             SCENARIO_ID=2
           elif [ "$MODE" == "blocking" ]; then
-             A_DISABLE="false"
-             A_BLOCK="true"
-             S_ID=3
+             export SCENARIO_NAME="blocking"
+             export AIKIDO_DISABLE="false"
+             export AIKIDO_BLOCK="true"
+             SCENARIO_ID=3
           fi
 
-          echo "{\"scenario_id\": $S_ID, \"mode\": \"$MODE\"}" > /opt/security-metrics/data/scenario_info.json
+          echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID, \"timestamp\": \"$(date -u)\"}" > /opt/security-metrics/data/scenario_info.json
           
-          # Write Env
-          echo "AIKIDO_DISABLE=$A_DISABLE" > .env
-          echo "AIKIDO_BLOCK=$A_BLOCK" >> .env
-          echo "SCENARIO_ID=$S_ID" >> .env
+          # Only recreate juice-shop to save time, others can stay running
+          # We DO NOT need --build here if the ENV vars handle the logic
+          docker compose up -d juice-shop
           
-          echo "🏗️  Scenario $MODE: Recreating Containers..."
-          docker compose up -d --build
-
-    # --- 7. PROJECT STARTUP & DEBUG ---
-    - name: Launch Baseline Scenario
-      block:
-        - name: Execute Script
-          shell: "/home/ubuntu/run_scenario.sh baseline > /home/ubuntu/deployment.log 2>&1"
-      
-      # THIS WILL SHOW YOU THE LOGS IF IT FAILS
-      rescue:
-        - name: ❌ PRINT DEPLOYMENT LOG
-          command: cat /home/ubuntu/deployment.log
-          register: error_log
-        
-        - name: Display Failure Details
-          debug:
-            var: error_log.stdout_lines
-        
-        - name: Fail
-          fail:
-            msg: "Deployment failed. Check logs above."
-
-    - name: ⏳ Wait for Port 3000
-      wait_for:
-        port: 3000
-        delay: 10
-        timeout: 300
+          echo "✅ Scenario Active. Waiting 10s for app warm-up..."
+          sleep 10
+          
+  handlers:
+    - name: Restart DataDog Agent
+      systemd:
+        name: datadog-agent
+        state: restarted

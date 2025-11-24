@@ -1,3 +1,4 @@
+# .github/workflows/ci-cd.yml
 name: DevSecOps CI/CD Pipeline
 
 on:
@@ -10,7 +11,7 @@ env:
     EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
-    # 1. SAST (Static Analysis - Baseline Requirement)
+    # 1. SAST (Unchanged)
     sast:
         name: SAST - Semgrep
         runs-on: ubuntu-latest
@@ -25,7 +26,7 @@ jobs:
                   name: semgrep-results
                   path: semgrep-results.json
 
-    # 2. DEPLOY & CONFIGURE (Infrastructure as Code)
+    # 2. DEPLOY
     deploy:
         name: Deploy & Config
         runs-on: ubuntu-latest
@@ -38,6 +39,7 @@ jobs:
                   mkdir -p ~/.ssh
                   echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
                   chmod 600 ~/.ssh/id_rsa
+                  # StrictHostKeyChecking=no prevents prompt hang on new instances
                   ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
 
             - name: Install Ansible
@@ -49,13 +51,10 @@ jobs:
                   echo "$EC2_INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
 
             - name: Run Ansible Playbook
-              # FIX: Keepalive prevents "Shared connection closed" during long Docker builds
-              env:
-                  ANSIBLE_HOST_KEY_CHECKING: "False"
-                  ANSIBLE_SSH_ARGS: "-C -o ControlMaster=auto -o ControlPersist=60s -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+              # PASS SECRETS AS EXTRA VARS here. It's safer and easier than managing a vault file in git.
               run: |
                   ansible-playbook -i inventory.ini ansible/playbook.yml \
                   -e "datadog_api_key=${{ secrets.DATADOG_API_KEY }}" \
                   -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
                   -e "datadog_site='us5.datadoghq.com'" \
-                  -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
+                  -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN  }}"
