@@ -920,12 +920,26 @@
           # Install Datadog, Aikido, OTel
           RUN npm install --save-exact @aikidosec/firewall dd-trace @opentelemetry/api @opentelemetry/auto-instrumentations-node @opentelemetry/exporter-metrics-otlp-grpc @opentelemetry/resources @opentelemetry/sdk-node
           
-          # CLEANER SETUP: We do NOT inject code via sed anymore.
-          # We rely on NODE_OPTIONS in docker-compose to load dd-trace first.
-          # Only injecting Aikido because it works as a middleware import
+          # ---------------------------------------------------------
+          # TRACER.TS - HARDCODED IAST CONFIGURATION
+          # We explicitly enable IAST here so it cannot be disabled easily
+          # ---------------------------------------------------------
+          RUN echo "import tracer from 'dd-trace'; \
+          tracer.init({ \
+            logInjection: true, \
+            runtimeMetrics: true, \
+            appsec: true, \
+            iast: true, \
+            service: 'juice-shop', \
+            env: 'thesis-experiment' \
+          }); \
+          export default tracer;" > tracer.ts
           
-          RUN sed -i "1i import '@aikidosec/firewall' // Aikido" app.ts && \
-              sed -i "1i import '@aikidosec/firewall' // Aikido" server.ts
+          # Inject Imports at the VERY TOP of files
+          RUN sed -i "1i import './tracer' // DataDog" app.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" app.ts && \
+              sed -i "1i import './tracer' // DataDog" server.ts && \
+              sed -i "2i import '@aikidosec/firewall' // Aikido" server.ts
               
           RUN npx tsc || npm run build:server
           RUN cd frontend && npm install --legacy-peer-deps && node ./node_modules/@angular/cli/bin/ng build --configuration production
@@ -934,12 +948,11 @@
           WORKDIR /juice-shop
           COPY --from=builder /juice-shop .
           
-          # OTel is still needed for our Grafana Dashboard
+          # OTel Init
           RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); const { resourceFromAttributes } = require('@opentelemetry/resources'); const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-grpc'); const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics'); const resource = resourceFromAttributes({'service.name': 'juice-shop'}); const metricExporter = new OTLPMetricExporter({endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}); const metricReader = new PeriodicExportingMetricReader({exporter: metricExporter, exportIntervalMillis: 5000}); const sdk = new NodeSDK({resource, metricReader, instrumentations: [getNodeAutoInstrumentations()]}); sdk.start();" > otel-init.js
           
           EXPOSE 3000
           ENV NODE_ENV=production
-          # Note: We are NOT requiring dd-trace here. We do it in docker-compose.
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
     # --- 7. DOCKER COMPOSE ---
@@ -956,24 +969,17 @@
               environment:
                 - NODE_ENV=production
                 
-                # --- DATADOG CONFIGURATION ---
+                # --- DATADOG CONNECTION ---
                 - DD_API_KEY={{ datadog_api_key }}
                 - DD_SITE={{ datadog_site }}
-                - DD_ENV=thesis-test
-                - DD_SERVICE=juice-shop
-                - DD_VERSION=1.0.0
                 - DD_AGENT_HOST=172.17.0.1
                 - DD_TRACE_AGENT_PORT=8126
                 
-                # --- DATADOG IAST FLAGS ---
+                # --- DATADOG FLAGS (Backup to code config) ---
                 - DD_APPSEC_ENABLED=true
                 - DD_IAST_ENABLED=true
                 - DD_APPSEC_SCA_ENABLED=true
                 - DD_LOGS_INJECTION=true
-                
-                # --- CRITICAL: FORCE LOAD DATADOG FIRST ---
-                # This guarantees dd-trace loads before ANY other code
-                - NODE_OPTIONS='--require dd-trace/init'
                 
                 # --- OTHER TOOLS ---
                 - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:{{ otel_grpc_port }}
@@ -1066,7 +1072,7 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          # Using remove-orphans to ensure cleaner reloading
+          # Remove orphans ensures clean config reload
           docker compose up -d --remove-orphans
           
           echo "✅ Scenario Active. Waiting 15s..."
