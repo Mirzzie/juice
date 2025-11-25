@@ -1,198 +1,118 @@
 {
-  "dashboard": {
-    "id": null,
-    "title": "FINAL THESIS: IAST vs RASP Evaluation (Real-Time)",
-    "tags": ["thesis", "rasp", "iast", "security", "real-time"],
-    "timezone": "browser",
-    "schemaVersion": 36,
-    "refresh": "5s",
-    "panels": [
+  "annotations": {
+    "list": [
       {
-        "id": 1,
-        "title": "🎯 THESIS HYPOTHESIS & SCENARIO CONTEXT",
-        "type": "text",
-        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
-        "options": {
-          "mode": "markdown",
-          "content": "# IAST vs RASP Comparative Analysis\n\n**Hypothesis:** RASP (Runtime Application Self-Protection) provides superior security by **actively blocking** attacks that IAST only detects, with negligible performance overhead.\n\n### 🧪 Active Scenarios:\n1.  **🔵 Baseline (IAST Only):** Vulnerabilities reported, but attacks **SUCCEED (HTTP 200)**.\n2.  **🟠 Detection (RASP Log):** Attacks detected deep in code, attacks **SUCCEED (HTTP 200)**, logs generated.\n3.  **🟢 Blocking (RASP Protect):** Attacks intercepted in runtime, attacks **BLOCKED (HTTP 403)**."
-        }
-      },
-      {
-        "id": 2,
-        "title": "CURRENT ACTIVE SCENARIO",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 12, "x": 0, "y": 4},
-        "targets": [
-          {
-            "expr": "thesis_scenario_id",
-            "legendFormat": "Current Scenario"
-          }
-        ],
-        "options": {
-          "colorMode": "background",
-          "graphMode": "none"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "mappings": [
-              {"type": "value", "value": 1, "text": "1. BASELINE (IAST ONLY)", "color": "blue"},
-              {"type": "value", "value": 2, "text": "2. RASP DETECTION", "color": "orange"},
-              {"type": "value", "value": 3, "text": "3. RASP BLOCKING", "color": "green"}
-            ],
-            "thresholds": {"mode": "absolute", "steps": [{"value": 0, "color": "gray"}]}
-          }
-        }
-      },
-      {
-        "id": 3,
-        "title": "ATTACK BLOCK RATE (The Kill Shot Metric)",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 4},
-        "targets": [
-          {
-            "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m])) / sum(rate(juice_shop_http_server_request_duration_seconds_count[1m])) * 100",
-            "legendFormat": "Block Rate %"
-          }
-        ],
-        "options": {
-          "colorMode": "value",
-          "graphMode": "area"
-        },
-        "fieldConfig": {
-          "defaults": {
-            "unit": "percent",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 1, "color": "red"},
-                {"value": 80, "color": "green"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 10,
-        "title": "⚔️  TOOL COMPARISON: Datadog IAST vs Aikido RASP (Live Logs)",
-        "type": "timeseries",
-        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
-        "targets": [
-          {
-            "expr": "increase(thesis_iast_detections_total[1m])",
-            "legendFormat": "🐶 Datadog IAST Detections",
-            "refId": "A"
-          },
-          {
-            "expr": "increase(thesis_rasp_detections_total[1m])",
-            "legendFormat": "🥋 Aikido RASP Detections",
-            "refId": "B"
-          },
-          {
-            "expr": "increase(thesis_rasp_blocks_total[1m])",
-            "legendFormat": "🛡️ Aikido RASP BLOCKS",
-            "refId": "C"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {"mode": "palette-classic"},
-            "custom": {
-              "lineWidth": 4,
-              "fillOpacity": 20,
-              "drawStyle": "bars"
-            }
-          },
-          "overrides": [
-            {"matcher": {"id": "byName", "options": "🐶 Datadog IAST Detections"}, "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]},
-            {"matcher": {"id": "byName", "options": "🥋 Aikido RASP Detections"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
-            {"matcher": {"id": "byName", "options": "🛡️ Aikido RASP BLOCKS"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]}
-          ]
-        }
-      },
-      {
-        "id": 4,
-        "title": "🛡️ Security Effectiveness: Allowed vs Blocked Traffic",
-        "type": "timeseries",
-        "gridPos": {"h": 10, "w": 16, "x": 0, "y": 16},
-        "targets": [
-          {
-            "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))",
-            "legendFormat": "✅ Allowed Traffic (HTTP 200)",
-            "refId": "A"
-          },
-          {
-            "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))",
-            "legendFormat": "🚫 RASP Blocks (HTTP 403)",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "custom": {
-              "lineWidth": 4,
-              "fillOpacity": 20
-            },
-            "color": {"mode": "palette-classic"}
-          }
-        }
-      },
-      {
-        "id": 5,
-        "title": "⚡ Performance Overhead (Latency)",
-        "type": "timeseries",
-        "gridPos": {"h": 10, "w": 8, "x": 16, "y": 16},
-        "targets": [
-          {
-            "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000",
-            "legendFormat": "Avg Latency (ms)"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "ms",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 100, "color": "yellow"},
-                {"value": 500, "color": "red"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 6,
-        "title": "SAST Vulnerability Profile (Static)",
-        "type": "bargauge",
-        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
-        "targets": [
-          {
-            "expr": "thesis_sast_vulns",
-            "legendFormat": "{{severity}}"
-          }
-        ],
-        "options": {
-          "orientation": "horizontal",
-          "displayMode": "gradient"
-        }
-      },
-      {
-        "id": 7,
-        "title": "OpenTelemetry Data Flow",
-        "type": "stat",
-        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 26},
-        "targets": [
-          {
-            "expr": "rate(juice_shop_http_server_request_duration_seconds_count[1m])",
-            "legendFormat": "Spans Processed / Sec"
-          }
-        ],
-        "options": {
-          "colorMode": "value"
-        }
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
       }
     ]
-  }
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "content": "# 🎓 Thesis Experiment: IAST vs RASP\n\n**Objective:** Quantify the security effectiveness of RASP (Runtime Protection) compared to IAST (Detection Only) in a CI/CD pipeline.\n\n**Current Scenario Status:**\n*   **1. Baseline:** IAST Only (Attacks Succeed)\n*   **2. Detection:** RASP Logging (Attacks Succeed)\n*   **3. Blocking:** RASP Protection (Attacks Blocked) 🛡️",
+        "mode": "markdown"
+      },
+      "title": "Experiment Context",
+      "type": "text"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "1": { "color": "blue", "index": 0, "text": "BASELINE (IAST)" }, "2": { "color": "orange", "index": 1, "text": "DETECTION MODE" }, "3": { "color": "green", "index": 2, "text": "BLOCKING MODE" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "gray", "value": null }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 4 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "textMode": "auto" },
+      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Current Scenario" }],
+      "title": "ACTIVE EXPERIMENT SCENARIO",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 80 }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / sum(increase(thesis_rasp_detections_total[1h]) + 1)) * 100",
+          "legendFormat": "RASP Efficacy"
+        }
+      ],
+      "title": "🛡️ RASP BLOCK RATE (Last 1 Hour)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        { "expr": "increase(thesis_iast_detections_total[2m])", "legendFormat": "Datadog IAST Findings", "refId": "A" },
+        { "expr": "increase(thesis_rasp_detections_total[2m])", "legendFormat": "Aikido RASP Detections", "refId": "B" },
+        { "expr": "increase(thesis_rasp_blocks_total[2m])", "legendFormat": "Aikido RASP BLOCKS", "refId": "C" }
+      ],
+      "title": "⚔️ Detection vs. Prevention (Real-Time)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+      "id": 5,
+      "targets": [
+        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))", "legendFormat": "HTTP 200 (Success)", "refId": "A" },
+        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))", "legendFormat": "HTTP 403 (Blocked)", "refId": "B" },
+        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"500\"}[1m]))", "legendFormat": "HTTP 500 (App Crash)", "refId": "C" }
+      ],
+      "title": "🚦 Traffic Outcome Analysis",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "id": 6,
+      "targets": [
+        { "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000", "legendFormat": "Avg Latency (ms)" }
+      ],
+      "title": "⚡ Performance Impact (Efficiency Check)",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["thesis", "rasp"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "Thesis: RASP vs IAST Effectiveness",
+  "uid": "thesis-main",
+  "version": 1
 }
