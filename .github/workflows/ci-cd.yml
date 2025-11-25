@@ -99,27 +99,27 @@ jobs:
         run: |
           ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
           ab -n 200 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
-          
+
           echo "Injecting SQLi (Testing RASP Reaction)..."
-          # Run attacks, ignore curl errors (in case of server crash/block)
           for i in {1..20}; do 
              curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || true
           done
-          
+
           echo "Analyzing RASP Logs..."
-          # Capture counts for both Blocking AND Detection events
-          BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked'")
-          DETECT_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has detected'")
-          
+
+          # FIX: Added '|| echo 0' to prevent grep exit code 1 from crashing the pipeline
+          BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
+          DETECT_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has detected' || echo 0")
+
           echo "📊 Stats: Blocks=$BLOCK_COUNT | Detections=$DETECT_COUNT"
-          
+
           if [ "$BLOCK_COUNT" -gt 0 ]; then
             echo "✅ SUCCESS: RASP successfully BLOCKED attacks."
             exit 0
           elif [ "$DETECT_COUNT" -gt 0 ]; then
             echo "⚠️  WARNING: RASP DETECTED attacks but did not block them."
-            echo "   (Reason: Dashboard is likely set to 'Detection Mode' overriding the 'Blocking Mode' env var)"
-            echo "   pipeline will PASS because RASP is active and working."
+            echo "   (Reason: Dashboard is set to 'Detection Mode' overriding local 'Blocking Mode' env var)"
+            echo "   Pipeline passing because RASP is active."
             exit 0
           else
             echo "❌ FAILURE: RASP is inactive (No blocks or detections found)."
