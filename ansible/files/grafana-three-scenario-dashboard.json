@@ -1,118 +1,47 @@
 {
-  "annotations": {
-    "list": [
+  "dashboard": {
+    "title": "Thesis: IAST vs RASP (Industry Benchmarks)",
+    "panels": [
       {
-        "builtIn": 1,
-        "datasource": "-- Grafana --",
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
+        "id": 1,
+        "title": "🏆 THESIS SUMMARY: Detection vs Prevention",
+        "type": "table",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+        "targets": [
+          { "expr": "sum by (scenario) (increase(thesis_rasp_blocks_total[24h]))", "legendFormat": "Blocks", "refId": "A" },
+          { "expr": "sum by (scenario) (increase(thesis_iast_detections_total[24h]))", "legendFormat": "IAST Findings", "refId": "B" }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "🛡️ Real-Time Block Rate (Current Scenario)",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "targets": [
+          { "expr": "(sum(increase(thesis_rasp_blocks_total[5m])) / (sum(increase(thesis_rasp_detections_total[5m])) + 0.001)) * 100", "legendFormat": "Block %" }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "⚡ Performance Overhead (Latency)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "targets": [
+          { "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000", "legendFormat": "Avg Latency (ms)" }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "🔍 Vulnerabilities Detected by Type (IAST)",
+        "type": "bargauge",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+        "targets": [
+          { "expr": "sum by (vuln_type) (thesis_iast_detections_total)", "legendFormat": "{{vuln_type}}" }
+        ]
       }
-    ]
-  },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
-  "id": null,
-  "links": [],
-  "liveNow": true,
-  "panels": [
-    {
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
-      "id": 1,
-      "options": {
-        "content": "# 🎓 Thesis Experiment: IAST vs RASP\n\n**Objective:** Quantify the security effectiveness of RASP (Runtime Protection) compared to IAST (Detection Only) in a CI/CD pipeline.\n\n**Current Scenario Status:**\n*   **1. Baseline:** IAST Only (Attacks Succeed)\n*   **2. Detection:** RASP Logging (Attacks Succeed)\n*   **3. Blocking:** RASP Protection (Attacks Blocked) 🛡️",
-        "mode": "markdown"
-      },
-      "title": "Experiment Context",
-      "type": "text"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [
-            { "options": { "1": { "color": "blue", "index": 0, "text": "BASELINE (IAST)" }, "2": { "color": "orange", "index": 1, "text": "DETECTION MODE" }, "3": { "color": "green", "index": 2, "text": "BLOCKING MODE" } }, "type": "value" }
-          ],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "gray", "value": null }] }
-        }
-      },
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 4 },
-      "id": 2,
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "textMode": "auto" },
-      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Current Scenario" }],
-      "title": "ACTIVE EXPERIMENT SCENARIO",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 80 }] }
-        }
-      },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
-      "id": 3,
-      "targets": [
-        {
-          "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / sum(increase(thesis_rasp_detections_total[1h]) + 1)) * 100",
-          "legendFormat": "RASP Efficacy"
-        }
-      ],
-      "title": "🛡️ RASP BLOCK RATE (Last 1 Hour)",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
-      "id": 4,
-      "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi" }
-      },
-      "targets": [
-        { "expr": "increase(thesis_iast_detections_total[2m])", "legendFormat": "Datadog IAST Findings", "refId": "A" },
-        { "expr": "increase(thesis_rasp_detections_total[2m])", "legendFormat": "Aikido RASP Detections", "refId": "B" },
-        { "expr": "increase(thesis_rasp_blocks_total[2m])", "legendFormat": "Aikido RASP BLOCKS", "refId": "C" }
-      ],
-      "title": "⚔️ Detection vs. Prevention (Real-Time)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
-      "id": 5,
-      "targets": [
-        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))", "legendFormat": "HTTP 200 (Success)", "refId": "A" },
-        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))", "legendFormat": "HTTP 403 (Blocked)", "refId": "B" },
-        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"500\"}[1m]))", "legendFormat": "HTTP 500 (App Crash)", "refId": "C" }
-      ],
-      "title": "🚦 Traffic Outcome Analysis",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
-      "id": 6,
-      "targets": [
-        { "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000", "legendFormat": "Avg Latency (ms)" }
-      ],
-      "title": "⚡ Performance Impact (Efficiency Check)",
-      "type": "timeseries"
-    }
-  ],
-  "schemaVersion": 36,
-  "style": "dark",
-  "tags": ["thesis", "rasp"],
-  "templating": { "list": [] },
-  "time": { "from": "now-15m", "to": "now" },
-  "timezone": "browser",
-  "title": "Thesis: RASP vs IAST Effectiveness",
-  "uid": "thesis-main",
-  "version": 1
+    ],
+    "schemaVersion": 36,
+    "version": 1,
+    "uid": "thesis-main"
+  }
 }

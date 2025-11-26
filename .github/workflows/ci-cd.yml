@@ -1,3 +1,134 @@
+# name: DevSecOps CI/CD Pipeline
+
+# on:
+#   push:
+#     branches: ["main", "dev-test"]
+#   workflow_dispatch: {}
+#   schedule:
+#     - cron: "0 4 * * *"
+
+# env:
+#   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+#   EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+# jobs:
+#   sast:
+#     name: SAST - Semgrep Analysis
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v3
+#       - name: Run Semgrep
+#         run: |
+#           pip install semgrep
+#           semgrep scan --config=auto --json --output=semgrep-results.json || true
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: semgrep-results
+#           path: semgrep-results.json
+
+#   deploy:
+#     name: Deploy and Config
+#     runs-on: ubuntu-latest
+#     needs: sast
+#     steps:
+#       - uses: actions/checkout@v3
+#       - name: Setup SSH
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+#           chmod 600 ~/.ssh/id_rsa
+#           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+#       - name: Install Ansible
+#         run: sudo apt-get install -y ansible sshpass
+#       - name: Create Inventory
+#         run: |
+#           echo "[juiceshop]" > inventory.ini
+#           echo "$EC2_INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+#       - name: Run Ansible Playbook
+#         run: |
+#           ansible-playbook -i inventory.ini ansible/playbook.yml \
+#           -e "datadog_api_key=${{ secrets.DATADOG_API_KEY }}" \
+#           -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
+#           -e "datadog_site='us5.datadoghq.com'" \
+#           -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
+
+#   verify-security:
+#     name: Verify - DAST and RASP Experiment
+#     runs-on: ubuntu-latest
+#     needs: deploy
+#     steps:
+#       - name: Setup Tools
+#         run: |
+#           sudo apt-get update && sudo apt-get install -y apache2-utils
+#           mkdir -p ~/.ssh
+#           echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+#           chmod 600 ~/.ssh/id_rsa
+#           ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+
+#       - name: Wait for Juice Shop to Start
+#         run: |
+#           echo "Waiting for application..."
+#           timeout=300
+#           elapsed=0
+#           interval=10
+#           while ! curl -s --head "http://${EC2_INSTANCE_IP}:3000" > /dev/null; do
+#             sleep $interval
+#             elapsed=$((elapsed + interval))
+#             if [ $elapsed -ge $timeout ]; then echo "Timeout!"; exit 1; fi
+#           done
+#           echo "Application is UP!"
+
+#       - name: Run ZAP Baseline Scan
+#         run: |
+#           docker run --network=host ghcr.io/zaproxy/zaproxy:stable \
+#           zap-baseline.py -t "http://${EC2_INSTANCE_IP}:3000" -m 5 -a -j || true
+
+#       - name: Scenario 1 - Baseline (IAST Only)
+#         run: |
+#           ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh baseline"
+#           ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=apple"
+#           for i in {1..20}; do curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--"; done
+
+#       - name: Scenario 2 - RASP Detection
+#         run: |
+#           ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh detection"
+#           ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=banana"
+#           for i in {1..20}; do curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>"; done
+
+#       - name: Scenario 3 - RASP Blocking (Smart Verify)
+#         run: |
+#           ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
+#           ab -n 200 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
+
+#           echo "Injecting SQLi (Testing RASP Reaction)..."
+#           for i in {1..20}; do
+#              curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || true
+#           done
+
+#           echo "Analyzing RASP Logs..."
+
+#           # FIX: Added '|| echo 0' to prevent grep exit code 1 from crashing the pipeline
+#           BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
+#           DETECT_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has detected' || echo 0")
+
+#           echo "📊 Stats: Blocks=$BLOCK_COUNT | Detections=$DETECT_COUNT"
+
+#           if [ "$BLOCK_COUNT" -gt 0 ]; then
+#             echo "✅ SUCCESS: RASP successfully BLOCKED attacks."
+#             exit 0
+#           elif [ "$DETECT_COUNT" -gt 0 ]; then
+#             echo "⚠️  WARNING: RASP DETECTED attacks but did not block them."
+#             echo "   (Reason: Dashboard is set to 'Detection Mode' overriding local 'Blocking Mode' env var)"
+#             echo "   Pipeline passing because RASP is active."
+#             exit 0
+#           else
+#             echo "❌ FAILURE: RASP is inactive (No blocks or detections found)."
+#             exit 1
+#           fi
+
+#       - name: Pipeline Complete
+#         run: echo "Thesis Data Generated."
+
 name: DevSecOps CI/CD Pipeline
 
 on:
@@ -106,23 +237,19 @@ jobs:
           done
 
           echo "Analyzing RASP Logs..."
-
-          # FIX: Added '|| echo 0' to prevent grep exit code 1 from crashing the pipeline
           BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
           DETECT_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has detected' || echo 0")
 
-          echo "📊 Stats: Blocks=$BLOCK_COUNT | Detections=$DETECT_COUNT"
+          echo "Stats: Blocks=$BLOCK_COUNT | Detections=$DETECT_COUNT"
 
           if [ "$BLOCK_COUNT" -gt 0 ]; then
-            echo "✅ SUCCESS: RASP successfully BLOCKED attacks."
+            echo "SUCCESS: RASP successfully BLOCKED attacks."
             exit 0
           elif [ "$DETECT_COUNT" -gt 0 ]; then
-            echo "⚠️  WARNING: RASP DETECTED attacks but did not block them."
-            echo "   (Reason: Dashboard is set to 'Detection Mode' overriding local 'Blocking Mode' env var)"
-            echo "   Pipeline passing because RASP is active."
+            echo "WARNING: RASP DETECTED attacks but did not block them."
             exit 0
           else
-            echo "❌ FAILURE: RASP is inactive (No blocks or detections found)."
+            echo "FAILURE: RASP is inactive."
             exit 1
           fi
 
