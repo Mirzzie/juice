@@ -1,47 +1,122 @@
 {
-  "dashboard": {
-    "title": "Thesis: IAST vs RASP (Industry Benchmarks)",
-    "panels": [
-      {
-        "id": 1,
-        "title": "🏆 THESIS SUMMARY: Detection vs Prevention",
-        "type": "table",
-        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
-        "targets": [
-          { "expr": "sum by (scenario) (increase(thesis_rasp_blocks_total[24h]))", "legendFormat": "Blocks", "refId": "A" },
-          { "expr": "sum by (scenario) (increase(thesis_iast_detections_total[24h]))", "legendFormat": "IAST Findings", "refId": "B" }
-        ]
-      },
-      {
-        "id": 2,
-        "title": "🛡️ Real-Time Block Rate (Current Scenario)",
-        "type": "gauge",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-        "targets": [
-          { "expr": "(sum(increase(thesis_rasp_blocks_total[5m])) / (sum(increase(thesis_rasp_detections_total[5m])) + 0.001)) * 100", "legendFormat": "Block %" }
-        ]
-      },
-      {
-        "id": 3,
-        "title": "⚡ Performance Overhead (Latency)",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-        "targets": [
-          { "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000", "legendFormat": "Avg Latency (ms)" }
-        ]
-      },
-      {
-        "id": 4,
-        "title": "🔍 Vulnerabilities Detected by Type (IAST)",
-        "type": "bargauge",
-        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
-        "targets": [
-          { "expr": "sum by (vuln_type) (thesis_iast_detections_total)", "legendFormat": "{{vuln_type}}" }
-        ]
+  "uid": "thesis-main",
+  "title": "Thesis: IAST vs RASP (Comprehensive Analysis)",
+  "tags": ["thesis", "security", "devsecops"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "type": "stat",
+      "title": "🛡️ RASP SECURITY EFFICACY (Block Rate)",
+      "targets": [
+        {
+          "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / (sum(increase(thesis_rasp_detections_total[1h])) + sum(increase(thesis_rasp_blocks_total[1h])) + 0.001)) * 100",
+          "legendFormat": "Block Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 90 }] },
+          "unit": "percent",
+          "max": 100,
+          "min": 0
+        }
       }
-    ],
-    "schemaVersion": 36,
-    "version": 1,
-    "uid": "thesis-main"
-  }
+    },
+    {
+      "id": 2,
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "type": "stat",
+      "title": "🕵️ DATADOG IAST FINDINGS (Total)",
+      "targets": [
+        {
+          "expr": "sum(increase(thesis_iast_detections_total[24h]))",
+          "legendFormat": "Vulnerabilities"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "purple" }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "type": "stat",
+      "title": "⚡ APP PERFORMANCE (Latency)",
+      "targets": [
+        {
+          "expr": "rate(juice_shop_http_server_request_duration_seconds_sum[1m]) / rate(juice_shop_http_server_request_duration_seconds_count[1m]) * 1000",
+          "legendFormat": "Avg Latency"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 200 }] }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 4 },
+      "type": "timeseries",
+      "title": "⚔️ ATTACK & RESPONSE TIMELINE",
+      "targets": [
+        { "expr": "increase(thesis_iast_detections_total[1m])", "legendFormat": "Datadog IAST (Detection)", "refId": "A" },
+        { "expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "Aikido RASP (Blocking)", "refId": "B" },
+        { "expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "Aikido RASP (Detection)", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 3, "fillOpacity": 20, "drawStyle": "line" }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 4 },
+      "type": "bargauge",
+      "title": "🔍 IAST VULNERABILITY TYPES",
+      "targets": [
+        { "expr": "sum by (vuln_type) (thesis_iast_detections_total)", "legendFormat": "{{vuln_type}}" }
+      ],
+      "options": { "orientation": "horizontal", "displayMode": "gradient" }
+    },
+    {
+      "id": 6,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "type": "timeseries",
+      "title": "🚦 HTTP TRAFFIC OUTCOME (200 vs 403)",
+      "targets": [
+        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"200\"}[1m]))", "legendFormat": "HTTP 200 (Allowed)", "refId": "A", "color": "green" },
+        { "expr": "sum(rate(juice_shop_http_server_request_duration_seconds_count{http_response_status_code=\"403\"}[1m]))", "legendFormat": "HTTP 403 (Blocked)", "refId": "B", "color": "red" }
+      ]
+    },
+    {
+      "id": 7,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "type": "stat",
+      "title": "CURRENT EXPERIMENT SCENARIO",
+      "targets": [
+        { "expr": "thesis_scenario_id", "legendFormat": "Scenario" }
+      ],
+      "options": { "colorMode": "background" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "value": 1, "text": "BASELINE (IAST ONLY)", "color": "blue" },
+            { "type": "value", "value": 2, "text": "RASP DETECTION", "color": "orange" },
+            { "type": "value", "value": 3, "text": "RASP BLOCKING", "color": "green" }
+          ]
+        }
+      }
+    }
+  ]
 }

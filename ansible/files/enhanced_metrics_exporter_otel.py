@@ -119,55 +119,73 @@ import docker
 import threading
 from prometheus_client import start_http_server, Gauge, Counter
 
+# CONFIGURATION
 METRICS_DIR = '/opt/security-metrics/data'
 SCENARIO_FILE = os.path.join(METRICS_DIR, 'scenario_info.json')
 JUICE_CONTAINER_NAME = 'juice-shop'
 
-SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario')
-IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'Datadog Findings', ['vuln_type'])
-RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'RASP Detections')
-RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'RASP Blocks')
+# METRICS
+SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario ID')
+IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'Datadog IAST Findings', ['vuln_type'])
+RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Aikido RASP Detections')
+RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Aikido RASP Blocks')
 
 def update_scenario_metrics():
+    """Updates the Scenario ID based on the file written by the shell script"""
     try:
         if os.path.exists(SCENARIO_FILE):
             with open(SCENARIO_FILE, 'r') as f:
                 data = json.load(f)
                 SCENARIO_GAUGE.set(data.get('scenario_id', 0))
-    except: pass
+    except Exception:
+        pass
 
 def watch_docker_logs():
+    """Tails the Juice Shop logs and updates metrics in real-time"""
     client = docker.from_env()
-    print(f"🔌 Watching {JUICE_CONTAINER_NAME}...")
+    print(f"🔌 Connecting to Docker... Waiting for {JUICE_CONTAINER_NAME}")
+    
     while True:
         try:
             container = client.containers.get(JUICE_CONTAINER_NAME)
+            print(f"✅ Attached to {JUICE_CONTAINER_NAME} logs.")
+            
             for line in container.logs(stream=True, tail=0, follow=True):
                 log = line.decode('utf-8', errors='ignore')
                 
+                # --- DATADOG IAST DETECTION ---
                 if "Vulnerability detected" in log or "dd-trace" in log and "attack" in log.lower():
                     vuln_type = "Generic"
                     if "SQL" in log: vuln_type = "SQL Injection"
                     elif "XSS" in log: vuln_type = "XSS"
+                    elif "Command" in log: vuln_type = "Command Injection"
                     elif "Path" in log: vuln_type = "Path Traversal"
+                    
                     IAST_DETECTIONS.labels(vuln_type=vuln_type).inc()
-                    print(f"🚨 IAST: {vuln_type}")
+                    print(f"🚨 IAST DETECTED: {vuln_type}")
 
+                # --- AIKIDO RASP DETECTION ---
+                # Matches both "Aikido" and "Zen" (the engine name)
                 if "Zen" in log or "Aikido" in log:
                     if "blocked" in log.lower():
                         RASP_BLOCKS.inc()
-                        print("🛡️ RASP BLOCK")
+                        print("🛡️ RASP BLOCK TRIGGERED")
                     elif "detected" in log.lower():
                         RASP_DETECTIONS.inc()
-                        print("👁️ RASP DETECT")
+                        print("👁️ RASP DETECTION TRIGGERED")
+                        
         except Exception as e:
-            print(f"❌ Docker Error: {e}")
+            print(f"❌ Docker Error: {e}. Retrying in 5s...")
             time.sleep(5)
 
 if __name__ == '__main__':
-    print("🚀 Exporter Running on :9999")
+    print("🚀 Thesis Metrics Exporter Running on Port 9999")
     start_http_server(9999)
+    
+    # Background thread to update Scenario ID
     t = threading.Thread(target=lambda: [update_scenario_metrics() or time.sleep(2) for _ in iter(int, 1)])
     t.daemon = True
     t.start()
+    
+    # Main thread blocks on log watching
     watch_docker_logs()

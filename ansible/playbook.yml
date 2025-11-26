@@ -1260,7 +1260,7 @@
       args:
         creates: /etc/datadog-agent/datadog.yaml
 
-    - name: Configure DataDog Agent for Docker Traffic
+    - name: Configure DataDog Agent
       blockinfile:
         path: /etc/datadog-agent/datadog.yaml
         block: |
@@ -1302,7 +1302,7 @@
       file:
         path: "/opt/security-metrics/data/scenario_info.json"
         state: touch
-        mode: '0666'       # Read/Write for everyone (Fixes Permission Denied)
+        mode: '0666'       # Fix Permission Denied
         owner: ubuntu
         group: ubuntu
 
@@ -1334,9 +1334,7 @@
               type: file
               disableDeletion: false
               updateIntervalSeconds: 10
-              allowUiUpdates: true
               options:
-                # CHANGED: Point to /etc/dashboards to avoid volume conflict
                 path: /etc/dashboards
         mode: '0644'
 
@@ -1550,7 +1548,6 @@
               volumes:
                 - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
                 - grafana_data:/var/lib/grafana
-                # CHANGED: Map host folder to /etc/dashboards to enable visibility
                 - {{ monitoring_dir }}/grafana_dashboards:/etc/dashboards
               ports: ["3001:3000"]
               restart: always
