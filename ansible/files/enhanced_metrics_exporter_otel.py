@@ -75,15 +75,19 @@ def watch_docker_logs():
                     IAST_DETECTIONS.inc()
                     print(f"🚨 IAST HIT: {log_line[:50]}...")
 
-                # --- AIKIDO RASP DETECTION LOGIC ---
-                if "Aikido" in log_line or "@aikidosec" in log_line:
-                    if "SecurityException" in log_line or "Blocked" in log_line or "Attack detected" in log_line:
+                # --- AIKIDO RASP DETECTION LOGIC (FIXED TO MATCH 'Zen') ---
+                # We look for 'Zen' OR 'Aikido' to be safe
+                if "Zen" in log_line or "Aikido" in log_line or "@aikidosec" in log_line:
+                    
+                    # Detection Event
+                    if "detected" in log_line:
                         RASP_DETECTIONS.inc()
-                        if "Blocked" in log_line:
-                            RASP_BLOCKS.inc()
-                            print(f"🛡️ RASP BLOCK: {log_line[:50]}...")
-                        else:
-                            print(f"👁️ RASP DETECT: {log_line[:50]}...")
+                        print(f"👁️ RASP DETECT: {log_line[:50]}...")
+                    
+                    # Blocking Event
+                    if "blocked" in log_line:
+                        RASP_BLOCKS.inc()
+                        print(f"🛡️ RASP BLOCK: {log_line[:50]}...")
                             
         except docker.errors.NotFound:
             time.sleep(5)
