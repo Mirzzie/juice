@@ -912,7 +912,7 @@
       copy:
         src: files/grafana-three-scenario-dashboard.json
         dest: "{{ monitoring_dir }}/grafana_dashboards/thesis_dashboard.json"
-        mode: '0644'
+        mode: '0666'       # Ensure it is readable
         owner: ubuntu
 
     # --- 6. CONFIG FILES ---
@@ -928,8 +928,10 @@
               type: file
               disableDeletion: false
               updateIntervalSeconds: 10
+              allowUiUpdates: true
               options:
-                path: /var/lib/grafana/dashboards
+                # CHANGED: Use a path OUTSIDE /var/lib/grafana to avoid volume conflicts
+                path: /etc/dashboards
         mode: '0644'
 
     - name: Configure Grafana Datasource
@@ -1112,6 +1114,7 @@
               restart: always
               environment:
                 - DD_API_KEY={{ datadog_api_key }}
+                - AIKIDO_TOKEN={{ aikido_token }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
                 - /var/run/docker.sock:/var/run/docker.sock
@@ -1141,7 +1144,8 @@
               volumes:
                 - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
                 - grafana_data:/var/lib/grafana
-                - {{ monitoring_dir }}/grafana_dashboards:/var/lib/grafana/dashboards
+                # CHANGED: Map to /etc/dashboards to avoid volume conflict with /var/lib/grafana
+                - {{ monitoring_dir }}/grafana_dashboards:/etc/dashboards
               ports: ["3001:3000"]
               restart: always
               environment:
@@ -1202,6 +1206,7 @@
              echo "❌ Timed out."
              exit 1
           fi
+          
           echo "✅ Juice Shop is UP!"
         owner: ubuntu
 
