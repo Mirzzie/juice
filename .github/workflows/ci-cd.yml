@@ -128,7 +128,6 @@
 
 #       - name: Pipeline Complete
 #         run: echo "Thesis Data Generated."
-
 name: DevSecOps CI/CD Pipeline
 
 on:
