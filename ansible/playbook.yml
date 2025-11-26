@@ -476,9 +476,18 @@
         - "{{ monitoring_dir }}/prometheus"
         - "{{ monitoring_dir }}/grafana/provisioning/datasources"
         - "{{ monitoring_dir }}/grafana/provisioning/dashboards"
-        - "{{ monitoring_dir }}/grafana_dashboards" # NEW: Dedicated folder for JSON files
+        - "{{ monitoring_dir }}/grafana_dashboards"
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
+
+    # --- PERMISSION FIX: PRE-CREATE SHARED FILE ---
+    - name: Initialize Scenario Info File with Open Permissions
+      file:
+        path: "/opt/security-metrics/data/scenario_info.json"
+        state: touch
+        mode: '0666'       # Read/Write for everyone (Fixes Permission Denied)
+        owner: ubuntu
+        group: ubuntu
 
     # --- 4. DEPLOY FILES ---
     - name: Copy Enhanced Metrics Exporter
@@ -491,7 +500,6 @@
     - name: Copy Thesis Dashboard JSON
       copy:
         src: files/grafana-three-scenario-dashboard.json
-        # CHANGED: Copy to the dedicated dashboards directory
         dest: "{{ monitoring_dir }}/grafana_dashboards/thesis_dashboard.json"
         mode: '0644'
         owner: ubuntu
@@ -510,7 +518,6 @@
               disableDeletion: false
               updateIntervalSeconds: 10
               options:
-                # CHANGED: Point to the internal container path we will map below
                 path: /var/lib/grafana/dashboards
         mode: '0644'
 
@@ -647,7 +654,7 @@
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 7. DOCKER COMPOSE (UPDATED VOLUME MAPPING) ---
+    # --- 7. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -721,7 +728,6 @@
               volumes:
                 - {{ monitoring_dir }}/grafana/provisioning:/etc/grafana/provisioning
                 - grafana_data:/var/lib/grafana
-                # CHANGED: Map the dedicated dashboard folder
                 - {{ monitoring_dir }}/grafana_dashboards:/var/lib/grafana/dashboards
               ports: ["{{ grafana_port }}:3000"]
               environment:
@@ -765,9 +771,9 @@
              SCENARIO_ID=3
           fi
 
+          # Write JSON state for Exporter (File is pre-created by Ansible with open perms)
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          # Remove orphans ensures new config is picked up
           docker compose up -d --remove-orphans
           
           echo "⏳ Waiting for Juice Shop..."
