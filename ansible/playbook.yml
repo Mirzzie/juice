@@ -1252,6 +1252,16 @@
         groups: docker
         append: yes
 
+    - name: Install Trivy (Container Scanner)
+      shell: |
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+      args:
+        creates: /usr/bin/trivy
+
     # --- DATADOG AGENT ---
     - name: Install DataDog Agent
       shell: >
@@ -1593,6 +1603,10 @@
           fi
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
+
+          echo "🔎 Running Trivy Container Scan..."
+          # Scan the image, ignore unfixed issues to keep noise down, output to JSON
+          trivy image --format json --output /opt/security-metrics/data/trivy-results.json --ignore-unfixed juice-shop-juice-shop:latest || true
           
           docker compose up -d --remove-orphans
           
