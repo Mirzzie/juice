@@ -193,17 +193,9 @@
 #!/usr/bin/env python3
 """
 Thesis Metrics Exporter: IAST vs RASP Comparative Analysis
-===========================================================
 Exports industry-standard DevSecOps metrics for comparing:
 - DataDog IAST (Interactive Application Security Testing)
 - Aikido Zen RASP (Runtime Application Self-Protection)
-
-Metrics aligned with:
-- DORA (DevOps Research and Assessment) metrics
-- OWASP Top 10 vulnerability categories
-- Industry DevSecOps benchmarking standards
-
-Author: Mirzzie - MSc Cybersecurity Thesis
 """
 
 import time
@@ -214,533 +206,78 @@ import threading
 import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
-
 import docker
-from prometheus_client import start_http_server, Gauge, Counter, Histogram, Info
+from prometheus_client import start_http_server, Gauge, Counter, Info
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
+# ================= CONFIGURATION =================
 METRICS_DIR = '/opt/security-metrics/data'
 SCENARIO_FILE = os.path.join(METRICS_DIR, 'scenario_info.json')
 JUICE_CONTAINER_NAME = 'juice-shop'
 
-# DataDog API Configuration (for pulling IAST metrics)
-DD_API_KEY = os.environ.get('DD_API_KEY', '')
-DD_APP_KEY = os.environ.get('DD_APP_KEY', '')
-DD_SITE = os.environ.get('DD_SITE', 'us5.datadoghq.com')
-
-# Known vulnerabilities in Juice Shop (for True/False Positive calculation)
-# Based on OWASP Juice Shop's documented vulnerabilities
-KNOWN_JUICE_SHOP_VULNS = {
-    'sql_injection': 10,
-    'xss': 8,
-    'command_injection': 3,
-    'path_traversal': 4,
-    'broken_auth': 6,
-    'sensitive_data': 5,
-    'xxe': 2,
-    'insecure_deserialization': 2,
-    'security_misconfiguration': 4,
-    'ssrf': 2
-}
-TOTAL_KNOWN_VULNS = sum(KNOWN_JUICE_SHOP_VULNS.values())
-
-# =============================================================================
-# PROMETHEUS METRICS DEFINITIONS
-# =============================================================================
-
-# --- Scenario Identification ---
+# ================= METRICS =================
 SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current Thesis Scenario (1=IAST Only, 2=RASP Detect, 3=RASP Block)')
-SCENARIO_INFO = Info('thesis_scenario', 'Current scenario details')
+IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'DataDog IAST detections', ['vuln_type'])
+RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Aikido RASP detections')
+RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Aikido RASP blocks')
+REQUEST_LATENCY = Gauge('thesis_request_latency_ms', 'Average request latency')
 
-# --- IAST Metrics (DataDog) ---
-IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'DataDog IAST vulnerability detections', ['vuln_type'])
-IAST_BY_SEVERITY = Gauge('thesis_iast_by_severity', 'IAST findings by severity', ['severity'])
-DD_VULNERABLE_LIBS = Gauge('thesis_dd_vulnerable_libraries', 'Vulnerable libraries detected by DataDog SCA')
-DD_CVES_DETECTED = Gauge('thesis_dd_cves_detected', 'CVEs detected in dependencies')
-
-# --- RASP Metrics (Aikido Zen) ---
-RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Aikido RASP attack detections')
-RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Aikido RASP attack blocks')
-RASP_BLOCKS_BY_TYPE = Counter('thesis_rasp_blocks_by_type_total', 'RASP blocks by attack type', ['attack_type'])
-RASP_DETECTIONS_BY_TYPE = Counter('thesis_rasp_detections_by_type_total', 'RASP detections by attack type', ['attack_type'])
-
-# --- Accuracy Metrics (DORA aligned) ---
-TRUE_POSITIVES = Gauge('thesis_true_positives', 'Confirmed real vulnerabilities detected')
-FALSE_POSITIVES = Gauge('thesis_false_positives', 'False positive detections')
-MTTD_SECONDS = Gauge('thesis_mttd_seconds', 'Mean Time to Detect (seconds)')
-RASP_PROTECTION_SCORE = Gauge('thesis_rasp_protection_score', 'Overall RASP effectiveness (0-100)')
-
-# --- Performance Metrics ---
-REQUEST_LATENCY = Gauge('thesis_request_latency_ms', 'Average request latency in milliseconds')
-REQUEST_LATENCY_P50 = Gauge('thesis_request_latency_p50_ms', 'P50 request latency')
-REQUEST_LATENCY_P95 = Gauge('thesis_request_latency_p95_ms', 'P95 request latency')
-REQUEST_LATENCY_P99 = Gauge('thesis_request_latency_p99_ms', 'P99 request latency')
-REQUESTS_TOTAL = Gauge('thesis_requests_total', 'Total requests processed')
-PERFORMANCE_OVERHEAD = Gauge('thesis_performance_overhead_percent', 'Security instrumentation overhead')
-HTTP_RESPONSES = Counter('thesis_http_responses_total', 'HTTP responses by status code', ['status'])
-
-# --- Attack Tracking (for MTTD calculation) ---
-attack_timestamps = {}
-detection_timestamps = {}
-
-# --- Internal State ---
-iast_detection_counts = defaultdict(int)
-rasp_block_counts = defaultdict(int)
-rasp_detect_counts = defaultdict(int)
-severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'INFO': 0}
-latency_samples = []
-
-# =============================================================================
-# OWASP TOP 10 MAPPING
-# =============================================================================
-OWASP_MAPPING = {
-    # Log patterns -> OWASP categories
-    'sql': 'A03_Injection',
-    'sqli': 'A03_Injection',
-    'injection': 'A03_Injection',
-    'xss': 'A03_Injection',
-    'cross-site': 'A03_Injection',
-    'script': 'A03_Injection',
-    'command': 'A03_Injection',
-    'cmd': 'A03_Injection',
-    'shell': 'A03_Injection',
-    'path': 'A01_Broken_Access_Control',
-    'traversal': 'A01_Broken_Access_Control',
-    'directory': 'A01_Broken_Access_Control',
-    'lfi': 'A01_Broken_Access_Control',
-    'rfi': 'A01_Broken_Access_Control',
-    'auth': 'A07_Auth_Failures',
-    'authentication': 'A07_Auth_Failures',
-    'session': 'A07_Auth_Failures',
-    'jwt': 'A07_Auth_Failures',
-    'token': 'A07_Auth_Failures',
-    'crypto': 'A02_Crypto_Failures',
-    'encrypt': 'A02_Crypto_Failures',
-    'ssl': 'A02_Crypto_Failures',
-    'tls': 'A02_Crypto_Failures',
-    'xxe': 'A05_Security_Misconfiguration',
-    'xml': 'A05_Security_Misconfiguration',
-    'config': 'A05_Security_Misconfiguration',
-    'header': 'A05_Security_Misconfiguration',
-    'cors': 'A05_Security_Misconfiguration',
-    'ssrf': 'A10_SSRF',
-    'request forgery': 'A10_SSRF',
-    'deserialization': 'A08_Integrity_Failures',
-    'prototype': 'A08_Integrity_Failures',
-    'vulnerable': 'A06_Vulnerable_Components',
-    'outdated': 'A06_Vulnerable_Components',
-    'cve': 'A06_Vulnerable_Components',
-    'library': 'A06_Vulnerable_Components',
-    'logging': 'A09_Logging_Failures',
-    'monitor': 'A09_Logging_Failures',
-    'insecure': 'A04_Insecure_Design',
-}
-
-def classify_attack_type(log_line):
-    """Classify attack type based on log content using OWASP Top 10 categories"""
-    log_lower = log_line.lower()
-    
-    for keyword, owasp_type in OWASP_MAPPING.items():
-        if keyword in log_lower:
-            return owasp_type
-    
-    return 'A03_Injection'  # Default to injection as most common
-
-def extract_severity(log_line):
-    """Extract severity level from log line"""
-    log_upper = log_line.upper()
-    
-    if 'CRITICAL' in log_upper:
-        return 'CRITICAL'
-    elif 'HIGH' in log_upper or 'ERROR' in log_upper:
-        return 'HIGH'
-    elif 'MEDIUM' in log_upper or 'WARN' in log_upper:
-        return 'MEDIUM'
-    elif 'LOW' in log_upper:
-        return 'LOW'
-    else:
-        return 'INFO'
-
-# =============================================================================
-# SCENARIO MANAGEMENT
-# =============================================================================
+# ================= LOGIC =================
 def update_scenario_metrics():
-    """Updates scenario gauge from the JSON file written by run_scenario.sh"""
     try:
         if os.path.exists(SCENARIO_FILE):
             with open(SCENARIO_FILE, 'r') as f:
                 data = json.load(f)
-                scenario_id = data.get('scenario_id', 0)
-                scenario_name = data.get('current_scenario', 'unknown')
-                
-                SCENARIO_GAUGE.set(scenario_id)
-                SCENARIO_INFO.info({
-                    'name': scenario_name,
-                    'id': str(scenario_id),
-                    'timestamp': datetime.now().isoformat()
-                })
-    except Exception as e:
-        print(f"⚠️ Scenario file read error: {e}")
+                SCENARIO_GAUGE.set(data.get('scenario_id', 0))
+    except: pass
 
-# =============================================================================
-# DATADOG API INTEGRATION
-# =============================================================================
-def fetch_datadog_iast_metrics():
-    """
-    Fetch IAST vulnerability data from DataDog API
-    Requires DD_API_KEY and DD_APP_KEY environment variables
-    """
-    if not DD_API_KEY or not DD_APP_KEY:
-        print("ℹ️ DataDog API keys not configured - using log-based detection only")
-        return
-    
-    try:
-        headers = {
-            'DD-API-KEY': DD_API_KEY,
-            'DD-APPLICATION-KEY': DD_APP_KEY,
-            'Content-Type': 'application/json'
-        }
-        
-        # Fetch Application Security vulnerabilities
-        # DataDog ASM/IAST API endpoint
-        base_url = f"https://api.{DD_SITE}"
-        
-        # Get vulnerability findings
-        vuln_url = f"{base_url}/api/v2/security_monitoring/signals"
-        params = {
-            'filter[query]': 'service:juice-shop @workflow.rule.type:application_security',
-            'filter[from]': (datetime.utcnow() - timedelta(hours=24)).isoformat() + 'Z',
-            'filter[to]': datetime.utcnow().isoformat() + 'Z',
-            'page[limit]': 100
-        }
-        
-        response = requests.get(vuln_url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            signals = data.get('data', [])
-            
-            vuln_counts = defaultdict(int)
-            sev_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'INFO': 0}
-            
-            for signal in signals:
-                attrs = signal.get('attributes', {})
-                
-                # Extract vulnerability type
-                tags = attrs.get('tags', [])
-                vuln_type = 'Generic'
-                for tag in tags:
-                    if tag.startswith('vulnerability_type:'):
-                        vuln_type = tag.split(':')[1]
-                        break
-                    elif tag.startswith('attack_type:'):
-                        vuln_type = tag.split(':')[1]
-                        break
-                
-                vuln_counts[vuln_type] += 1
-                
-                # Extract severity
-                severity = attrs.get('severity', 'INFO').upper()
-                if severity in sev_counts:
-                    sev_counts[severity] += 1
-            
-            # Update metrics
-            for vuln_type, count in vuln_counts.items():
-                for _ in range(count - iast_detection_counts[vuln_type]):
-                    IAST_DETECTIONS.labels(vuln_type=vuln_type).inc()
-                iast_detection_counts[vuln_type] = count
-            
-            for sev, count in sev_counts.items():
-                IAST_BY_SEVERITY.labels(severity=sev).set(count)
-            
-            print(f"📊 DataDog API: Found {len(signals)} security signals")
-            
-        # Fetch SCA (Software Composition Analysis) data for vulnerable libraries
-        try:
-            sca_url = f"{base_url}/api/v2/library_vulnerabilities"
-            sca_response = requests.get(sca_url, headers=headers, timeout=10)
-            
-            if sca_response.status_code == 200:
-                sca_data = sca_response.json()
-                vulns = sca_data.get('data', [])
-                
-                lib_count = len(set(v.get('attributes', {}).get('library_name', '') for v in vulns))
-                cve_count = len(set(v.get('attributes', {}).get('cve_id', '') for v in vulns if v.get('attributes', {}).get('cve_id')))
-                
-                DD_VULNERABLE_LIBS.set(lib_count)
-                DD_CVES_DETECTED.set(cve_count)
-                
-                print(f"📚 DataDog SCA: {lib_count} vulnerable libs, {cve_count} CVEs")
-        except Exception as e:
-            print(f"⚠️ DataDog SCA fetch error: {e}")
-            
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️ DataDog API request error: {e}")
-    except Exception as e:
-        print(f"⚠️ DataDog API error: {e}")
+def classify_attack_type(log_line):
+    log = log_line.lower()
+    if 'sql' in log or 'injection' in log: return 'SQL Injection'
+    if 'xss' in log or 'script' in log: return 'XSS'
+    if 'path' in log or 'traversal' in log: return 'Path Traversal'
+    if 'rce' in log or 'command' in log: return 'Command Injection'
+    return 'Generic Vulnerability'
 
-# =============================================================================
-# DOCKER LOG PARSING
-# =============================================================================
 def watch_docker_logs():
-    """
-    Real-time log parsing for Juice Shop container
-    Detects DataDog IAST and Aikido RASP events
-    """
     client = docker.from_env()
-    print(f"🔌 Connecting to Docker... Waiting for '{JUICE_CONTAINER_NAME}'")
+    print(f"🔌 Connected to Docker. Watching '{JUICE_CONTAINER_NAME}'")
     
     while True:
         try:
             container = client.containers.get(JUICE_CONTAINER_NAME)
-            print(f"✅ Attached to '{JUICE_CONTAINER_NAME}' logs")
-            
-            # Track attack injection timestamps for MTTD calculation
-            last_attack_time = None
-            detection_times = []
-            
             for line in container.logs(stream=True, tail=0, follow=True):
                 log = line.decode('utf-8', errors='ignore').strip()
+                if not log: continue
                 
-                if not log:
-                    continue
-                
-                current_time = time.time()
-                
-                # --- DETECT ATTACK INJECTIONS ---
-                attack_patterns = [
-                    r"'.*OR.*1=1",           # SQL Injection
-                    r"<script>",              # XSS
-                    r"\.\./",                 # Path Traversal
-                    r";\s*(ls|cat|whoami)",   # Command Injection
-                    r"UNION\s+SELECT",        # SQL Union
-                ]
-                
-                for pattern in attack_patterns:
-                    if re.search(pattern, log, re.IGNORECASE):
-                        last_attack_time = current_time
-                        attack_type = classify_attack_type(log)
-                        attack_timestamps[attack_type] = current_time
-                        break
-                
-                # --- DATADOG IAST DETECTION ---
-                # Patterns that indicate DataDog detected something
-                iast_patterns = [
-                    (r"dd-trace.*[Vv]ulnerability", True),
-                    (r"dd-trace.*detected", True),
-                    (r"appsec.*attack", True),
-                    (r"iast.*found", True),
-                    (r"Vulnerability detected", True),
-                    (r"security_monitoring", True),
-                ]
-                
-                for pattern, is_detection in iast_patterns:
-                    if re.search(pattern, log, re.IGNORECASE):
-                        vuln_type = classify_attack_type(log)
-                        severity = extract_severity(log)
+                # --- DATADOG IAST ---
+                if "Vulnerability detected" in log or ("dd-trace" in log and "attack" in log.lower()):
+                    vuln_type = classify_attack_type(log)
+                    IAST_DETECTIONS.labels(vuln_type=vuln_type).inc()
+                    print(f"🚨 IAST DETECTED: {vuln_type}")
+
+                # --- AIKIDO RASP ---
+                if "Zen" in log or "Aikido" in log:
+                    if "blocked" in log.lower():
+                        RASP_BLOCKS.inc()
+                        print(f"🛡️ RASP BLOCKED")
+                    elif "detected" in log.lower():
+                        RASP_DETECTIONS.inc()
+                        print(f"👁️ RASP DETECTED")
                         
-                        IAST_DETECTIONS.labels(vuln_type=vuln_type).inc()
-                        severity_counts[severity] += 1
-                        IAST_BY_SEVERITY.labels(severity=severity).set(severity_counts[severity])
-                        
-                        # Calculate MTTD if we have an attack timestamp
-                        if vuln_type in attack_timestamps:
-                            mttd = current_time - attack_timestamps[vuln_type]
-                            detection_times.append(mttd)
-                            if detection_times:
-                                MTTD_SECONDS.set(sum(detection_times) / len(detection_times))
-                        
-                        print(f"🚨 IAST DETECTED [{severity}]: {vuln_type} - {log[:60]}...")
-                        break
-                
-                # --- AIKIDO ZEN RASP DETECTION ---
-                # Aikido Zen uses "Zen" as the engine name in logs
-                rasp_detection_patterns = [
-                    (r"Zen.*detected", 'detect'),
-                    (r"Aikido.*detected", 'detect'),
-                    (r"@aikidosec.*detected", 'detect'),
-                    (r"Zen.*blocked", 'block'),
-                    (r"Aikido.*blocked", 'block'),
-                    (r"@aikidosec.*blocked", 'block'),
-                    (r"Zen has detected", 'detect'),
-                    (r"Zen has blocked", 'block'),
-                ]
-                
-                for pattern, action_type in rasp_detection_patterns:
-                    if re.search(pattern, log, re.IGNORECASE):
-                        attack_type = classify_attack_type(log)
-                        
-                        if action_type == 'block':
-                            RASP_BLOCKS.inc()
-                            RASP_BLOCKS_BY_TYPE.labels(attack_type=attack_type).inc()
-                            rasp_block_counts[attack_type] += 1
-                            HTTP_RESPONSES.labels(status='403').inc()
-                            print(f"🛡️ RASP BLOCKED: {attack_type} - {log[:60]}...")
-                        else:
-                            RASP_DETECTIONS.inc()
-                            RASP_DETECTIONS_BY_TYPE.labels(attack_type=attack_type).inc()
-                            rasp_detect_counts[attack_type] += 1
-                            print(f"👁️ RASP DETECTED: {attack_type} - {log[:60]}...")
-                        
-                        # Calculate MTTD for RASP
-                        if attack_type in attack_timestamps:
-                            mttd = current_time - attack_timestamps[attack_type]
-                            detection_times.append(mttd)
-                            if detection_times:
-                                MTTD_SECONDS.set(sum(detection_times) / len(detection_times))
-                        break
-                
-                # --- HTTP STATUS CODE TRACKING ---
-                status_match = re.search(r'HTTP[/\s]?\d\.?\d?\s+(\d{3})', log)
-                if status_match:
-                    status_code = status_match.group(1)
-                    HTTP_RESPONSES.labels(status=status_code).inc()
-                
-                # Also check for response status in common log formats
-                response_patterns = [
-                    r'"[A-Z]+\s+[^\s]+\s+HTTP[^"]*"\s+(\d{3})',  # Apache/Nginx style
-                    r'status[:\s]+(\d{3})',                       # Generic status
-                    r'statusCode[:\s]+(\d{3})',                   # JSON style
-                ]
-                
-                for pattern in response_patterns:
-                    match = re.search(pattern, log)
-                    if match:
-                        status = match.group(1)
-                        HTTP_RESPONSES.labels(status=status).inc()
-                        break
-                
-                # --- LATENCY TRACKING ---
-                latency_patterns = [
-                    r'response_time[:\s]+(\d+\.?\d*)',
-                    r'latency[:\s]+(\d+\.?\d*)',
-                    r'duration[:\s]+(\d+\.?\d*)',
-                    r'(\d+\.?\d*)\s*ms',
-                ]
-                
-                for pattern in latency_patterns:
-                    match = re.search(pattern, log, re.IGNORECASE)
-                    if match:
-                        try:
-                            latency = float(match.group(1))
-                            if latency < 10000:  # Sanity check
-                                latency_samples.append(latency)
-                                if len(latency_samples) > 1000:
-                                    latency_samples.pop(0)
-                                
-                                # Update latency metrics
-                                if latency_samples:
-                                    sorted_samples = sorted(latency_samples)
-                                    REQUEST_LATENCY.set(sum(latency_samples) / len(latency_samples))
-                                    REQUEST_LATENCY_P50.set(sorted_samples[len(sorted_samples) // 2])
-                                    REQUEST_LATENCY_P95.set(sorted_samples[int(len(sorted_samples) * 0.95)])
-                                    REQUEST_LATENCY_P99.set(sorted_samples[int(len(sorted_samples) * 0.99)])
-                        except ValueError:
-                            pass
-                        break
-                        
-        except docker.errors.NotFound:
-            print(f"⏳ Container '{JUICE_CONTAINER_NAME}' not found. Retrying in 5s...")
-            time.sleep(5)
+                # --- LATENCY ---
+                # Simple extraction of "X ms" if present in logs
+                match = re.search(r'(\d+\.?\d*)\s*ms', log)
+                if match:
+                    try:
+                        REQUEST_LATENCY.set(float(match.group(1)))
+                    except: pass
+
         except Exception as e:
             print(f"❌ Docker error: {e}. Retrying in 5s...")
             time.sleep(5)
 
-# =============================================================================
-# COMPUTED METRICS
-# =============================================================================
-def calculate_derived_metrics():
-    """
-    Calculate derived metrics for IAST vs RASP comparison
-    Runs periodically in background thread
-    """
-    while True:
-        try:
-            # Calculate True Positives (based on known Juice Shop vulnerabilities)
-            # For research purposes, we assume detections matching known categories are TPs
-            total_iast = sum(iast_detection_counts.values())
-            total_rasp_blocks = sum(rasp_block_counts.values())
-            total_rasp_detects = sum(rasp_detect_counts.values())
-            
-            # Estimate True Positives (detections of known vulnerability types)
-            true_positives = min(total_iast + total_rasp_blocks + total_rasp_detects, TOTAL_KNOWN_VULNS)
-            TRUE_POSITIVES.set(true_positives)
-            
-            # Estimate False Positives (detections beyond known vulnerabilities)
-            # This is a simplification - in production you'd verify each finding
-            total_detections = total_iast + total_rasp_blocks + total_rasp_detects
-            false_positives = max(0, total_detections - TOTAL_KNOWN_VULNS)
-            FALSE_POSITIVES.set(false_positives)
-            
-            # RASP Protection Score
-            # Formula: (blocks / total_attacks) * 100, weighted by severity
-            if total_rasp_blocks + total_rasp_detects > 0:
-                block_ratio = total_rasp_blocks / (total_rasp_blocks + total_rasp_detects)
-                protection_score = block_ratio * 100
-            else:
-                protection_score = 0
-            RASP_PROTECTION_SCORE.set(protection_score)
-            
-            # Performance Overhead Estimate
-            # Based on industry benchmarks: IAST ~5-15%, RASP ~2-10%
-            # We estimate based on observed latency increase
-            if latency_samples and len(latency_samples) > 10:
-                # Assume baseline latency is 50ms for Juice Shop
-                baseline_latency = 50
-                current_avg = sum(latency_samples) / len(latency_samples)
-                overhead = max(0, ((current_avg - baseline_latency) / baseline_latency) * 100)
-                PERFORMANCE_OVERHEAD.set(min(overhead, 100))  # Cap at 100%
-            
-            # Update request total
-            REQUESTS_TOTAL.set(len(latency_samples))
-            
-        except Exception as e:
-            print(f"⚠️ Derived metrics calculation error: {e}")
-        
-        time.sleep(10)  # Update every 10 seconds
-
-# =============================================================================
-# MAIN
-# =============================================================================
-def main():
-    print("=" * 70)
-    print("🚀 Thesis Metrics Exporter: IAST vs RASP Comparative Analysis")
-    print("=" * 70)
-    print(f"📊 Prometheus metrics available at: http://0.0.0.0:9999/metrics")
-    print(f"🔬 Monitoring container: {JUICE_CONTAINER_NAME}")
-    print(f"📁 Scenario file: {SCENARIO_FILE}")
-    print(f"🔑 DataDog API: {'Configured' if DD_API_KEY else 'Not configured'}")
-    print("=" * 70)
-    
-    # Start Prometheus HTTP server
-    start_http_server(9999)
-    
-    # Thread 1: Scenario file watcher
-    scenario_thread = threading.Thread(
-        target=lambda: [update_scenario_metrics() or time.sleep(2) for _ in iter(int, 1)],
-        daemon=True
-    )
-    scenario_thread.start()
-    
-    # Thread 2: DataDog API polling (if configured)
-    if DD_API_KEY and DD_APP_KEY:
-        datadog_thread = threading.Thread(
-            target=lambda: [fetch_datadog_iast_metrics() or time.sleep(60) for _ in iter(int, 1)],
-            daemon=True
-        )
-        datadog_thread.start()
-    
-    # Thread 3: Derived metrics calculator
-    derived_thread = threading.Thread(
-        target=calculate_derived_metrics,
-        daemon=True
-    )
-    derived_thread.start()
-    
-    # Main thread: Docker log watcher (blocking)
-    watch_docker_logs()
-
 if __name__ == '__main__':
-    main()
+    print("🚀 Thesis Metrics Exporter Running on :9999")
+    start_http_server(9999)
+    threading.Thread(target=lambda: [update_scenario_metrics() or time.sleep(2) for _ in iter(int, 1)], daemon=True).start()
+    watch_docker_logs()
