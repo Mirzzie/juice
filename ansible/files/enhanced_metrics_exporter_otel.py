@@ -220,6 +220,7 @@ IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'DataDog IAST detectio
 RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Aikido RASP detections')
 RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Aikido RASP blocks')
 REQUEST_LATENCY = Gauge('thesis_request_latency_ms', 'Average request latency')
+TRIVY_VULNS = Gauge('thesis_trivy_vulns_total', 'Container Vulnerabilities', ['severity'])
 
 # ================= LOGIC =================
 def update_scenario_metrics():
@@ -275,9 +276,36 @@ def watch_docker_logs():
         except Exception as e:
             print(f"❌ Docker error: {e}. Retrying in 5s...")
             time.sleep(5)
+            
+TRIVY_FILE = os.path.join(METRICS_DIR, 'trivy-results.json')
+
+def update_trivy_metrics():
+    try:
+        if os.path.exists(TRIVY_FILE):
+            with open(TRIVY_FILE, 'r') as f:
+                data = json.load(f)
+                
+            # Reset counts
+            counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
+            
+            if 'Results' in data:
+                for result in data['Results']:
+                    if 'Vulnerabilities' in result:
+                        for vuln in result['Vulnerabilities']:
+                            sev = vuln.get('Severity', 'UNKNOWN')
+                            if sev in counts:
+                                counts[sev] += 1
+            
+            # Update Prometheus
+            for sev, count in counts.items():
+                TRIVY_VULNS.labels(severity=sev).set(count)
+                
+            print(f"📦 Trivy Scan: {counts['CRITICAL']} Critical, {counts['HIGH']} High")
+    except Exception as e:
+        print(f"⚠️ Trivy parse error: {e}")
 
 if __name__ == '__main__':
     print("🚀 Thesis Metrics Exporter Running on :9999")
     start_http_server(9999)
-    threading.Thread(target=lambda: [update_scenario_metrics() or time.sleep(2) for _ in iter(int, 1)], daemon=True).start()
+    threading.Thread(target=lambda: [update_scenario_metrics()  or update_trivy_metrics() or time.sleep(2) for _ in iter(int, 1)], daemon=True).start()
     watch_docker_logs()
