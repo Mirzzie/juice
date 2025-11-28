@@ -8,24 +8,19 @@
     "from": "now-1h",
     "to": "now"
   },
-  "templating": {
-    "list": []
-  },
-  "annotations": {
-    "list": []
-  },
   "panels": [
     {
       "id": 1,
       "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
       "type": "stat",
       "title": "🛡️ RASP BLOCK RATE",
-      "description": "Percentage of attacks blocked by Aikido RASP",
+      "description": "Percentage of attacks blocked by Aikido RASP. Shows 0% until attacks are run in Scenario 3 (Blocking mode)",
       "targets": [
         {
-          "expr": "((sum(increase(thesis_rasp_blocks_total[1h])) or vector(0)) / ((sum(increase(thesis_rasp_detections_total[1h])) or vector(0)) + (sum(increase(thesis_rasp_blocks_total[1h])) or vector(0)) + 0.001)) * 100",
+          "expr": "clamp_min(clamp_max((sum(increase(thesis_rasp_blocks_total[1h])) / (sum(increase(thesis_rasp_detections_total[1h])) + sum(increase(thesis_rasp_blocks_total[1h])) + 0.001)) * 100, 100), 0) or vector(0)",
           "legendFormat": "Block Rate",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -42,7 +37,7 @@
           "unit": "percent",
           "min": 0,
           "max": 100,
-          "noValue": "0"
+          "noValue": "0%"
         }
       },
       "options": {
@@ -51,8 +46,6 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
         "colorMode": "background",
         "graphMode": "none"
       }
@@ -61,11 +54,11 @@
       "id": 2,
       "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
       "type": "stat",
-      "title": "🕵️ IAST FINDINGS (API Verified)",
-      "description": "Total vulnerabilities detected by DataDog IAST via API",
+      "title": "🕵️ IAST FINDINGS (API)",
+      "description": "Total vulnerabilities from DataDog IAST API. Run attacks to generate findings.",
       "targets": [
         {
-          "expr": "sum(thesis_iast_api_vulns) or thesis_iast_api_total or vector(0)",
+          "expr": "thesis_iast_api_total or sum(thesis_iast_api_vulns{vuln_type!='_init'}) or vector(0)",
           "legendFormat": "Vulnerabilities",
           "refId": "A",
           "instant": true
@@ -73,12 +66,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 5 },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 5 },
               { "color": "red", "value": 10 }
             ]
           },
@@ -92,8 +86,6 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
         "colorMode": "background",
         "graphMode": "none"
       }
@@ -106,7 +98,7 @@
       "description": "Average request latency to Juice Shop",
       "targets": [
         {
-          "expr": "thesis_request_latency_ms or vector(0)",
+          "expr": "thesis_request_latency_ms",
           "legendFormat": "Avg Latency",
           "refId": "A",
           "instant": true
@@ -134,8 +126,6 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
         "colorMode": "background",
         "graphMode": "area"
       }
@@ -145,11 +135,11 @@
       "gridPos": { "h": 10, "w": 16, "x": 0, "y": 4 },
       "type": "timeseries",
       "title": "⚔️ ATTACK TIMELINE",
-      "description": "Real-time view of IAST detections, RASP detections, and RASP blocks",
+      "description": "Real-time security events. Run the experiment workflow to generate data.",
       "targets": [
         {
-          "expr": "increase(thesis_iast_detections_total{source='log'}[1m])",
-          "legendFormat": "IAST Detection ({{vuln_type}})",
+          "expr": "sum(increase(thesis_iast_detections_total[1m])) by (vuln_type)",
+          "legendFormat": "IAST: {{vuln_type}}",
           "refId": "A"
         },
         {
@@ -173,8 +163,7 @@
             "showPoints": "auto",
             "spanNulls": true
           },
-          "color": { "mode": "palette-classic" },
-          "noValue": "0"
+          "color": { "mode": "palette-classic" }
         },
         "overrides": [
           {
@@ -202,10 +191,10 @@
       "gridPos": { "h": 10, "w": 8, "x": 16, "y": 4 },
       "type": "piechart",
       "title": "🔍 IAST BREAKDOWN (by Type)",
-      "description": "Distribution of IAST findings by vulnerability type from DataDog API",
+      "description": "Distribution of IAST findings. Populated after running attacks.",
       "targets": [
         {
-          "expr": "sum by (vuln_type) (thesis_iast_api_vulns{vuln_type!='Initialized'}) > 0",
+          "expr": "sum by (vuln_type) (thesis_iast_api_vulns{vuln_type!='_init',vuln_type!='Initialized',vuln_type!=''}) > 0",
           "legendFormat": "{{vuln_type}}",
           "refId": "A",
           "instant": true
@@ -214,7 +203,7 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "noValue": "No IAST data yet"
+          "noValue": "Run attacks to see data"
         }
       },
       "options": {
@@ -240,7 +229,7 @@
       "description": "Container image vulnerabilities by severity",
       "targets": [
         {
-          "expr": "thesis_trivy_vulns_total > 0",
+          "expr": "thesis_trivy_vulns_total",
           "legendFormat": "{{severity}}",
           "refId": "A",
           "instant": true
@@ -328,14 +317,51 @@
       }
     },
     {
-      "id": 8,
+      "id": 10,
       "gridPos": { "h": 6, "w": 8, "x": 16, "y": 14 },
+      "type": "stat",
+      "title": "🔧 EXPORTER STATUS",
+      "description": "DataDog API connection status",
+      "targets": [
+        {
+          "expr": "thesis_exporter_healthy",
+          "legendFormat": "Status",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "⚠️ API: No Data", "color": "yellow", "index": 1 },
+                "1": { "text": "✅ API: Connected", "color": "green", "index": 0 }
+              }
+            }
+          ],
+          "noValue": "⏳ Starting..."
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 8,
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
       "type": "stat",
       "title": "📊 IAST BY SEVERITY",
       "description": "IAST findings grouped by severity level",
       "targets": [
         {
-          "expr": "sum by (severity) (thesis_iast_api_vulns{vuln_type!='Initialized'})",
+          "expr": "sum by (severity) (thesis_iast_api_vulns{vuln_type!='_init'})",
           "legendFormat": "{{severity}}",
           "refId": "A",
           "instant": true
@@ -385,7 +411,7 @@
     },
     {
       "id": 9,
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
       "type": "timeseries",
       "title": "⏱️ LATENCY OVER TIME",
       "description": "Request latency trends",
@@ -423,31 +449,35 @@
       }
     },
     {
-      "id": 10,
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+      "id": 11,
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 26 },
       "type": "stat",
-      "title": "🔧 EXPORTER STATUS",
-      "description": "Health check for metrics exporter",
+      "title": "📈 SECURITY COUNTERS",
+      "description": "Cumulative counts since exporter started",
       "targets": [
         {
-          "expr": "time() - thesis_api_last_success_timestamp < 300",
-          "legendFormat": "API Status",
+          "expr": "sum(thesis_rasp_blocks_total)",
+          "legendFormat": "RASP Blocks",
           "refId": "A",
+          "instant": true
+        },
+        {
+          "expr": "sum(thesis_rasp_detections_total)",
+          "legendFormat": "RASP Detects",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "expr": "sum(thesis_iast_detections_total)",
+          "legendFormat": "IAST Log Events",
+          "refId": "C",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "1": { "text": "API CONNECTED ✅", "color": "green", "index": 0 },
-                "0": { "text": "API DISCONNECTED ⚠️", "color": "red", "index": 1 }
-              }
-            }
-          ],
-          "noValue": "WAITING FOR DATA..."
+          "color": { "mode": "palette-classic" },
+          "noValue": "0"
         }
       },
       "options": {
@@ -456,7 +486,9 @@
           "fields": "",
           "values": false
         },
-        "colorMode": "background"
+        "colorMode": "background",
+        "graphMode": "none",
+        "orientation": "horizontal"
       }
     }
   ]
