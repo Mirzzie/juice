@@ -1,7 +1,7 @@
 {
   "uid": "thesis-jarvis",
-  "title": "⚡ JARVIS: IAST vs RASP Analysis",
-  "description": "Thesis Security Monitoring System",
+  "title": "IAST vs RASP Analysis",
+  "description": "Security Monitoring System",
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "5s",
@@ -9,10 +9,6 @@
   "time": {
     "from": "now-15m",
     "to": "now"
-  },
-  "timepicker": {
-    "refresh_intervals": ["5s", "10s", "30s", "1m"],
-    "time_options": ["5m", "15m", "1h", "6h", "12h", "24h"]
   },
   "panels": [
     {
@@ -24,6 +20,7 @@
       "targets": [
         {
           "expr": "thesis_scenario_id",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
@@ -49,7 +46,7 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
-        "textMode": "auto"
+        "textMode": "value"
       }
     },
     {
@@ -61,24 +58,25 @@
       "targets": [
         {
           "expr": "sum(thesis_rasp_blocks_total) or vector(0)",
-          "legendFormat": "BLOCKS",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "displayName": "🛡 BLOCKED",
           "color": { "mode": "fixed", "fixedColor": "#ef476f" },
           "unit": "short",
-          "noValue": "0",
-          "displayName": "🛡 BLOCKED"
+          "noValue": "0"
         }
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "center"
+        "justifyMode": "center",
+        "textMode": "value_and_name"
       }
     },
     {
@@ -90,24 +88,25 @@
       "targets": [
         {
           "expr": "sum(thesis_rasp_detections_total) or vector(0)",
-          "legendFormat": "DETECTS",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "displayName": "👁 DETECTED",
           "color": { "mode": "fixed", "fixedColor": "#ffd60a" },
           "unit": "short",
-          "noValue": "0",
-          "displayName": "👁 DETECTED"
+          "noValue": "0"
         }
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "center"
+        "justifyMode": "center",
+        "textMode": "value_and_name"
       }
     },
     {
@@ -119,24 +118,25 @@
       "targets": [
         {
           "expr": "sum(thesis_iast_detections_total) or vector(0)",
-          "legendFormat": "IAST",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "displayName": "🔬 IAST EVENTS",
           "color": { "mode": "fixed", "fixedColor": "#9d4edd" },
           "unit": "short",
-          "noValue": "0",
-          "displayName": "🔬 IAST EVENTS"
+          "noValue": "0"
         }
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "center"
+        "justifyMode": "center",
+        "textMode": "value_and_name"
       }
     },
     {
@@ -148,16 +148,14 @@
       "targets": [
         {
           "expr": "clamp_min(clamp_max((sum(increase(thesis_rasp_blocks_total[15m])) / (sum(increase(thesis_rasp_detections_total[15m])) + sum(increase(thesis_rasp_blocks_total[15m])) + 0.001)) * 100, 100), 0) or vector(0)",
-          "legendFormat": "Block Rate",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -188,7 +186,7 @@
       "targets": [
         {
           "expr": "thesis_request_latency_ms",
-          "legendFormat": "Latency",
+          "legendFormat": " ",
           "refId": "A",
           "instant": true
         }
@@ -196,9 +194,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -215,7 +211,8 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "background",
         "graphMode": "area",
-        "justifyMode": "center"
+        "justifyMode": "center",
+        "textMode": "value"
       }
     },
     {
@@ -332,11 +329,7 @@
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
         "tooltip": { "mode": "multi", "sort": "desc" }
       }
     },
@@ -356,11 +349,6 @@
           "expr": "thesis_request_latency_p95_ms",
           "legendFormat": "P95",
           "refId": "B"
-        },
-        {
-          "expr": "thesis_request_latency_p99_ms",
-          "legendFormat": "P99",
-          "refId": "C"
         }
       ],
       "fieldConfig": {
@@ -383,10 +371,6 @@
           {
             "matcher": { "id": "byName", "options": "P95" },
             "properties": [{ "id": "color", "value": { "fixedColor": "#06d6a0", "mode": "fixed" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "P99" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#ffd60a", "mode": "fixed" } }]
           }
         ]
       },
@@ -445,6 +429,7 @@
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 17 },
       "type": "timeseries",
       "title": "🔬 IAST DETECTION STREAM",
+      "description": "IAST events captured from application logs",
       "transparent": true,
       "targets": [
         {

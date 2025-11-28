@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Thesis Metrics Exporter v4.0 - SIMPLIFIED
-==========================================
-Focused on reliable, local metrics:
-- Log-based IAST/RASP detection
-- Active latency measurement
-- Trivy container scan results
-- Scenario tracking
-
-Removed: DataDog API integration (unreliable)
+Thesis Metrics Exporter v4.1 - JARVIS Edition
+==============================================
+Improved IAST detection:
+- Captures dd-trace security logs
+- Detects attack patterns in HTTP requests
+- Better latency percentile calculation
 """
 
 import time
@@ -19,6 +16,7 @@ import threading
 import requests
 import docker
 from prometheus_client import start_http_server, Gauge, Counter
+from collections import deque
 
 # ================= CONFIGURATION =================
 METRICS_DIR = '/opt/security-metrics/data'
@@ -28,153 +26,157 @@ JUICE_CONTAINER_NAME = 'juice-shop'
 JUICE_SHOP_URL = os.environ.get('JUICE_SHOP_URL', 'http://juice-shop:3000')
 
 # ================= PROMETHEUS METRICS =================
-# Scenario Tracking
 SCENARIO_GAUGE = Gauge('thesis_scenario_id', 'Current scenario (1=Baseline, 2=Detection, 3=Blocking)')
 
-# IAST Metrics (Log-based)
-IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'IAST detections from logs', ['vuln_type', 'source'])
+# IAST Metrics
+IAST_DETECTIONS = Counter('thesis_iast_detections_total', 'IAST detections', ['vuln_type', 'source'])
 
-# RASP Metrics (Aikido Zen)
+# RASP Metrics
 RASP_DETECTIONS = Counter('thesis_rasp_detections_total', 'Aikido RASP detections')
 RASP_BLOCKS = Counter('thesis_rasp_blocks_total', 'Aikido RASP blocks')
 
-# Container Security (Trivy)
+# Container Security
 TRIVY_VULNS = Gauge('thesis_trivy_vulns_total', 'Container vulnerabilities', ['severity'])
 
-# Performance Metrics
+# Performance
 REQUEST_LATENCY = Gauge('thesis_request_latency_ms', 'Average request latency (ms)')
 REQUEST_LATENCY_P95 = Gauge('thesis_request_latency_p95_ms', 'P95 request latency (ms)')
-REQUEST_LATENCY_P99 = Gauge('thesis_request_latency_p99_ms', 'P99 request latency (ms)')
+
+# Track seen log lines to avoid duplicates
+seen_logs = deque(maxlen=1000)
 
 
 # ================= INITIALIZATION =================
 def initialize_metrics():
-    """Set initial values to prevent 'No Data' in Grafana"""
     print("📊 Initializing metrics...")
-    
     SCENARIO_GAUGE.set(0)
     REQUEST_LATENCY.set(0)
     REQUEST_LATENCY_P95.set(0)
-    REQUEST_LATENCY_P99.set(0)
-    
     for severity in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']:
         TRIVY_VULNS.labels(severity=severity).set(0)
-    
     print("✅ Metrics initialized")
+
+
+# ================= ATTACK CLASSIFICATION =================
+def classify_attack(log_line):
+    """Classify attack type from log content"""
+    log = log_line.lower()
+    
+    # SQL Injection
+    sql_patterns = [
+        'sql', 'injection', '1=1', 'union', 'select', 'drop table',
+        "' or", "' and", '--', 'or 1=1', '%27', 'sqlmap'
+    ]
+    if any(p in log for p in sql_patterns):
+        return 'SQL Injection'
+    
+    # XSS
+    xss_patterns = [
+        'xss', '<script', 'script>', 'alert(', 'onerror', 'onload',
+        'javascript:', '%3cscript', 'document.cookie'
+    ]
+    if any(p in log for p in xss_patterns):
+        return 'XSS'
+    
+    # Path Traversal
+    path_patterns = ['../', '..\\', 'path traversal', '%2e%2e', 'etc/passwd']
+    if any(p in log for p in path_patterns):
+        return 'Path Traversal'
+    
+    # Command Injection
+    cmd_patterns = ['command', '; ls', '| cat', '`', '$(', 'exec(', 'shell']
+    if any(p in log for p in cmd_patterns):
+        return 'Command Injection'
+    
+    # NoSQL
+    nosql_patterns = ['$where', '$gt', '$ne', '$regex', 'mongodb']
+    if any(p in log for p in nosql_patterns):
+        return 'NoSQL Injection'
+    
+    return 'Generic'
+
+
+def is_attack_request(log_line):
+    """Detect if log line contains an attack pattern in HTTP request"""
+    attack_signatures = [
+        # SQL Injection
+        "' OR 1=1", "' OR '1'='1", "1=1--", "UNION SELECT",
+        "%27%20OR", "%27%20AND", "1%3D1",
+        # XSS
+        "<script>", "</script>", "alert(", "onerror=",
+        "%3Cscript", "javascript:",
+        # Path Traversal
+        "../../../", "..\\..\\", "%2e%2e%2f",
+        # Command Injection
+        "; ls", "| cat", "`id`",
+    ]
+    return any(sig in log_line for sig in attack_signatures)
 
 
 # ================= SCENARIO & TRIVY =================
 def update_scenario():
-    """Read current scenario from file"""
     try:
         if os.path.exists(SCENARIO_FILE):
             with open(SCENARIO_FILE, 'r') as f:
                 data = json.load(f)
-                scenario_id = data.get('scenario_id', 0)
-                SCENARIO_GAUGE.set(scenario_id)
-                return scenario_id
+                SCENARIO_GAUGE.set(data.get('scenario_id', 0))
+                return data.get('scenario_id', 0)
     except Exception as e:
-        print(f"⚠️ Scenario read error: {e}")
+        print(f"⚠️ Scenario error: {e}")
     return 0
 
 
 def update_trivy():
-    """Read Trivy scan results"""
     try:
         if os.path.exists(TRIVY_FILE):
             with open(TRIVY_FILE, 'r') as f:
                 data = json.load(f)
-            
             counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
-            
             for result in data.get('Results', []):
                 for vuln in result.get('Vulnerabilities', []):
                     sev = vuln.get('Severity', 'UNKNOWN').upper()
                     if sev in counts:
                         counts[sev] += 1
-            
             for severity, count in counts.items():
                 TRIVY_VULNS.labels(severity=severity).set(count)
-            
-            total = sum(counts.values())
-            if total > 0:
-                print(f"📦 Trivy: {total} vulns (C:{counts['CRITICAL']} H:{counts['HIGH']} M:{counts['MEDIUM']} L:{counts['LOW']})")
-                
     except Exception as e:
-        print(f"⚠️ Trivy read error: {e}")
+        print(f"⚠️ Trivy error: {e}")
 
 
 # ================= LATENCY MEASUREMENT =================
 def measure_latency():
-    """Actively measure HTTP latency"""
-    endpoints = [
-        '/rest/products/search?q=test',
-        '/api/Challenges/',
-        '/'
-    ]
-    
-    # Collect samples for percentile calculation
-    latency_samples = []
-    max_samples = 100
+    """Measure HTTP latency with proper percentile calculation"""
+    endpoints = ['/rest/products/search?q=test', '/api/Challenges/', '/']
+    latency_window = deque(maxlen=50)  # Rolling window of 50 samples
     
     while True:
-        current_latencies = []
+        batch_latencies = []
         
         for endpoint in endpoints:
             try:
                 start = time.time()
                 requests.get(f"{JUICE_SHOP_URL}{endpoint}", timeout=5)
                 latency_ms = (time.time() - start) * 1000
-                current_latencies.append(latency_ms)
+                batch_latencies.append(latency_ms)
             except:
                 pass
         
-        if current_latencies:
-            avg = sum(current_latencies) / len(current_latencies)
+        if batch_latencies:
+            # Add to rolling window
+            latency_window.extend(batch_latencies)
+            
+            # Calculate metrics from window
+            samples = list(latency_window)
+            avg = sum(samples) / len(samples)
             REQUEST_LATENCY.set(round(avg, 2))
             
-            # Store for percentiles
-            latency_samples.extend(current_latencies)
-            if len(latency_samples) > max_samples:
-                latency_samples = latency_samples[-max_samples:]
-            
-            # Calculate percentiles
-            if len(latency_samples) >= 10:
-                sorted_samples = sorted(latency_samples)
+            # P95 calculation
+            if len(samples) >= 5:
+                sorted_samples = sorted(samples)
                 p95_idx = int(len(sorted_samples) * 0.95)
-                p99_idx = int(len(sorted_samples) * 0.99)
                 REQUEST_LATENCY_P95.set(round(sorted_samples[p95_idx], 2))
-                REQUEST_LATENCY_P99.set(round(sorted_samples[min(p99_idx, len(sorted_samples)-1)], 2))
         
         time.sleep(5)
-
-
-# ================= LOG CLASSIFICATION =================
-def classify_attack(log_line):
-    """Classify attack type from log content"""
-    log = log_line.lower()
-    
-    # SQL Injection patterns
-    if any(x in log for x in ['sql', 'injection', '1=1', 'union select', 'or 1=1', "' or", "' and"]):
-        return 'SQL Injection'
-    
-    # XSS patterns
-    if any(x in log for x in ['xss', '<script', 'script>', 'alert(', 'onerror=', 'onload=']):
-        return 'XSS'
-    
-    # Path Traversal patterns
-    if any(x in log for x in ['../', '..\\', 'path traversal', 'directory traversal', '%2e%2e']):
-        return 'Path Traversal'
-    
-    # Command Injection
-    if any(x in log for x in ['command injection', '; ls', '| cat', '`id`', '$(whoami)']):
-        return 'Command Injection'
-    
-    # NoSQL Injection
-    if any(x in log for x in ['nosql', '$where', '$gt', '$ne', 'mongodb']):
-        return 'NoSQL Injection'
-    
-    return 'Generic'
 
 
 # ================= DOCKER LOG WATCHER =================
@@ -192,97 +194,85 @@ def watch_docker_logs():
                 if not log:
                     continue
                 
-                # ===== IAST DETECTION (DataDog dd-trace) =====
-                # Look for dd-trace security events
+                # Skip if we've seen this exact log recently
+                log_hash = hash(log)
+                if log_hash in seen_logs:
+                    continue
+                seen_logs.append(log_hash)
+                
+                # ===== RASP DETECTION (Aikido Zen) - PRIORITY =====
+                if any(x in log for x in ['Zen', 'Aikido', 'aikidosec', 'firewall']):
+                    if any(x in log.lower() for x in ['blocked', 'block', 'prevented']):
+                        RASP_BLOCKS.inc()
+                        print(f"🛡️ RASP BLOCK: {log[:100]}")
+                    elif any(x in log.lower() for x in ['detected', 'attack', 'threat']):
+                        RASP_DETECTIONS.inc()
+                        print(f"👁️ RASP DETECT: {log[:100]}")
+                
+                # ===== IAST DETECTION (dd-trace) =====
+                # Pattern 1: Explicit dd-trace/appsec logs
                 if any(x in log for x in [
-                    'Vulnerability detected',
-                    'dd-trace',
-                    'appsec',
-                    'attack detected',
-                    'security event',
-                    'IAST'
+                    'dd-trace', 'datadog', 'appsec',
+                    'Vulnerability detected', 'security event',
+                    'IAST', 'attack detected'
                 ]):
                     vuln_type = classify_attack(log)
-                    IAST_DETECTIONS.labels(vuln_type=vuln_type, source='log').inc()
-                    print(f"🔬 IAST [{vuln_type}]: {log[:80]}...")
+                    IAST_DETECTIONS.labels(vuln_type=vuln_type, source='ddtrace').inc()
+                    print(f"🔬 IAST [dd-trace]: {vuln_type}")
                 
-                # ===== RASP DETECTION (Aikido Zen) =====
-                if any(x in log for x in ['Zen', 'Aikido', 'aikidosec', 'firewall']):
-                    
-                    # BLOCKED events
-                    if any(x in log.lower() for x in ['blocked', 'block', 'prevented', 'stopped']):
-                        RASP_BLOCKS.inc()
-                        print(f"🛡️ RASP BLOCK: {log[:80]}...")
-                    
-                    # DETECTED events (not blocked)
-                    elif any(x in log.lower() for x in ['detected', 'attack', 'threat', 'suspicious']):
-                        RASP_DETECTIONS.inc()
-                        print(f"👁️ RASP DETECT: {log[:80]}...")
-                
-                # ===== Additional Attack Patterns =====
-                # Catch obvious attacks even without explicit security tool mention
-                if any(x in log for x in ["' OR 1=1", "<script>", "../../../"]):
+                # Pattern 2: HTTP request logs containing attack patterns
+                elif is_attack_request(log):
                     vuln_type = classify_attack(log)
-                    IAST_DETECTIONS.labels(vuln_type=vuln_type, source='pattern').inc()
-                    print(f"⚠️ PATTERN [{vuln_type}]: {log[:60]}...")
+                    IAST_DETECTIONS.labels(vuln_type=vuln_type, source='http').inc()
+                    print(f"🔬 IAST [http]: {vuln_type} - {log[:80]}")
+                
+                # Pattern 3: Error responses that might indicate attack detection
+                elif any(x in log for x in ['400', '403', '500']) and any(x in log.lower() for x in ['error', 'invalid', 'blocked', 'forbidden']):
+                    if is_attack_request(log):
+                        vuln_type = classify_attack(log)
+                        IAST_DETECTIONS.labels(vuln_type=vuln_type, source='error').inc()
+                        print(f"🔬 IAST [error]: {vuln_type}")
                         
         except docker.errors.NotFound:
-            print(f"⚠️ Container '{JUICE_CONTAINER_NAME}' not found. Retrying in 10s...")
+            print(f"⚠️ Container not found, retrying in 10s...")
             time.sleep(10)
-        except docker.errors.APIError as e:
-            print(f"❌ Docker API error: {e}. Retrying in 5s...")
-            time.sleep(5)
         except Exception as e:
-            print(f"❌ Unexpected error: {e}. Retrying in 5s...")
+            print(f"❌ Docker error: {e}")
             time.sleep(5)
 
 
 # ================= BACKGROUND WORKER =================
 def file_worker():
-    """Background thread for file-based metrics"""
     while True:
         try:
             scenario = update_scenario()
             update_trivy()
-            
             scenario_names = {0: 'STANDBY', 1: 'BASELINE', 2: 'DETECTION', 3: 'BLOCKING'}
-            print(f"📋 Scenario: {scenario_names.get(scenario, 'UNKNOWN')} | Trivy updated")
-            
+            print(f"📋 Scenario: {scenario_names.get(scenario, '?')}")
         except Exception as e:
-            print(f"❌ File worker error: {e}")
-        
+            print(f"❌ Worker error: {e}")
         time.sleep(30)
 
 
 # ================= MAIN =================
 if __name__ == '__main__':
     print("=" * 60)
-    print("🚀 THESIS METRICS EXPORTER v4.0 (JARVIS Edition)")
+    print("🚀 THESIS METRICS EXPORTER v4.1 (JARVIS Edition)")
     print("=" * 60)
     print(f"   Target: {JUICE_SHOP_URL}")
     print(f"   Container: {JUICE_CONTAINER_NAME}")
-    print(f"   Metrics Port: 9999")
-    print("=" * 60)
-    print("   Mode: Log-based detection (DataDog API removed)")
     print("=" * 60)
     
-    # Initialize metrics
     initialize_metrics()
     
-    # Start Prometheus HTTP server
     start_http_server(9999)
-    print("📊 Prometheus metrics server: http://localhost:9999/metrics")
+    print("📊 Metrics: http://localhost:9999/metrics")
     
-    # Start background threads
-    threading.Thread(target=file_worker, daemon=True, name="FileWorker").start()
-    print("📁 File worker started (scenario + trivy)")
+    threading.Thread(target=file_worker, daemon=True).start()
+    print("📁 File worker started")
     
-    threading.Thread(target=measure_latency, daemon=True, name="LatencyWorker").start()
+    threading.Thread(target=measure_latency, daemon=True).start()
     print("⏱️ Latency measurement started")
     
-    # Main thread: Docker log watcher
-    print("\n" + "=" * 60)
-    print("👀 Starting real-time log monitoring...")
-    print("=" * 60 + "\n")
-    
+    print("\n👀 Starting log monitor...\n")
     watch_docker_logs()
