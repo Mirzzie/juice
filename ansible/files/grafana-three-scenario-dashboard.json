@@ -2,70 +2,462 @@
   "uid": "thesis-main",
   "title": "Thesis: IAST vs RASP (Comprehensive Analysis)",
   "timezone": "browser",
-  "schemaVersion": 36,
+  "schemaVersion": 39,
   "refresh": "5s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
   "panels": [
     {
       "id": 1,
       "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
       "type": "stat",
       "title": "🛡️ RASP BLOCK RATE",
-      "targets": [{ "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / (sum(increase(thesis_rasp_detections_total[1h])) + sum(increase(thesis_rasp_blocks_total[1h])) + 0.001)) * 100", "legendFormat": "Block Rate" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 90 }] }, "unit": "percent", "max": 100 } }
+      "description": "Percentage of attacks blocked by Aikido RASP",
+      "targets": [
+        {
+          "expr": "((sum(increase(thesis_rasp_blocks_total[1h])) or vector(0)) / ((sum(increase(thesis_rasp_detections_total[1h])) or vector(0)) + (sum(increase(thesis_rasp_blocks_total[1h])) or vector(0)) + 0.001)) * 100",
+          "legendFormat": "Block Rate",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
     },
     {
       "id": 2,
       "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
       "type": "stat",
       "title": "🕵️ IAST FINDINGS (API Verified)",
-      "targets": [{ "expr": "sum(thesis_iast_api_vulns)", "legendFormat": "Vulnerabilities" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } } }
+      "description": "Total vulnerabilities detected by DataDog IAST via API",
+      "targets": [
+        {
+          "expr": "sum(thesis_iast_api_vulns) or thesis_iast_api_total or vector(0)",
+          "legendFormat": "Vulnerabilities",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
     },
     {
       "id": 3,
       "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
       "type": "stat",
-      "title": "⚡ LATENCY",
-      "targets": [{ "expr": "thesis_request_latency_ms", "legendFormat": "Avg Latency" }],
-      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 200 }] } } }
+      "title": "⚡ LATENCY (Avg)",
+      "description": "Average request latency to Juice Shop",
+      "targets": [
+        {
+          "expr": "thesis_request_latency_ms or vector(0)",
+          "legendFormat": "Avg Latency",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 200 }
+            ]
+          },
+          "noValue": "0",
+          "decimals": 1
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
     },
     {
       "id": 4,
       "gridPos": { "h": 10, "w": 16, "x": 0, "y": 4 },
       "type": "timeseries",
       "title": "⚔️ ATTACK TIMELINE",
+      "description": "Real-time view of IAST detections, RASP detections, and RASP blocks",
       "targets": [
-        { "expr": "increase(thesis_iast_detections_total{source='log'}[1m])", "legendFormat": "IAST (Log)", "refId": "A" },
-        { "expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "RASP Block", "refId": "B" },
-        { "expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "RASP Detect", "refId": "C" }
+        {
+          "expr": "increase(thesis_iast_detections_total{source='log'}[1m])",
+          "legendFormat": "IAST Detection ({{vuln_type}})",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(thesis_rasp_blocks_total[1m])",
+          "legendFormat": "RASP Block",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(thesis_rasp_detections_total[1m])",
+          "legendFormat": "RASP Detect",
+          "refId": "C"
+        }
       ],
-      "fieldConfig": { "defaults": { "custom": { "lineWidth": 3, "fillOpacity": 20, "drawStyle": "line" } } }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": { "mode": "palette-classic" },
+          "noValue": "0"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*Block.*" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } },
+              { "id": "custom.lineWidth", "value": 3 }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*IAST.*" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
     },
     {
       "id": 5,
       "gridPos": { "h": 10, "w": 8, "x": 16, "y": 4 },
       "type": "piechart",
-      "title": "🔍 IAST BREAKDOWN (CWE)",
-      "targets": [{ "expr": "sum by (vuln_type) (thesis_iast_api_vulns)", "legendFormat": "{{vuln_type}}", "refId": "A" }],
-      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right" } }
+      "title": "🔍 IAST BREAKDOWN (by Type)",
+      "description": "Distribution of IAST findings by vulnerability type from DataDog API",
+      "targets": [
+        {
+          "expr": "sum by (vuln_type) (thesis_iast_api_vulns{vuln_type!='Initialized'}) > 0",
+          "legendFormat": "{{vuln_type}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "noValue": "No IAST data yet"
+        }
+      },
+      "options": {
+        "pieType": "donut",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": ["value", "percent"]
+        },
+        "tooltip": { "mode": "single" },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "id": 50,
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 14 },
       "type": "bargauge",
       "title": "📦 TRIVY CONTAINER SCAN",
-      "targets": [{ "expr": "thesis_trivy_vulns_total", "legendFormat": "{{severity}}" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
-      "options": { "orientation": "horizontal", "displayMode": "gradient" }
+      "description": "Container image vulnerabilities by severity",
+      "targets": [
+        {
+          "expr": "thesis_trivy_vulns_total > 0",
+          "legendFormat": "{{severity}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "noValue": "0"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "CRITICAL" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "HIGH" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "MEDIUM" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "LOW" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "id": 7,
-      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 14 },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 14 },
       "type": "stat",
-      "title": "CURRENT SCENARIO",
-      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Scenario" }],
-      "options": { "colorMode": "background" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "BASELINE", "color": "blue" }, "2": { "text": "DETECTION", "color": "orange" }, "3": { "text": "BLOCKING", "color": "green" } } }] } }
+      "title": "🔬 CURRENT SCENARIO",
+      "description": "Active thesis experiment scenario",
+      "targets": [
+        {
+          "expr": "thesis_scenario_id",
+          "legendFormat": "Scenario",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "NOT SET", "color": "gray", "index": 0 },
+                "1": { "text": "BASELINE (IAST Only)", "color": "blue", "index": 1 },
+                "2": { "text": "DETECTION (IAST + RASP)", "color": "orange", "index": 2 },
+                "3": { "text": "BLOCKING (IAST + RASP Block)", "color": "green", "index": 3 }
+              }
+            }
+          ],
+          "noValue": "NOT SET"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 14 },
+      "type": "stat",
+      "title": "📊 IAST BY SEVERITY",
+      "description": "IAST findings grouped by severity level",
+      "targets": [
+        {
+          "expr": "sum by (severity) (thesis_iast_api_vulns{vuln_type!='Initialized'})",
+          "legendFormat": "{{severity}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "noValue": "0"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "critical" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "high" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "medium" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "low" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 9,
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+      "type": "timeseries",
+      "title": "⏱️ LATENCY OVER TIME",
+      "description": "Request latency trends",
+      "targets": [
+        {
+          "expr": "thesis_request_latency_ms",
+          "legendFormat": "Avg Latency",
+          "refId": "A"
+        },
+        {
+          "expr": "thesis_request_latency_p95_ms",
+          "legendFormat": "P95 Latency",
+          "refId": "B"
+        },
+        {
+          "expr": "thesis_request_latency_p99_ms",
+          "legendFormat": "P99 Latency",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "drawStyle": "line"
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 10,
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+      "type": "stat",
+      "title": "🔧 EXPORTER STATUS",
+      "description": "Health check for metrics exporter",
+      "targets": [
+        {
+          "expr": "time() - thesis_api_last_success_timestamp < 300",
+          "legendFormat": "API Status",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "API CONNECTED ✅", "color": "green", "index": 0 },
+                "0": { "text": "API DISCONNECTED ⚠️", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "noValue": "WAITING FOR DATA..."
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background"
+      }
     }
   ]
 }
