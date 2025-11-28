@@ -13,7 +13,7 @@
   "panels": [
     {
       "id": 100,
-      "gridPos": { "h": 3, "w": 8, "x": 0, "y": 0 },
+      "gridPos": { "h": 3, "w": 6, "x": 0, "y": 0 },
       "type": "stat",
       "title": "",
       "transparent": true,
@@ -51,7 +51,7 @@
     },
     {
       "id": 101,
-      "gridPos": { "h": 3, "w": 5, "x": 8, "y": 0 },
+      "gridPos": { "h": 3, "w": 6, "x": 6, "y": 0 },
       "type": "stat",
       "title": "",
       "transparent": true,
@@ -81,7 +81,7 @@
     },
     {
       "id": 102,
-      "gridPos": { "h": 3, "w": 5, "x": 13, "y": 0 },
+      "gridPos": { "h": 3, "w": 6, "x": 12, "y": 0 },
       "type": "stat",
       "title": "",
       "transparent": true,
@@ -117,7 +117,7 @@
       "transparent": true,
       "targets": [
         {
-          "expr": "sum(thesis_iast_detections_total) or vector(0)",
+          "expr": "(sum(thesis_rasp_blocks_total) or vector(0)) + (sum(thesis_rasp_detections_total) or vector(0))",
           "legendFormat": " ",
           "refId": "A",
           "instant": true
@@ -125,7 +125,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "displayName": "🔬 IAST EVENTS",
+          "displayName": "⚔️ TOTAL ATTACKS",
           "color": { "mode": "fixed", "fixedColor": "#9d4edd" },
           "unit": "short",
           "noValue": "0"
@@ -270,25 +270,20 @@
     },
     {
       "id": 4,
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 8 },
       "type": "timeseries",
       "title": "⚔️ THREAT DETECTION TIMELINE",
       "transparent": true,
       "targets": [
         {
-          "expr": "sum(increase(thesis_iast_detections_total[30s])) by (vuln_type)",
-          "legendFormat": "IAST: {{vuln_type}}",
-          "refId": "A"
-        },
-        {
           "expr": "increase(thesis_rasp_blocks_total[30s])",
-          "legendFormat": "⛔ RASP BLOCK",
-          "refId": "B"
+          "legendFormat": "🛡 RASP BLOCK",
+          "refId": "A"
         },
         {
           "expr": "increase(thesis_rasp_detections_total[30s])",
           "legendFormat": "👁 RASP DETECT",
-          "refId": "C"
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -319,12 +314,6 @@
             "properties": [
               { "id": "color", "value": { "fixedColor": "#ffd60a", "mode": "fixed" } }
             ]
-          },
-          {
-            "matcher": { "id": "byRegexp", "options": ".*IAST.*" },
-            "properties": [
-              { "id": "color", "value": { "fixedColor": "#9d4edd", "mode": "fixed" } }
-            ]
           }
         ]
       },
@@ -335,7 +324,7 @@
     },
     {
       "id": 5,
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 8 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
       "type": "timeseries",
       "title": "⚡ SYSTEM PERFORMANCE",
       "transparent": true,
@@ -381,7 +370,7 @@
     },
     {
       "id": 6,
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 17 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
       "type": "timeseries",
       "title": "🛡️ RASP ACTIVITY MONITOR",
       "transparent": true,
@@ -426,52 +415,33 @@
     },
     {
       "id": 7,
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 17 },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
       "type": "timeseries",
-      "title": "🔬 IAST DETECTION STREAM",
-      "description": "IAST events captured from application logs",
+      "title": "📊 ATTACK RATE",
+      "description": "Combined block + detection rate over time",
       "transparent": true,
       "targets": [
         {
-          "expr": "sum(increase(thesis_iast_detections_total[1m])) by (vuln_type)",
-          "legendFormat": "{{vuln_type}}",
+          "expr": "increase(thesis_rasp_blocks_total[1m]) + increase(thesis_rasp_detections_total[1m])",
+          "legendFormat": "Attacks/min",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
+            "lineWidth": 3,
+            "fillOpacity": 30,
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "gradientMode": "opacity",
-            "stacking": { "mode": "normal", "group": "A" }
+            "gradientMode": "opacity"
           },
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "SQL Injection" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#ef476f", "mode": "fixed" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "XSS" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#ffd60a", "mode": "fixed" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Path Traversal" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#06d6a0", "mode": "fixed" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Generic" },
-            "properties": [{ "id": "color", "value": { "fixedColor": "#9d4edd", "mode": "fixed" } }]
-          }
-        ]
+          "color": { "mode": "fixed", "fixedColor": "#9d4edd" }
+        }
       },
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "tooltip": { "mode": "single" }
       }
     }
   ],
