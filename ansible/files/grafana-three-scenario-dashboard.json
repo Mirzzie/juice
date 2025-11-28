@@ -1,121 +1,71 @@
 {
-  "uid": "thesis-iast-vs-rasp",
-  "title": "Thesis: IAST vs RASP Comparative Analysis",
-  "tags": ["thesis", "security", "devsecops", "iast", "rasp"],
+  "uid": "thesis-main",
+  "title": "Thesis: IAST vs RASP (Comprehensive Analysis)",
   "timezone": "browser",
-  "schemaVersion": 39,
+  "schemaVersion": 36,
   "refresh": "5s",
-  "time": { "from": "now-1h", "to": "now" },
   "panels": [
     {
-      "id": 100,
-      "gridPos": { "h": 2, "w": 24, "x": 0, "y": 0 },
-      "type": "text",
-      "options": {
-        "mode": "markdown",
-        "content": "# 🔬 IAST vs RASP Comparative Security Analysis\n**Research Focus:** Comparing DataDog IAST detection capabilities with Aikido Zen RASP protection effectiveness"
-      }
-    },
-    {
       "id": 1,
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 2 },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
       "type": "stat",
-      "title": "🎯 Current Scenario",
-      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Scenario" }],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            { "type": "value", "options": { "1": { "text": "BASELINE (IAST)", "color": "blue" }, "2": { "text": "RASP DETECTION", "color": "orange" }, "3": { "text": "RASP BLOCKING", "color": "green" } } }
-          ],
-          "color": { "mode": "thresholds" }
-        }
-      }
+      "title": "🛡️ RASP BLOCK RATE",
+      "targets": [{ "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / (sum(increase(thesis_rasp_detections_total[1h])) + sum(increase(thesis_rasp_blocks_total[1h])) + 0.001)) * 100", "legendFormat": "Block Rate" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 90 }] }, "unit": "percent", "max": 100 } }
     },
     {
       "id": 2,
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 2 },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
       "type": "stat",
-      "title": "🕵️ DataDog IAST Detections (Log+API)",
-      "targets": [{ "expr": "sum(thesis_iast_log_detections) + sum(thesis_iast_api_vulns)", "legendFormat": "Findings" }],
+      "title": "🕵️ IAST FINDINGS (API Verified)",
+      "targets": [{ "expr": "sum(thesis_iast_api_vulns)", "legendFormat": "Vulnerabilities" }],
       "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } } }
     },
     {
       "id": 3,
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 2 },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
       "type": "stat",
-      "title": "👁️ RASP Detections",
-      "targets": [{ "expr": "sum(thesis_rasp_detections_total)", "legendFormat": "RASP Detects" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } } }
+      "title": "⚡ LATENCY",
+      "targets": [{ "expr": "thesis_request_latency_ms", "legendFormat": "Avg Latency" }],
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 200 }] } } }
     },
     {
       "id": 4,
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 2 },
-      "type": "stat",
-      "title": "🛡️ RASP Blocks",
-      "targets": [{ "expr": "sum(thesis_rasp_blocks_total)", "legendFormat": "RASP Blocks" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } }
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 4 },
+      "type": "timeseries",
+      "title": "⚔️ ATTACK TIMELINE",
+      "targets": [
+        { "expr": "increase(thesis_iast_detections_total{source='log'}[1m])", "legendFormat": "IAST (Log)", "refId": "A" },
+        { "expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "RASP Block", "refId": "B" },
+        { "expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "RASP Detect", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 3, "fillOpacity": 20, "drawStyle": "line" } } }
     },
     {
       "id": 5,
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
-      "type": "gauge",
-      "title": "🎯 RASP Effectiveness Rate",
-      "targets": [
-        { "expr": "(sum(thesis_rasp_blocks_total) / (sum(thesis_rasp_blocks_total) + sum(thesis_rasp_detections_total) + 0.001)) * 100", "legendFormat": "Block Rate %" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 80 }] } } }
-    },
-    {
-      "id": 6,
-      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 6 },
-      "type": "timeseries",
-      "title": "⚔️ Attack vs Response Timeline (Real-Time Logs)",
-      "targets": [
-        { "expr": "increase(thesis_iast_log_detections[1m])", "legendFormat": "DataDog IAST Finding", "refId": "A" },
-        { "expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "Aikido RASP Detection", "refId": "B" },
-        { "expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "Aikido RASP Block", "refId": "C" }
-      ],
-      "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 3, "fillOpacity": 25, "drawStyle": "line", "pointSize": 6 } },
-        "overrides": [
-           { "matcher": { "id": "byName", "options": "DataDog IAST Finding" }, "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }] },
-           { "matcher": { "id": "byName", "options": "Aikido RASP Detection" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
-           { "matcher": { "id": "byName", "options": "Aikido RASP Block" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
-        ]
-      }
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 4 },
+      "type": "piechart",
+      "title": "🔍 IAST BREAKDOWN (CWE)",
+      "targets": [{ "expr": "sum by (vuln_type) (thesis_iast_api_vulns)", "legendFormat": "{{vuln_type}}", "refId": "A" }],
+      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right" } }
     },
     {
       "id": 50,
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 14 },
       "type": "bargauge",
-      "title": "📦 Container Vulnerabilities (Trivy)",
+      "title": "📦 TRIVY CONTAINER SCAN",
       "targets": [{ "expr": "thesis_trivy_vulns_total", "legendFormat": "{{severity}}" }],
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 }]
-          }
-        }
-      },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
       "options": { "orientation": "horizontal", "displayMode": "gradient" }
     },
     {
-      "id": 13,
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
-      "type": "timeseries",
-      "title": "⚡ Application Latency (Performance)",
-      "targets": [{ "expr": "thesis_request_latency_ms", "legendFormat": "Avg Latency (ms)" }],
-      "fieldConfig": { "defaults": { "unit": "ms" } }
-    },
-    {
-      "id": 22,
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
-      "type": "piechart",
-      "title": "🔍 IAST Vulnerability Breakdown (DataDog API Source)",
-      "targets": [{ "expr": "sum by (vuln_type) (thesis_iast_api_vulns)", "legendFormat": "{{vuln_type}}" }],
-      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right" } }
+      "id": 7,
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 14 },
+      "type": "stat",
+      "title": "CURRENT SCENARIO",
+      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Scenario" }],
+      "options": { "colorMode": "background" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "BASELINE", "color": "blue" }, "2": { "text": "DETECTION", "color": "orange" }, "3": { "text": "BLOCKING", "color": "green" } } }] } }
     }
   ]
 }

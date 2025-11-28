@@ -15,12 +15,25 @@
 #     juice_shop_version: "master"
 
 #   tasks:
-#     # --- SYSTEM PREP ---
+#     # --- 1. SYSTEM SETUP ---
 #     - name: Update APT and install Docker deps
 #       apt:
 #         name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils]
 #         update_cache: yes
 #         state: present
+
+#     # --- NEW: Install Trivy ---
+#     - name: Install Trivy
+#       shell: |
+#         if ! command -v trivy &> /dev/null; then
+#           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+#           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+#           echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+#           sudo apt-get update
+#           sudo apt-get install -y trivy
+#         fi
+#       args:
+#         creates: /usr/bin/trivy
 
 #     - name: Install Docker
 #       shell: curl -fsSL https://get.docker.com | sh
@@ -33,17 +46,7 @@
 #         groups: docker
 #         append: yes
 
-#     - name: Install Trivy (Container Scanner)
-#       shell: |
-#         sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-#         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-#         echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
-#         sudo apt-get update
-#         sudo apt-get install -y trivy
-#       args:
-#         creates: /usr/bin/trivy
-
-#     # --- DATADOG AGENT ---
+#     # --- 2. DATADOG AGENT ---
 #     - name: Install DataDog Agent
 #       shell: >
 #         DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} DD_APM_INSTRUMENTATION_ENABLED=host 
@@ -57,7 +60,7 @@
 #         block: |
 #           apm_config:
 #             enabled: true
-#             apm_non_local_traffic: true
+#             apm_non_local_traffic: true 
 #           process_config:
 #             enabled: true
 #           logs_enabled: true
@@ -70,7 +73,7 @@
 #                   endpoint: 0.0.0.0:4318
 #       notify: Restart DataDog Agent
 
-#     # --- DIRECTORIES ---
+#     # --- 3. DIRECTORIES ---
 #     - name: Create directories
 #       file:
 #         path: "{{ item }}"
@@ -88,7 +91,7 @@
 #         - "{{ exporter_dir }}"
 #         - "/opt/security-metrics/data"
 
-#     # --- PERMISSIONS FIX ---
+#     # --- 4. DATA FILE ---
 #     - name: Initialize Scenario Info File
 #       file:
 #         path: "/opt/security-metrics/data/scenario_info.json"
@@ -97,7 +100,7 @@
 #         owner: ubuntu
 #         group: ubuntu
 
-#     # --- FILE DEPLOYMENT ---
+#     # --- 5. DEPLOY FILES ---
 #     - name: Copy Enhanced Metrics Exporter
 #       copy:
 #         src: files/enhanced_metrics_exporter_otel.py
@@ -112,6 +115,7 @@
 #         mode: '0666'
 #         owner: ubuntu
 
+#     # --- 6. CONFIGS ---
 #     - name: Configure Grafana Provider
 #       copy:
 #         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -190,7 +194,7 @@
 #                 exporters: [otlp]
 #         mode: '0644'
 
-#     # --- JUICE SHOP SETUP ---
+#     # --- 7. BUILD PREP ---
 #     - name: Clean Juice Shop Dir
 #       file:
 #         path: "{{ juice_shop_dir }}"
@@ -210,6 +214,7 @@
 #           WORKDIR /app
 #           COPY exporter.py .
 #           ENV PYTHONUNBUFFERED=1
+#           # ADDED: 'requests' is needed for the API integration
 #           RUN pip install prometheus_client docker requests
 #           CMD ["python", "exporter.py"]
 
@@ -249,7 +254,7 @@
 #           WORKDIR /juice-shop
 #           COPY --from=builder /juice-shop .
           
-#           # OTel Init
+#           # Use HTTP OTel export
 #           RUN echo "const { NodeSDK } = require('@opentelemetry/sdk-node'); \
 #           const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node'); \
 #           const { resourceFromAttributes } = require('@opentelemetry/resources'); \
@@ -274,7 +279,7 @@
 #           ENV NODE_ENV=production
 #           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-#     # --- DOCKER COMPOSE ---
+#     # --- 8. DOCKER COMPOSE ---
 #     - name: Create Docker Compose
 #       copy:
 #         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -309,6 +314,7 @@
 #               environment:
 #                 - DD_API_KEY={{ datadog_api_key }}
 #                 - DD_APP_KEY={{ datadog_app_key }}
+#                 - DD_SITE={{ datadog_site }}
 #                 - AIKIDO_TOKEN={{ aikido_token }}
 #               volumes:
 #                 - /opt/security-metrics/data:/opt/security-metrics/data
@@ -354,7 +360,7 @@
 #             prometheus_data:
 #             grafana_data:
 
-#     # --- SCENARIO SCRIPT ---
+#     # --- 9. SCENARIO SCRIPT ---
 #     - name: Create Scenario Script
 #       copy:
 #         dest: "/home/ubuntu/run_scenario.sh"
@@ -384,17 +390,17 @@
 #           fi
 
 #           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
-
-#           echo "🔎 Running Trivy Container Scan..."
-#           # Scan the image, ignore unfixed issues to keep noise down, output to JSON
-#           trivy image --format json --output /opt/security-metrics/data/trivy-results.json --ignore-unfixed juice-shop-juice-shop:latest || true
           
+#           # Trivy Scan on Switch
+#           echo "🔎 Running Trivy Container Scan..."
+#           trivy image --format json --output /opt/security-metrics/data/trivy-results.json --ignore-unfixed juice-shop-juice-shop:latest || true
+
 #           docker compose up -d --remove-orphans
           
 #           echo "⏳ Waiting for Juice Shop..."
 #           count=0
-#           max_retries=30
-#           until curl -s -o /dev/null http://localhost:3000 || [ $count -eq $max_retries ]; do
+#           max_retries=60
+#           until curl -sf -o /dev/null http://localhost:3000 || [ $count -eq $max_retries ]; do
 #             echo "   ... App not ready yet ($((count+1))/$max_retries)"
 #             sleep 2
 #             ((count++))
@@ -404,6 +410,7 @@
 #              echo "❌ Timed out."
 #              exit 1
 #           fi
+          
 #           echo "✅ Juice Shop is UP!"
 #         owner: ubuntu
 
@@ -443,8 +450,7 @@
         update_cache: yes
         state: present
 
-    # --- NEW: Install Trivy ---
-    - name: Install Trivy
+    - name: Install Trivy (Container Scanner)
       shell: |
         if ! command -v trivy &> /dev/null; then
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
@@ -494,12 +500,12 @@
                   endpoint: 0.0.0.0:4318
       notify: Restart DataDog Agent
 
-    # --- 3. DIRECTORIES ---
+    # --- 3. DIRECTORIES & PERMISSIONS ---
     - name: Create directories
       file:
         path: "{{ item }}"
         state: directory
-        mode: '0777'
+        mode: '0777'       # Full write access for logs/json
         owner: ubuntu
         group: ubuntu
         recurse: yes
@@ -512,7 +518,6 @@
         - "{{ exporter_dir }}"
         - "/opt/security-metrics/data"
 
-    # --- 4. DATA FILE ---
     - name: Initialize Scenario Info File
       file:
         path: "/opt/security-metrics/data/scenario_info.json"
@@ -521,7 +526,7 @@
         owner: ubuntu
         group: ubuntu
 
-    # --- 5. DEPLOY FILES ---
+    # --- 4. DEPLOY FILES ---
     - name: Copy Enhanced Metrics Exporter
       copy:
         src: files/enhanced_metrics_exporter_otel.py
@@ -536,7 +541,7 @@
         mode: '0666'
         owner: ubuntu
 
-    # --- 6. CONFIGS ---
+    # --- 5. CONFIG FILES ---
     - name: Configure Grafana Provider
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -615,7 +620,7 @@
                 exporters: [otlp]
         mode: '0644'
 
-    # --- 7. BUILD PREP ---
+    # --- 6. EXPORTER & APP SETUP ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -635,7 +640,7 @@
           WORKDIR /app
           COPY exporter.py .
           ENV PYTHONUNBUFFERED=1
-          # ADDED: 'requests' is needed for the API integration
+          # ADDED: Requests for API, Docker for Logs
           RUN pip install prometheus_client docker requests
           CMD ["python", "exporter.py"]
 
@@ -700,7 +705,7 @@
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 8. DOCKER COMPOSE ---
+    # --- 7. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -781,7 +786,7 @@
             prometheus_data:
             grafana_data:
 
-    # --- 9. SCENARIO SCRIPT ---
+    # --- 8. SCENARIO SCRIPT ---
     - name: Create Scenario Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
@@ -812,10 +817,10 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          # Trivy Scan on Switch
+          # TRIVY SCAN
           echo "🔎 Running Trivy Container Scan..."
           trivy image --format json --output /opt/security-metrics/data/trivy-results.json --ignore-unfixed juice-shop-juice-shop:latest || true
-
+          
           docker compose up -d --remove-orphans
           
           echo "⏳ Waiting for Juice Shop..."
@@ -834,12 +839,6 @@
           
           echo "✅ Juice Shop is UP!"
         owner: ubuntu
-
-    - name: Launch Baseline Scenario
-      shell: "/home/ubuntu/run_scenario.sh baseline"
-      register: deploy_output
-      async: 1200 
-      poll: 10
 
   handlers:
     - name: Restart DataDog Agent
