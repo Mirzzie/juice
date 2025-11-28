@@ -443,13 +443,43 @@
     juice_shop_version: "master"
 
   tasks:
-    # --- 1. SYSTEM SETUP ---
+    # --- 1. SYSTEM SETUP & SWAP MEMORY (CRITICAL FIX) ---
     - name: Update APT and install Docker deps
       apt:
         name: [curl, wget, git, unzip, jq, python3-pip, python3-venv, apache2-utils]
         update_cache: yes
         state: present
 
+    - name: Check if swap file exists
+      stat:
+        path: /swapfile
+      register: swap_file
+
+    - name: Create swap file (Prevent Build Crashes)
+      command: fallocate -l 2G /swapfile
+      when: not swap_file.stat.exists
+
+    - name: Set permissions on swap file
+      file:
+        path: /swapfile
+        mode: '0600'
+      when: not swap_file.stat.exists
+
+    - name: Format swap file
+      command: mkswap /swapfile
+      when: not swap_file.stat.exists
+
+    - name: Enable swap
+      command: swapon /swapfile
+      when: not swap_file.stat.exists
+
+    - name: Persist swap in fstab
+      lineinfile:
+        path: /etc/fstab
+        line: '/swapfile none swap sw 0 0'
+        state: present
+
+    # --- 2. INSTALL TOOLS ---
     - name: Install Trivy
       shell: |
         if ! command -v trivy &> /dev/null; then
@@ -473,7 +503,7 @@
         groups: docker
         append: yes
 
-    # --- 2. DATADOG AGENT ---
+    # --- 3. DATADOG AGENT ---
     - name: Install DataDog Agent
       shell: >
         DD_API_KEY={{ datadog_api_key }} DD_SITE={{ datadog_site }} DD_APM_INSTRUMENTATION_ENABLED=host 
@@ -500,7 +530,7 @@
                   endpoint: 0.0.0.0:4318
       notify: Restart DataDog Agent
 
-    # --- 3. DIRECTORIES ---
+    # --- 4. DIRECTORIES ---
     - name: Create directories
       file:
         path: "{{ item }}"
@@ -526,7 +556,7 @@
         owner: ubuntu
         group: ubuntu
 
-    # --- 4. DEPLOY FILES ---
+    # --- 5. DEPLOY FILES ---
     - name: Copy Enhanced Metrics Exporter
       copy:
         src: files/enhanced_metrics_exporter_otel.py
@@ -541,7 +571,7 @@
         mode: '0666'
         owner: ubuntu
 
-    # --- 5. CONFIG FILES ---
+    # --- 6. CONFIG FILES ---
     - name: Configure Grafana Provider
       copy:
         dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/dashboard.yaml"
@@ -620,7 +650,7 @@
                 exporters: [otlp]
         mode: '0644'
 
-    # --- 6. JUICE SHOP BUILD PREP ---
+    # --- 7. EXPORTER & APP SETUP ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -704,7 +734,7 @@
           ENV NODE_ENV=production
           CMD ["node", "--require", "./otel-init.js", "build/app"]
 
-    # --- 7. DOCKER COMPOSE ---
+    # --- 8. DOCKER COMPOSE ---
     - name: Create Docker Compose
       copy:
         dest: "{{ juice_shop_dir }}/docker-compose.yml"
@@ -784,7 +814,7 @@
             prometheus_data:
             grafana_data:
 
-    # --- 8. SCENARIO SCRIPT ---
+    # --- 9. SCENARIO SCRIPT ---
     - name: Create Scenario Script
       copy:
         dest: "/home/ubuntu/run_scenario.sh"
@@ -837,16 +867,17 @@
           echo "✅ Juice Shop is UP!"
         owner: ubuntu
 
-    # --- 9. START INITIAL DEPLOYMENT (CORRECT PLACEMENT) ---
-    - name: Ensure all containers are stopped
-      shell: "cd {{ juice_shop_dir }} && docker compose down -v 2>/dev/null || true"
+    # --- 10. START INITIAL DEPLOYMENT ---
+    - name: Prune Docker to free space
+      shell: "docker system prune -a -f --volumes"
 
-    - name: Launch Full Stack
-      # This runs on the EC2 server via Ansible, NOT locally in GitHub Actions
+    - name: Launch Full Stack (Build & Up)
       shell: "cd {{ juice_shop_dir }} && docker compose up -d --build"
       register: compose_output
       async: 1800
       poll: 30
+      environment:
+        COMPOSE_HTTP_TIMEOUT: "180"
 
     - name: Wait for services to be healthy
       pause:
