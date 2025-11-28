@@ -1,76 +1,79 @@
 name: Thesis Verification (Daily + On Deploy)
 
 on:
-    schedule:
-        - cron: "0 4 * * *"
-    workflow_dispatch:
-    workflow_run:
-        workflows: ["DevSecOps CI/CD Pipeline"]
-        types:
-            - completed
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["DevSecOps CI/CD Pipeline"]
+    types:
+      - completed
 
 env:
-    EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
-    EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
+  EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
 jobs:
-    run-attacks:
-        name: Generate Attack Telemetry
-        runs-on: ubuntu-latest
-        if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+  run-attacks:
+    name: Generate Attack Telemetry
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
 
-        steps:
-            - name: Setup Tools
-              run: |
-                  sudo apt-get update && sudo apt-get install -y apache2-utils
-                  mkdir -p ~/.ssh
-                  echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-                  chmod 600 ~/.ssh/id_rsa
-                  ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
+    steps:
+      - name: Setup Tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y apache2-utils
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_INSTANCE_IP" >> ~/.ssh/known_hosts
 
-            - name: Check App Status
-              run: |
-                  if ! curl -s --head "http://${EC2_INSTANCE_IP}:3000" > /dev/null; then
-                    echo "App down, restarting..."
-                    ssh ubuntu@$EC2_INSTANCE_IP "cd /opt/juice-shop && docker compose up -d"
-                    sleep 30
-                  fi
+      - name: Check App Status
+        run: |
+          if ! curl -s --head "http://${EC2_INSTANCE_IP}:3000" > /dev/null; then
+            echo "App down, restarting..."
+            ssh ubuntu@$EC2_INSTANCE_IP "cd /opt/juice-shop && docker compose up -d"
+            sleep 30
+          fi
 
-            # --- SCENARIO 1 ---
-            - name: Scenario 1 - Baseline
-              run: |
-                  ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh baseline"
-                  ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=apple"
-                  # Attack Loop
-                  for i in {1..30}; do 
-                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--"
-                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>"
-                  done
+      # --- SCENARIO 1 ---
+      - name: Scenario 1 - Baseline
+        run: |
+          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh baseline"
+          ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=apple"
+          # Attack Loop
+          for i in {1..30}; do 
+             curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--"
+             curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>"
+          done
 
-            # --- SCENARIO 2 ---
-            - name: Scenario 2 - RASP Detection
-              run: |
-                  ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh detection"
-                  ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=banana"
-                  for i in {1..30}; do 
-                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--"
-                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>"
-                  done
+      # --- RUN SCENARIO 2 (DETECTION) ---
+      - name: Scenario 2 - RASP Detection
+        run: |
+          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh detection"
+          ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=banana"
 
-            # --- SCENARIO 3 ---
-            - name: Scenario 3 - RASP Blocking
-              run: |
-                  ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
-                  ab -n 300 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
+          # Robust Attack Loop
+          for i in {1..30}; do 
+            # Try attack, if it fails (crash), wait 5s and continue
+            curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || sleep 5
+            curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=<script>alert(1)</script>" || sleep 5
+          done
 
-                  for i in {1..30}; do 
-                     curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || true
-                  done
+      # --- SCENARIO 3 ---
+      - name: Scenario 3 - RASP Blocking
+        run: |
+          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
+          ab -n 300 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
 
-                  # Verification
-                  BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
-                  echo "Blocks Found: $BLOCK_COUNT"
-                  if [ "$BLOCK_COUNT" -eq 0 ]; then echo "Warning: No blocks found"; fi
+          for i in {1..30}; do 
+             curl -s -o /dev/null "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q='%20OR%201=1--" || true
+          done
 
-            - name: Experiment Complete
-              run: echo "Data Generated."
+          # Verification
+          BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
+          echo "Blocks Found: $BLOCK_COUNT"
+          if [ "$BLOCK_COUNT" -eq 0 ]; then echo "Warning: No blocks found"; fi
+
+      - name: Experiment Complete
+        run: echo "Data Generated."
