@@ -1,0 +1,71 @@
+{
+  "uid": "thesis-main",
+  "title": "Thesis: IAST vs RASP (Comprehensive Analysis)",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "type": "stat",
+      "title": "🛡️ RASP BLOCK RATE",
+      "targets": [{ "expr": "(sum(increase(thesis_rasp_blocks_total[1h])) / (sum(increase(thesis_rasp_detections_total[1h])) + sum(increase(thesis_rasp_blocks_total[1h])) + 0.001)) * 100", "legendFormat": "Block Rate" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 90 }] }, "unit": "percent", "max": 100 } }
+    },
+    {
+      "id": 2,
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "type": "stat",
+      "title": "🕵️ IAST FINDINGS (API Verified)",
+      "targets": [{ "expr": "sum(thesis_iast_api_vulns)", "legendFormat": "Vulnerabilities" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } } }
+    },
+    {
+      "id": 3,
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "type": "stat",
+      "title": "⚡ LATENCY",
+      "targets": [{ "expr": "thesis_request_latency_ms", "legendFormat": "Avg Latency" }],
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 200 }] } } }
+    },
+    {
+      "id": 4,
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 4 },
+      "type": "timeseries",
+      "title": "⚔️ ATTACK TIMELINE",
+      "targets": [
+        { "expr": "increase(thesis_iast_detections_total{source='log'}[1m])", "legendFormat": "IAST (Log)", "refId": "A" },
+        { "expr": "increase(thesis_rasp_blocks_total[1m])", "legendFormat": "RASP Block", "refId": "B" },
+        { "expr": "increase(thesis_rasp_detections_total[1m])", "legendFormat": "RASP Detect", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 3, "fillOpacity": 20, "drawStyle": "line" } } }
+    },
+    {
+      "id": 5,
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 4 },
+      "type": "piechart",
+      "title": "🔍 IAST BREAKDOWN (CWE)",
+      "targets": [{ "expr": "sum by (vuln_type) (thesis_iast_api_vulns)", "legendFormat": "{{vuln_type}}", "refId": "A" }],
+      "options": { "pieType": "donut", "legend": { "displayMode": "table", "placement": "right" } }
+    },
+    {
+      "id": 50,
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 14 },
+      "type": "bargauge",
+      "title": "📦 TRIVY CONTAINER SCAN",
+      "targets": [{ "expr": "thesis_trivy_vulns_total", "legendFormat": "{{severity}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "options": { "orientation": "horizontal", "displayMode": "gradient" }
+    },
+    {
+      "id": 7,
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 14 },
+      "type": "stat",
+      "title": "CURRENT SCENARIO",
+      "targets": [{ "expr": "thesis_scenario_id", "legendFormat": "Scenario" }],
+      "options": { "colorMode": "background" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "BASELINE", "color": "blue" }, "2": { "text": "DETECTION", "color": "orange" }, "3": { "text": "BLOCKING", "color": "green" } } }] } }
+    }
+  ]
+}
