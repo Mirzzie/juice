@@ -176,3 +176,24 @@ jobs:
           -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
           -e "datadog_site='us5.datadoghq.com'" \
           -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
+      # --- 10. START INITIAL DEPLOYMENT ---
+      - name: Ensure all containers are stopped
+        run: |
+          cd {{ juice_shop_dir }} && docker compose down -v 2>/dev/null || true
+        shell: bash
+
+      - name: Launch Full Stack
+        # This builds the images and starts the containers
+        run: |
+          cd {{ juice_shop_dir }} && docker compose up -d --build
+        shell: bash
+
+      - name: Wait for services to be healthy
+        run: |
+          sleep 30
+        shell: bash
+
+      - name: Launch Baseline Scenario
+        run: |
+          /home/ubuntu/run_scenario.sh baseline
+        shell: bash
