@@ -450,7 +450,7 @@
         update_cache: yes
         state: present
 
-    - name: Install Trivy (Container Scanner)
+    - name: Install Trivy
       shell: |
         if ! command -v trivy &> /dev/null; then
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
@@ -500,12 +500,12 @@
                   endpoint: 0.0.0.0:4318
       notify: Restart DataDog Agent
 
-    # --- 3. DIRECTORIES & PERMISSIONS ---
+    # --- 3. DIRECTORIES ---
     - name: Create directories
       file:
         path: "{{ item }}"
         state: directory
-        mode: '0777'       # Full write access for logs/json
+        mode: '0777'
         owner: ubuntu
         group: ubuntu
         recurse: yes
@@ -620,7 +620,7 @@
                 exporters: [otlp]
         mode: '0644'
 
-    # --- 6. EXPORTER & APP SETUP ---
+    # --- 6. JUICE SHOP BUILD PREP ---
     - name: Clean Juice Shop Dir
       file:
         path: "{{ juice_shop_dir }}"
@@ -640,7 +640,6 @@
           WORKDIR /app
           COPY exporter.py .
           ENV PYTHONUNBUFFERED=1
-          # ADDED: Requests for API, Docker for Logs
           RUN pip install prometheus_client docker requests
           CMD ["python", "exporter.py"]
 
@@ -740,7 +739,6 @@
               environment:
                 - DD_API_KEY={{ datadog_api_key }}
                 - DD_APP_KEY={{ datadog_app_key }}
-                - DD_SITE={{ datadog_site }}
                 - AIKIDO_TOKEN={{ aikido_token }}
               volumes:
                 - /opt/security-metrics/data:/opt/security-metrics/data
@@ -817,7 +815,6 @@
 
           echo "{\"current_scenario\": \"$SCENARIO_NAME\", \"scenario_id\": $SCENARIO_ID}" > /opt/security-metrics/data/scenario_info.json
           
-          # TRIVY SCAN
           echo "🔎 Running Trivy Container Scan..."
           trivy image --format json --output /opt/security-metrics/data/trivy-results.json --ignore-unfixed juice-shop-juice-shop:latest || true
           
@@ -839,6 +836,25 @@
           
           echo "✅ Juice Shop is UP!"
         owner: ubuntu
+
+    # --- 9. START INITIAL DEPLOYMENT (CORRECT PLACEMENT) ---
+    - name: Ensure all containers are stopped
+      shell: "cd {{ juice_shop_dir }} && docker compose down -v 2>/dev/null || true"
+
+    - name: Launch Full Stack
+      # This runs on the EC2 server via Ansible, NOT locally in GitHub Actions
+      shell: "cd {{ juice_shop_dir }} && docker compose up -d --build"
+      register: compose_output
+      async: 1800
+      poll: 30
+
+    - name: Wait for services to be healthy
+      pause:
+        seconds: 30
+
+    - name: Launch Baseline Scenario
+      shell: "/home/ubuntu/run_scenario.sh baseline"
+      register: deploy_output
 
   handlers:
     - name: Restart DataDog Agent
