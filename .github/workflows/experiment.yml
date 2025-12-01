@@ -12,6 +12,7 @@ on:
 env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  SSH_USER: ${{secrets.SSH_USER}}
 
 jobs:
   run-attacks:
@@ -32,14 +33,14 @@ jobs:
         run: |
           if ! curl -s --head "http://${EC2_INSTANCE_IP}:3000" > /dev/null; then
             echo "App down, restarting..."
-            ssh ubuntu@$EC2_INSTANCE_IP "cd /opt/juice-shop && docker compose up -d"
+            ssh @$EC2_INSTANCE_IP "cd /opt/juice-shop && docker compose up -d"
             sleep 30
           fi
 
       # --- SCENARIO 1 ---
       - name: Scenario 1 - Baseline
         run: |
-          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh baseline"
+          ssh $SSH_USER@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh baseline"
           ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=apple"
           # Attack Loop
           for i in {1..30}; do 
@@ -50,7 +51,7 @@ jobs:
       # --- RUN SCENARIO 2 (DETECTION) ---
       - name: Scenario 2 - RASP Detection
         run: |
-          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh detection"
+          ssh $SSH_USER@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh detection"
           ab -n 100 -c 5 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=banana"
 
           # Robust Attack Loop
@@ -63,7 +64,7 @@ jobs:
       # --- SCENARIO 3 ---
       - name: Scenario 3 - RASP Blocking
         run: |
-          ssh ubuntu@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
+          ssh SSH_USER@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
           ab -n 300 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
 
           for i in {1..30}; do 
@@ -71,7 +72,7 @@ jobs:
           done
 
           # Verification
-          BLOCK_COUNT=$(ssh ubuntu@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
+          BLOCK_COUNT=$(ssh SSH_USER@$EC2_INSTANCE_IP "docker logs juice-shop 2>&1 | grep -c 'Zen has blocked' || echo 0")
           echo "Blocks Found: $BLOCK_COUNT"
           if [ "$BLOCK_COUNT" -eq 0 ]; then echo "Warning: No blocks found"; fi
 

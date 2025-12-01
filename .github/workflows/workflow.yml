@@ -8,6 +8,7 @@ on:
 env:
   EC2_INSTANCE_IP: ${{ secrets.EC2_INSTANCE_IP }}
   EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+  SSH_USER: ${{secrets.SSH_USER}}
 
 jobs:
   sast:
@@ -15,15 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Run Semgrep
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep and Upload to Dashboard
         run: |
-          pip install semgrep
-          semgrep scan --config=auto --json --output=semgrep-results.json || true
+          semgrep scan \
+            --config=auto \
+            --publish-token="${{ secrets.SEMGREP_APP_TOKEN }}" \
+            --publish-deployment="github-actions" \
+            --json --output=semgrep-results.json || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep-results.json
-
   deploy:
     name: Deploy and Config
     runs-on: ubuntu-latest
@@ -41,11 +49,11 @@ jobs:
       - name: Create Inventory
         run: |
           echo "[juiceshop]" > inventory.ini
-          echo "$EC2_INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+          echo "$EC2_INSTANCE_IP ansible_user=$SSH_USER ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
       - name: Run Ansible Playbook
         run: |
           ansible-playbook -i inventory.ini ansible/playbook.yml \
           -e "datadog_api_key=${{ secrets.DATADOG_API_KEY }}" \
           -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
-          -e "datadog_site='us5.datadoghq.com'" \
+          -e "datadog_site=${{ secrets.DATADOG_SITE }}" \
           -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
