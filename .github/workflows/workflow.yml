@@ -32,6 +32,7 @@ jobs:
         with:
           name: semgrep-results
           path: semgrep-results.json
+
   deploy:
     name: Deploy and Config
     runs-on: ubuntu-latest
@@ -57,3 +58,52 @@ jobs:
           -e "datadog_app_key=${{ secrets.DATADOG_APP_KEY }}" \
           -e "datadog_site=${{ secrets.DATADOG_SITE }}" \
           -e "aikido_token=${{ secrets.ZEN_FIREWALL_TOKEN }}"
+
+  dast:
+    name: DAST - OWASP ZAP Baseline Scan
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Wait for Application Startup
+        run: |
+          echo "Waiting for Juice Shop to be ready..."
+          for i in {1..30}; do
+            if curl -s --head --fail "http://${{ secrets.EC2_INSTANCE_IP }}:3000" > /dev/null; then
+              echo "Application is ready!"
+              break
+            fi
+            echo "Attempt $i/30 - waiting 10s..."
+            sleep 10
+          done
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://${{ secrets.EC2_INSTANCE_IP }}:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j --auto"
+          allow_issue_writing: false
+        continue-on-error: true
+
+      - name: Upload ZAP HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-report
+          path: report_html.html
+        if: always()
+
+      - name: Upload ZAP JSON Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-json
+          path: report_json.json
+        if: always()
+
+      - name: Upload ZAP Markdown Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-markdown
+          path: report_md.md
+        if: always()
