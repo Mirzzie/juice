@@ -14,19 +14,15 @@ jobs:
   sast:
     name: SAST - Semgrep Analysis
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install Semgrep
-        run: pip install semgrep
-
-      - name: Run Semgrep and Upload to Dashboard
-        run: |
-          semgrep scan \
-            --config=auto \
-            --publish-token="${{ secrets.SEMGREP_APP_TOKEN }}" \
-            --publish-deployment="github-actions" \
-            --json --output=semgrep-results.json || true
+      - name: Run Semgrep CI
+        run: semgrep ci --json --output=semgrep-results.json || true
 
       - uses: actions/upload-artifact@v4
         with:
