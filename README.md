@@ -1,7 +1,7 @@
 # 🛡️ IAST vs RASP: A Comparative Security Analysis
 
 > **MSc Cybersecurity Thesis Project**  
-> Empirical comparison of Interactive Application Security Testing (IAST) vs Runtime Application Security Protection (RASP) using DataDog and Aikido Zen.
+>  Comparison of Interactive Application Security Testing (IAST) vs Runtime Application Security Protection (RASP) using DataDog and Aikido Zen.
 
 ---
 
