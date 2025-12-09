@@ -501,17 +501,3 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 - [Prometheus](https://prometheus.io/) - Metrics collection
 
 ---
-
-## 📬 Contact
-
-**Author:** [Your Name]  
-**Email:** [your.email@university.edu]  
-**Supervisor:** [Supervisor Name]  
-**Institution:** [University Name]  
-**Program:** MSc Cybersecurity
-
----
-
-<p align="center">
-  <sub>Built with ☕ and 🛡️ for security research</sub>
-</p>
