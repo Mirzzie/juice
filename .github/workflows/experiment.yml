@@ -64,7 +64,7 @@ jobs:
       # --- SCENARIO 3 ---
       - name: Scenario 3 - RASP Blocking
         run: |
-          ssh SSH_USER@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
+          ssh $SSH_USER@$EC2_INSTANCE_IP "/home/ubuntu/run_scenario.sh blocking"
           ab -n 300 -c 10 "http://${EC2_INSTANCE_IP}:3000/rest/products/search?q=orange"
 
           for i in {1..30}; do 
